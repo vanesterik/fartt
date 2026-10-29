@@ -14,7 +14,7 @@ The name **Fartt** is an abbreviation play on the title "Financial Analysis Real
 
 ## Project Status
 
-This is a solo research project. The plan is in the PRD (`docs/product/stock-analysis-prd.md`, being written), and the work is delivered in epics on the [project board](https://github.com/users/vanesterik/projects/3), starting with [Data Foundation](https://github.com/vanesterik/fartt/issues/88). Epics A to D form the walking skeleton: a full analysis running end to end on one ticker.
+This is a solo research project. The plan is in the [PRD](docs/product/stock-analysis-prd.md), and the work is delivered in epics on the [project board](https://github.com/users/vanesterik/projects/3), starting with [Data Foundation](https://github.com/vanesterik/fartt/issues/88). Epics A to D form the walking skeleton: a full analysis running end to end on one ticker.
 
 The code is being moved over from an earlier direction one story at a time, so parts of it (the ccxt exchange layer, the forecast tools, the model pipeline) are still in the tree until the story that replaces them lands.
 
