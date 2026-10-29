@@ -2,13 +2,11 @@
 
 # Fartt
 
-**Fartt** is an [MCP](https://modelcontextprotocol.io) server that gives an AI agent the tools to trade BTC: market data today, and forecasts from a trained model, portfolio state, server-enforced risk controls and orders as the work progresses. [Claude Code](https://claude.com/claude-code) is the agent and the operator's interface. It stands for **F**inancial **A**nalysis **R**eal **T**ime **T**rading.
+**Fartt** is an [MCP](https://modelcontextprotocol.io) server that gives an AI agent the tools to analyse stocks on Euronext and US exchanges: market data, technical indicators, support and resistance, fundamentals, market context and charts, with a journal that scores every call afterwards. [Claude Code](https://claude.com/claude-code) is the analyst and the operator's interface. It stands for **F**inancial **A**nalysis **R**eal **T**ime **T**rading.
 
 ## Motivation
 
-The motivation for this project is twofold:
-1. To deepen understanding of machine learning techniques in financial analysis.
-2. To develop a potentially revenue-generating trade platform for cryptocurrency markets.
+Fartt is decision support for personal investing: it helps make disciplined decisions about stocks, it doesn't sell signals, and it isn't a product. The agent combines many signals into an informed view rather than trusting a single model, and whether that view has any edge is measured in the journal, not assumed. Paper trading comes first; real money only if the journal shows a real hit rate.
 
 ## Name
 
@@ -16,18 +14,9 @@ The name **Fartt** is an abbreviation play on the title "Financial Analysis Real
 
 ## Project Status
 
-This is a solo research project. It started as a self-built trading platform (a signal model with its own order handling, monitoring and scheduling around it) and has been reshaped into an MCP server operated by an agent: the server owns everything that touches data, the model or money, and Claude Code runs the trading cycle and serves as the operator's interface. The reasoning, the tool surface, the model selection plan and the staged path from paper trading to a small live experiment are in the [PRD](docs/product/mcp-trading-agent-prd.md).
+This is a solo research project. The plan is in the PRD (`docs/product/stock-analysis-prd.md`, being written), and the work is delivered in epics on the [project board](https://github.com/users/vanesterik/projects/3), starting with [Data Foundation](https://github.com/vanesterik/fartt/issues/88). Epics A to D form the walking skeleton: a full analysis running end to end on one ticker.
 
-The work is delivered in epics, in this order:
-
-1. **[Server Foundation](https://github.com/vanesterik/fartt/issues/44)**, done: the exchange layer (ccxt, Bitvavo by default), the candle cache, and the MCP server with `get_candles`.
-2. **[Forecast Tools](https://github.com/vanesterik/fartt/issues/45)**, done: `get_forecast`, `analyze_forecast` and `get_model_info`, first backed by a naive baseline.
-3. **[Paper Trading & Risk](https://github.com/vanesterik/fartt/issues/46)**: the portfolio, server-enforced risk limits, simulated orders and stop-losses, a kill switch and a decision journal, with orders approved by hand.
-4. **[Model Selection](https://github.com/vanesterik/fartt/issues/47)**: screening the MLP, CNN, GRU, N-BEATS and a time-series transformer, plus foundation models, against naive baselines, then a walk-forward backtest after costs.
-5. **[Unattended Operation](https://github.com/vanesterik/fartt/issues/48)**: paper trading without approvals.
-6. **[Live Trading](https://github.com/vanesterik/fartt/issues/49)**: a small live experiment, first with approvals.
-
-What works today: `fartt download` fills a local candle cache, and the candidate models are trained and evaluated in the notebooks. A Claude Code session in this directory can fetch the latest candles through `get_candles`, a forecast of the next candle's return through `get_forecast`, that forecast after trading costs through `analyze_forecast`, and what's behind it through `get_model_info`.
+The code is being moved over from an earlier direction one story at a time, so parts of it (the ccxt exchange layer, the forecast tools, the model pipeline) are still in the tree until the story that replaces them lands.
 
 ## Installation
 
@@ -59,41 +48,7 @@ uv run fartt download --market BTC/EUR --interval 1h
 
 There is no `train` command. Training and evaluation run from the notebooks, one per candidate architecture: `notebooks/2.0-kve-data-analysis-mlp.ipynb` (MLP) and `notebooks/2.1-kve-data-analysis-cnn.ipynb` (CNN). Each loads the cached data, computes the target (the candle return: the signed percent change as a fraction), builds sliding lag windows with a chronological 60/20/20 train/val/test split, fits its model (see [Project Status](#project-status)), and reports directional accuracy, RMSE and MAE. Neither saves a checkpoint yet.
 
-Run `uv run fartt --help` for the full set of options. What comes next is in the [PRD](docs/product/mcp-trading-agent-prd.md) and the epics above.
-
-## How a trading cycle works
-
-Once the later epics land, a `/loop` in a Claude Code session runs one cycle per candle interval. The agent fetches the latest candles, gets a forecast and its analysis after costs, checks the portfolio and the risk limits, then holds or proposes an order, and records its decision with its reasoning either way. The server enforces the risk limits, not the agent: it rejects any order that breaks them, and the agent can read the limits but not change them. Today `get_candles`, `get_forecast`, `analyze_forecast` and `get_model_info` exist; the other tools are planned (see [PRD](docs/product/mcp-trading-agent-prd.md) §5 and §6).
-
-```mermaid
-sequenceDiagram
-    participant Cycle as /loop (Claude Code)
-    participant Agent
-    participant Server as fartt MCP server
-    participant Exchange
-
-    Cycle->>Agent: run the trading-cycle prompt
-    Agent->>Server: get_candles
-    Server->>Exchange: fetch closed candles
-    Server-->>Agent: latest candles, is_current
-    Agent->>Server: get_forecast
-    Agent->>Server: analyze_forecast
-    Agent->>Server: get_model_info
-    Agent->>Server: get_portfolio, get_risk_status (planned)
-    alt the forecast clears the threshold after costs
-        Agent->>Server: propose_order, place_order (planned)
-        Note over Agent,Server: stages 1 and 3: the operator approves each order in Claude Code
-        Server->>Server: check against the risk limits
-        alt paper stages
-            Server->>Server: simulate the fill and the stop-loss
-        else live stages
-            Server->>Exchange: place the order and its stop-loss
-        end
-    else
-        Note over Agent: hold
-    end
-    Agent->>Server: record_decision (planned)
-```
+Run `uv run fartt --help` for the full set of options.
 
 ## Project Structure
 
@@ -108,7 +63,7 @@ The project follows the [cookiecutter data science project template](https://dri
     ├── artifacts          <- Versioned, trained model checkpoints.
     │
     ├── docs
-    │   ├── product        <- The PRD for the MCP trading agent.
+    │   ├── product        <- The PRD for the stock analysis MCP.
     │   ├── specs          <- Design docs for individual pieces of work.
     │   └── plans          <- Implementation plans.
     │
@@ -160,25 +115,6 @@ The project follows the [cookiecutter data science project template](https://dri
         └── visualization  <- Matplotlib/seaborn plotting helpers for notebooks.
 ```
 
-## References
-
-### Model selection (epic B)
-
-Papers grounding the candidate architectures that epic B screens (see the [PRD](docs/product/mcp-trading-agent-prd.md) §5):
-
-- Oreshkin, B. N., Carpov, D., Chapados, N., & Bengio, Y. (2020). [N-BEATS: Neural basis expansion analysis for interpretable time series forecasting](https://arxiv.org/abs/1905.10437). *ICLR 2020.* The doubly-residual, stacked backcast/forecast architecture behind N-BEATS, one of the five candidates being screened (rebuilt fresh, not restored from the earlier retired implementation). Note the original paper is a point-forecast architecture (trained with MAPE/SMAPE/MASE losses on the M4 competition) — it doesn't cover uncertainty estimation; a prior attempt at this project added a probabilistic `(mu, log_sigma)` head on top of the backbone, discussed below.
-- Seitzer, M., Tavakoli, A., Antic, D., & Martius, G. (2022). [On the Pitfalls of Heteroscedastic Uncertainty Estimation with Probabilistic Neural Networks](https://arxiv.org/abs/2203.09168). *ICLR 2022.* Source of the beta-NLL loss used in the earlier N-BEATS prototype's confidence head, meant to fix a variance-collapse failure where plain Gaussian NLL let the model shrink predicted confidence to nearly the same value for every candle instead of learning which ones were actually harder to predict — a 130-run check found it didn't reliably work. Kept here as the historical record of what was tried; whether confidence estimation is worth reattempting for any of the five current candidates is an open question in the PRD, not a settled part of the rebuild.
-
-### Risk controls (epic D)
-
-Sources behind the server-enforced risk controls epic D builds: the kill switch, the daily loss limit, position sizing and stop-losses (see the [PRD](docs/product/mcp-trading-agent-prd.md) §5 and §9). Unlike the model papers, this is a mix of regulation and academic finance rather than a single research lineage, and some practice (fixed-% position sizing, paper trading before going live) remains practitioner convention rather than citable work:
-
-- U.S. Securities and Exchange Commission (2010). [Risk Management Controls for Brokers or Dealers with Market Access](https://www.sec.gov/files/rules/final/2010/34-63241-secg.htm), Rule 15c3-5. The regulatory origin of "kill switch" as a formal requirement — automated controls able to immediately halt an algorithm's order flow.
-- Grossman, S. J., & Zhou, Z. (1993). [Optimal Investment Strategies for Controlling Drawdowns](https://onlinelibrary.wiley.com/doi/abs/10.1111/j.1467-9965.1993.tb00044.x). *Mathematical Finance*, 3, 241–276. Foundational work on constraining a strategy to never lose more than a fixed fraction of its peak value — the basis for a loss limit that halts trading.
-- Kelly, J. L. (1956). [A New Interpretation of Information Rate](https://onlinelibrary.wiley.com/doi/abs/10.1002/j.1538-7305.1956.tb03809.x). *Bell System Technical Journal*, 35, 917–926. One of the classic position-sizing models.
-- Moskowitz, T. J., Ooi, Y. H., & Pedersen, L. H. (2012). [Time Series Momentum](https://www.sciencedirect.com/science/article/pii/S0304405X11002613). *Journal of Financial Economics*. Scales each position to a target ex-ante volatility, the basis of volatility-based sizing.
-- Kaminski, K. M., & Lo, A. W. (2014). [When Do Stop-Loss Rules Stop Losses?](https://www.sciencedirect.com/science/article/abs/pii/S138641811300030X) *Journal of Financial Markets*, 18, 234–254. Analytical framework for when a stop-loss rule helps vs. hurts expected returns.
-
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
@@ -187,4 +123,3 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - [Rick and Morty](https://www.imdb.com/title/tt2861424/)
 - [Cookiecutter Data Science](https://drivendata.github.io/cookiecutter-data-science/)
-- [Mermaid](https://mermaid-js.github.io/mermaid/#/)
