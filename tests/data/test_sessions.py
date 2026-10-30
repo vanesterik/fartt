@@ -3,9 +3,11 @@ from datetime import UTC, date, datetime
 import pytest
 
 from fartt.data import (
+    MarketStatus,
     UnknownTicker,
     UnsupportedExchange,
     calendar_for,
+    market_status,
     missing_sessions,
     newest_closed_session,
     normalise_ticker,
@@ -94,3 +96,31 @@ def test_dates_before_the_calendar_starts_are_not_checked() -> None:
 
     assert gaps
     assert min(gaps).year >= 2000
+
+
+def test_market_status_during_the_session() -> None:
+    assert market_status("XNYS", utc(2026, 10, 29, 18, 0)) == MarketStatus(True, None)
+
+
+def test_market_status_after_the_close() -> None:
+    assert market_status("XNYS", utc(2026, 10, 29, 20, 30)) == MarketStatus(
+        False, utc(2026, 10, 30, 13, 30)
+    )
+
+
+def test_market_status_on_a_weekend() -> None:
+    # US daylight saving time ends on 2026-11-01, so Monday opens an hour later.
+    assert market_status("XNYS", utc(2026, 10, 31, 12, 0)) == MarketStatus(
+        False, utc(2026, 11, 2, 14, 30)
+    )
+
+
+def test_market_status_on_a_holiday() -> None:
+    # Thanksgiving.
+    assert market_status("XNYS", utc(2026, 11, 26, 15, 0)) == MarketStatus(
+        False, utc(2026, 11, 27, 14, 30)
+    )
+
+
+def test_market_status_in_amsterdam() -> None:
+    assert market_status("XAMS", utc(2026, 10, 29, 10, 0)).open is True

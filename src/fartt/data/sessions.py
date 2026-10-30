@@ -1,7 +1,8 @@
 import re
 from collections.abc import Sequence
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import cache
+from typing import NamedTuple
 
 import exchange_calendars as xcals
 
@@ -104,3 +105,22 @@ def missing_sessions(exchange: str, dates: Sequence[date]) -> list[date]:
         for session in calendar.sessions_in_range(start, end)
         if session.date() not in present
     ]
+
+
+class MarketStatus(NamedTuple):
+    open: bool
+    next_open: datetime | None  # UTC; None while the exchange is open
+
+
+def market_status(exchange: str, now: datetime) -> MarketStatus:
+    """
+    Whether `exchange` is trading at `now` (timezone-aware), and if not,
+    when its next session opens. Weekends, holidays and early closes come
+    from the exchange calendar.
+
+    """
+    calendar = _calendar(exchange)
+    minute = now.replace(second=0, microsecond=0)
+    if calendar.is_open_on_minute(minute):
+        return MarketStatus(True, None)
+    return MarketStatus(False, calendar.next_open(minute).astimezone(UTC))
