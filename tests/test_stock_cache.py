@@ -1,10 +1,20 @@
 import threading
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from fartt.data import Candle, Dividend, History, Listing, ProviderUnavailable, Split
+from fartt import stock_cache
+from fartt.data import (
+    Candle,
+    Dividend,
+    History,
+    Listing,
+    ProviderUnavailable,
+    Split,
+    UnsupportedExchange,
+)
 from fartt.stock_cache import StockCache, UpdateResult
 from tests.fakes import FakeProvider, stock_candle
 
@@ -217,14 +227,14 @@ def test_a_torn_last_line_is_healed_before_updating(
     assert [c.date for c in cache.latest("AAPL", 2)] == DAYS[2:]
 
 
-def test_a_whole_last_line_missing_its_newline_is_kept(
+def test_a_last_line_missing_its_newline_is_refetched(
     cache: StockCache, provider: FakeProvider, tmp_path: Path
 ) -> None:
     filled(cache, provider)
     path = tmp_path / "stocks" / "AAPL" / "candles.csv"
     path.write_text(path.read_text().rstrip("\n"))
 
-    assert cache.update("AAPL") == UpdateResult(1, None, True)
+    assert cache.update("AAPL") == UpdateResult(2, None, True)
     assert [c.date for c in cache.latest("AAPL", 10)] == DAYS
 
 
@@ -247,3 +257,86 @@ def test_an_empty_refetch_appends_nothing(
     provider.histories["AAPL"] = History([], [], [])
 
     assert cache.update("AAPL") == UpdateResult(0, None, True)
+
+
+def test_an_interrupted_split_rebuild_is_redone(
+    cache: StockCache, provider: FakeProvider, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    filled(cache, provider)
+    provider.histories["AAPL"].splits.append(Split(DAYS[3], 4.0))
+    real_replace = stock_cache._replace
+
+    def crash_on_events(path: Path, header: list[str], rows: Any) -> None:
+        if path.name == "events.csv":
+            raise OSError("disk full")
+        real_replace(path, header, rows)
+
+    monkeypatch.setattr(stock_cache, "_replace", crash_on_events)
+    with pytest.raises(OSError):
+        cache.update("AAPL")
+    monkeypatch.setattr(stock_cache, "_replace", real_replace)
+
+    assert (
+        cache.update("AAPL").rebuilt == "split on 2026-10-29 (4.0 new shares per old)"
+    )
+    assert cache.events("AAPL")[1] == [Split(DAYS[3], 4.0)]
+
+
+def test_a_missing_listing_is_restored(
+    cache: StockCache, provider: FakeProvider, tmp_path: Path
+) -> None:
+    filled(cache, provider)
+    cache.update("AAPL")
+    (tmp_path / "stocks" / "AAPL" / "listing.json").unlink()
+
+    cache.update("AAPL")
+
+    assert cache.listing("AAPL") == AAPL
+    assert cache.update("AAPL").fetched is False
+
+
+def test_a_dividend_ahead_of_its_candle_is_recorded_once(
+    cache: StockCache, provider: FakeProvider
+) -> None:
+    filled(cache, provider)
+    # Yahoo has the 10-29 dividend but not yet the 10-29 candle.
+    provider.histories["AAPL"].candles.pop()
+    provider.histories["AAPL"].dividends.append(Dividend(DAYS[3], 0.26))
+
+    for _ in range(3):
+        cache.update("AAPL")
+
+    assert cache.events("AAPL")[0].count(Dividend(DAYS[3], 0.26)) == 1
+
+
+def test_a_late_dividend_on_the_last_cached_date_is_recorded(
+    cache: StockCache, provider: FakeProvider
+) -> None:
+    filled(cache, provider)
+    provider.histories["AAPL"].dividends.append(Dividend(DAYS[2], 0.1))
+
+    cache.update("AAPL")
+
+    assert Dividend(DAYS[2], 0.1) in cache.events("AAPL")[0]
+
+
+def test_an_unterminated_last_line_is_refetched(
+    cache: StockCache, provider: FakeProvider, tmp_path: Path
+) -> None:
+    filled(cache, provider)
+    cache.update("AAPL")
+    path = tmp_path / "stocks" / "AAPL" / "candles.csv"
+    # A kill cut the volume short: the line still parses, but is wrong.
+    path.write_text(path.read_text().rstrip("\n").rsplit(",", 1)[0] + ",12")
+
+    provider.now = datetime(2026, 10, 30, 21, 0, tzinfo=UTC)
+    cache.update("AAPL")
+
+    assert cache.latest("AAPL", 1)[0].volume == 1000.0
+
+
+def test_a_ticker_that_names_no_exchange_is_rejected_by_reads(
+    cache: StockCache,
+) -> None:
+    with pytest.raises(UnsupportedExchange):
+        cache.latest("..", 1)
