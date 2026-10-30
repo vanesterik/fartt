@@ -59,7 +59,7 @@ async def call(cache: StockCache, arguments: dict[str, Any]) -> Any:
 async def test_get_candles_returns_the_newest_closed_sessions(tmp_path: Path) -> None:
     cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
 
-    result = await call(cache, {"ticker": "asml.as", "count": 2})
+    result = await call(cache, {"ticker": " asml.as ", "count": 2})
 
     assert not result.is_error, result.content
     content = result.structured_content
@@ -186,6 +186,36 @@ async def test_an_unreachable_provider_and_no_cache_is_a_tool_error(
 
     assert result.is_error
     assert "unreachable" in result.content[0].text
+
+
+@pytest.mark.anyio
+async def test_a_ticker_without_closed_sessions_is_a_tool_error(
+    tmp_path: Path,
+) -> None:
+    # Listed today: the provider answers, but has no closed session yet.
+    result = await call(cache_for(provider([]), tmp_path), {"ticker": "ASML.AS"})
+
+    assert result.is_error
+    text = result.content[0].text
+    assert "no closed sessions" in text
+    assert "unreachable" not in text
+
+
+@pytest.mark.anyio
+async def test_a_corrupt_cache_is_a_tool_error_for_the_operator(
+    tmp_path: Path,
+) -> None:
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    cache.update("ASML.AS")
+    candles = cache.directory("ASML.AS") / "candles.csv"
+    candles.write_text(candles.read_text().replace("102.0", "x"))
+
+    result = await call(cache, {"ticker": "ASML.AS"})
+
+    assert result.is_error
+    text = result.content[0].text
+    assert "operator" in text
+    assert "ASML.AS" in text
 
 
 @pytest.mark.anyio

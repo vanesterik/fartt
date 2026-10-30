@@ -53,11 +53,11 @@ tasks:
       - uv run pytest; code=$?; [ "$code" = "5" ] && exit 0 || exit "$code"
 
   # The tests marked `network`, which the default suite deselects: the live
-  # exchange test and the end-to-end check of `fartt serve` over stdio
-  # (tests/e2e). They call a live exchange API, so `check` leaves them out:
-  # a gate must not fail because the exchange is down.
+  # Yahoo Finance tests and the end-to-end check of the server over stdio
+  # (tests/e2e). They call Yahoo, so `check` leaves them out: a gate must not
+  # fail because Yahoo is down.
   test:network:
-    desc: Run the tests that call a live exchange API, including the end-to-end server check
+    desc: Run the tests that call Yahoo Finance, including the end-to-end server check
     prefix: test:network
     cmds:
       - uv run pytest -m network
