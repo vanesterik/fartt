@@ -6,7 +6,7 @@ def calculate_trade_returns(
     candle_returns: npt.ArrayLike,
     predicted_candle_returns: npt.ArrayLike | None = None,
     initial_capital: float = 500,
-    cost_pct: float = 0.0025,
+    cost_pct: float = 0.0005,
     slippage_pct: float = 0.0,
     threshold: float | None = None,
     max_holding_period: int | None = None,
@@ -47,7 +47,8 @@ def calculate_trade_returns(
     - initial_capital (float): Starting capital used to compound `profits`
       across sequential trades.
     - cost_pct (float): Trading cost percentage charged on each leg (entry
-      and exit) of a trade. Defaults to Bitvavo's base taker fee (0.25%).
+      and exit) of a trade. Defaults to 0.05%, roughly Interactive Brokers'
+      tiered commission on Euronext.
     - slippage_pct (float): Additional one-way haircut applied on each leg,
       on top of `cost_pct`.
     - threshold (Optional[float]): Minimum absolute signal value required to

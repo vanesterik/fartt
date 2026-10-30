@@ -64,9 +64,8 @@ tasks:
 
   # On-demand counterpart to Dependabot's weekly pull requests
   # (.github/dependabot.yml): direct dependencies with a newer release.
-  # A release that differs only in its local version label is not newer:
-  # torch's Linux wheels on the CPU index are tagged `+cpu` and its macOS
-  # wheels aren't, so `2.14.1` would otherwise always look behind `2.14.1+cpu`.
+  # A release that differs only in its local version label (`+cpu`) is not
+  # newer.
   outdated:
     desc: List direct dependencies that have a newer release
     silent: true
