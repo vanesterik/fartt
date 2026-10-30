@@ -79,11 +79,31 @@ class StockCache:
         """
         ticker = normalise_ticker(ticker)
         calendar_for(ticker)  # an unsupported exchange fails before any I/O
-        with self._lock(ticker, fcntl.LOCK_EX):
-            listing = self._provider.listing(ticker)
-            history = self._provider.history(ticker, None)
-            self._write_all(ticker, listing, history)
-            return UpdateResult(len(history.candles), None, True)
+        with self._lock(ticker, fcntl.LOCK_EX) as directory:
+            candles_path = directory / "candles.csv"
+            _heal_tail(candles_path)
+            last = _last_candle(candles_path)
+            if last is None:
+                return self._rebuild(ticker, reason=None)
+            if (
+                last.date >= self.newest_closed_session(ticker)
+                and (directory / "listing.json").exists()
+            ):
+                return UpdateResult(0, None, False)
+
+            history = self._provider.history(ticker, last.date)
+            reason = _rebuild_reason(last, history)
+            if reason is not None:
+                return self._rebuild(ticker, reason)
+
+            new = [c for c in history.candles if c.date > last.date]
+            _append(candles_path, map(_candle_row, new))
+            newer = History([], history.dividends, history.splits)
+            _append(
+                directory / "events.csv",
+                (row for row in _event_rows(newer) if row[0] > last.date.isoformat()),
+            )
+            return UpdateResult(len(new), None, True)
 
     def latest(self, ticker: str, count: int) -> list[Candle]:
         """Up to `count` of the newest cached candles, oldest first."""
@@ -124,6 +144,12 @@ class StockCache:
             fields = json.loads(path.read_text(encoding="utf-8"))
         return Listing(**fields)
 
+    def _rebuild(self, ticker: str, reason: str | None) -> UpdateResult:
+        listing = self._provider.listing(ticker)
+        history = self._provider.history(ticker, None)
+        self._write_all(ticker, listing, history)
+        return UpdateResult(len(history.candles), reason, True)
+
     @contextmanager
     def _lock(self, ticker: str, operation: int) -> Generator[Path]:
         directory = self.directory(ticker)
@@ -156,6 +182,76 @@ class StockCache:
         temporary = directory / "listing.json.tmp"
         temporary.write_text(json.dumps(listing._asdict()), encoding="utf-8")
         os.replace(temporary, directory / "listing.json")
+
+
+# Prices that differ by less than this (relatively) are the same price.
+_PRICE_TOLERANCE = 1e-6
+
+
+def _rebuild_reason(last: Candle, history: History) -> str | None:
+    # Any change to a cached price rebuilds: a split rescales every earlier
+    # candle, and small-ratio splits sit too close to real revisions for a
+    # threshold to tell them apart. Volume revisions don't count.
+    for split in history.splits:
+        if split.date > last.date:
+            return (
+                f"split on {split.date.isoformat()} ({split.ratio} new shares per old)"
+            )
+    refetched = next((c for c in history.candles if c.date == last.date), None)
+    if refetched is not None and any(
+        abs(new - old) > _PRICE_TOLERANCE * max(abs(old), 1e-12)
+        for new, old in zip(refetched[1:5], last[1:5], strict=True)
+    ):
+        return "last candle amended"
+    return None
+
+
+def _heal_tail(path: Path) -> None:
+    # A hard kill mid-append can leave the file ending mid-line, and a hand
+    # edit can drop the trailing newline; either would corrupt the next
+    # append. A last line that is still a whole header or candle gets its
+    # newline back; anything else is cut, and the update re-fetches it.
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    content = path.read_bytes()
+    ends_with_newline = content.endswith(b"\n")
+    body = content[:-1] if ends_with_newline else content
+    last_line = body.rsplit(b"\n", 1)[-1]
+    if _is_whole_line(last_line.decode("utf-8", errors="replace")):
+        if not ends_with_newline:
+            with path.open("ab") as file:
+                file.write(b"\n")
+        return
+    with path.open("rb+") as file:
+        file.truncate(len(body) - len(last_line))
+
+
+def _is_whole_line(line: str) -> bool:
+    if line == ",".join(CANDLE_COLUMNS):
+        return True
+    fields = line.split(",")
+    if len(fields) != len(CANDLE_COLUMNS):
+        return False
+    try:
+        date.fromisoformat(fields[0])
+        for field in fields[1:]:
+            float(field)
+    except ValueError:
+        return False
+    return True
+
+
+def _last_candle(path: Path) -> Candle | None:
+    if not path.exists():
+        return None
+    with path.open(newline="", encoding="utf-8") as file:
+        rows = deque(csv.DictReader(file), maxlen=1)
+    return _candle(rows[0]) if rows else None
+
+
+def _append(path: Path, rows: Iterable[list[str]]) -> None:
+    with path.open("a", newline="", encoding="utf-8") as file:
+        csv.writer(file, lineterminator="\n").writerows(rows)
 
 
 def _candle(row: dict[str, str]) -> Candle:
