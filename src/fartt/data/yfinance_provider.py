@@ -6,7 +6,7 @@ from typing import Any, Protocol
 
 import pandas as pd
 import yfinance
-from yfinance.exceptions import YFTickerMissingError
+from yfinance.exceptions import YFPricesMissingError, YFTickerMissingError
 
 from fartt.data.provider import ProviderUnavailable, UnknownTicker
 from fartt.data.sessions import calendar_for, newest_closed_session
@@ -70,19 +70,27 @@ class YFinanceProvider:
         window: dict[str, str] = (
             {"period": "max"} if start is None else {"start": start.isoformat()}
         )
-        try:
-            with _translate_errors(ticker):
+        with _translate_errors(ticker):
+            try:
                 frame = self._ticker_factory(ticker).history(
                     **window,
                     interval="1d",
                     auto_adjust=False,
                     actions=True,
                 )
-        except UnknownTicker:
-            if start is None:
-                raise
-            # The ticker exists (it was cached); nothing new since `start`.
-            return History([], [], [])
+            except YFPricesMissingError:
+                if start is None:
+                    raise
+                # No prices in the window: nothing new since `start`. A
+                # missing time zone or HTTP 404 still means the ticker is
+                # gone, and is raised as UnknownTicker.
+                return History([], [], [])
+
+        missing = [c for c in (*_PRICES, "Volume") if c not in frame.columns]
+        if missing and not frame.empty:
+            raise ProviderUnavailable(
+                f"Yahoo's history for '{ticker}' lacks {', '.join(missing)}"
+            )
 
         newest = newest_closed_session(exchange, self._clock())
         candles: list[Candle] = []
@@ -143,16 +151,20 @@ def _positive(value: object) -> float | None:
 
 def _rows(frame: pd.DataFrame) -> Iterator[tuple[date, dict[str, float]]]:
     # Each row's date is the index's date in its own (the exchange's) time
-    # zone, which is the session date. Missing action columns count as 0.
+    # zone, which is the session date. Yahoo sometimes returns two rows for
+    # one session (a midnight row and a later one); the later one wins.
+    # Missing action columns count as 0.
     frame = frame.sort_index()
     index = pd.DatetimeIndex(frame.index)
+    sessions: dict[date, dict[str, float]] = {}
     for position, timestamp in enumerate(index):
         row = {
             str(column): float(value) for column, value in frame.iloc[position].items()
         }
         row.setdefault("Dividends", 0.0)
         row.setdefault("Stock Splits", 0.0)
-        yield timestamp.date(), row
+        sessions[timestamp.date()] = row
+    yield from sessions.items()
 
 
 @contextmanager
