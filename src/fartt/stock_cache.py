@@ -65,6 +65,9 @@ class StockCache:
         self._clock = clock
 
     def directory(self, ticker: str) -> Path:
+        # calendar_for normalises the ticker and rejects any that names no
+        # exchange in the universe (such as ".."), so no path escapes.
+        calendar_for(ticker)
         return self._root / normalise_ticker(ticker)
 
     def newest_closed_session(self, ticker: str) -> date:
@@ -86,9 +89,11 @@ class StockCache:
             if last is None:
                 return self._rebuild(ticker, reason=None)
             if (
-                last.date >= self.newest_closed_session(ticker)
-                and (directory / "listing.json").exists()
+                not (directory / "events.csv").exists()
+                or not (directory / "listing.json").exists()
             ):
+                return self._rebuild(ticker, reason="cache files incomplete")
+            if last.date >= self.newest_closed_session(ticker):
                 return UpdateResult(0, None, False)
 
             history = self._provider.history(ticker, last.date)
@@ -96,13 +101,12 @@ class StockCache:
             if reason is not None:
                 return self._rebuild(ticker, reason)
 
+            # Events first, candles last: the last candle marks how far
+            # the cache is committed, so an interrupted update is redone.
+            events_path = directory / "events.csv"
+            _replace(events_path, EVENT_COLUMNS, _merged_events(events_path, history))
             new = [c for c in history.candles if c.date > last.date]
             _append(candles_path, map(_candle_row, new))
-            newer = History([], history.dividends, history.splits)
-            _append(
-                directory / "events.csv",
-                (row for row in _event_rows(newer) if row[0] > last.date.isoformat()),
-            )
             return UpdateResult(len(new), None, True)
 
     def latest(self, ticker: str, count: int) -> list[Candle]:
@@ -173,15 +177,17 @@ class StockCache:
 
     def _write_all(self, ticker: str, listing: Listing, history: History) -> None:
         # Each file goes to a temporary sibling first and is swapped in
-        # whole, so a failure part-way leaves the previous version intact.
+        # whole. Candles go last: until they are swapped in, the previous
+        # last candle stands, so the next update sees the same split or
+        # amendment and rebuilds again.
         directory = self.directory(ticker)
-        _replace(
-            directory / "candles.csv", CANDLE_COLUMNS, map(_candle_row, history.candles)
-        )
         _replace(directory / "events.csv", EVENT_COLUMNS, _event_rows(history))
         temporary = directory / "listing.json.tmp"
         temporary.write_text(json.dumps(listing._asdict()), encoding="utf-8")
         os.replace(temporary, directory / "listing.json")
+        _replace(
+            directory / "candles.csv", CANDLE_COLUMNS, map(_candle_row, history.candles)
+        )
 
 
 # Prices that differ by less than this (relatively) are the same price.
@@ -207,38 +213,15 @@ def _rebuild_reason(last: Candle, history: History) -> str | None:
 
 
 def _heal_tail(path: Path) -> None:
-    # A hard kill mid-append can leave the file ending mid-line, and a hand
-    # edit can drop the trailing newline; either would corrupt the next
-    # append. A last line that is still a whole header or candle gets its
-    # newline back; anything else is cut, and the update re-fetches it.
-    if not path.exists() or path.stat().st_size == 0:
+    # Every line the cache writes ends in a newline, so a last line without
+    # one is a write a kill cut short. It can still parse (a volume cut to
+    # its first digits), so it is cut whole, and the update re-fetches it.
+    if not path.exists():
         return
     content = path.read_bytes()
-    ends_with_newline = content.endswith(b"\n")
-    body = content[:-1] if ends_with_newline else content
-    last_line = body.rsplit(b"\n", 1)[-1]
-    if _is_whole_line(last_line.decode("utf-8", errors="replace")):
-        if not ends_with_newline:
-            with path.open("ab") as file:
-                file.write(b"\n")
-        return
-    with path.open("rb+") as file:
-        file.truncate(len(body) - len(last_line))
-
-
-def _is_whole_line(line: str) -> bool:
-    if line == ",".join(CANDLE_COLUMNS):
-        return True
-    fields = line.split(",")
-    if len(fields) != len(CANDLE_COLUMNS):
-        return False
-    try:
-        date.fromisoformat(fields[0])
-        for field in fields[1:]:
-            float(field)
-    except ValueError:
-        return False
-    return True
+    if content and not content.endswith(b"\n"):
+        with path.open("rb+") as file:
+            file.truncate(content.rfind(b"\n") + 1)
 
 
 def _last_candle(path: Path) -> Candle | None:
@@ -267,6 +250,24 @@ def _candle(row: dict[str, str]) -> Candle:
 
 def _candle_row(candle: Candle) -> list[str]:
     return [candle.date.isoformat(), *(str(value) for value in candle[1:])]
+
+
+def _merged_events(path: Path, history: History) -> list[list[str]]:
+    # The cached events and the fetched ones, one row per date and type,
+    # the fetched value winning: a re-fetch never duplicates an event, and
+    # an event Yahoo adds late for an already cached date isn't lost.
+    rows: dict[tuple[str, str], list[str]] = {}
+    if path.exists():
+        with path.open(newline="", encoding="utf-8") as file:
+            for row in csv.DictReader(file):
+                rows[(row["Date"], row["Type"])] = [
+                    row["Date"],
+                    row["Type"],
+                    row["Value"],
+                ]
+    for row in _event_rows(history):
+        rows[(row[0], row[1])] = row
+    return sorted(rows.values())
 
 
 def _event_rows(history: History) -> list[list[str]]:
