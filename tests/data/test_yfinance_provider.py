@@ -10,6 +10,7 @@ from fartt.data import (
     Dividend,
     Listing,
     ProviderUnavailable,
+    Quote,
     Split,
     UnknownTicker,
     UnsupportedExchange,
@@ -249,3 +250,68 @@ def test_other_http_errors_mean_unavailable() -> None:
 
     with pytest.raises(ProviderUnavailable):
         provider.history("AAPL", None)
+
+
+QUOTE_INFO: dict[str, Any] = {
+    "currency": "USD",
+    "quoteType": "EQUITY",
+    "regularMarketPrice": 270.5,
+    "bid": 270.4,
+    "ask": 270.6,
+    "regularMarketVolume": 1_000_000,
+    "regularMarketTime": int(datetime(2026, 10, 29, 20, 0, tzinfo=UTC).timestamp()),
+    "exchangeDataDelayedBy": 0,
+}
+
+
+def test_quote_maps_info() -> None:
+    provider, _ = provider_for(FakeTicker(info=QUOTE_INFO))
+
+    assert provider.quote("AAPL") == Quote(
+        last=270.5,
+        bid=270.4,
+        ask=270.6,
+        volume=1_000_000.0,
+        time=datetime(2026, 10, 29, 20, 0, tzinfo=UTC),
+        delay_minutes=0,
+    )
+
+
+def test_zero_or_missing_bid_and_ask_become_none() -> None:
+    info = {k: v for k, v in QUOTE_INFO.items() if k != "ask"} | {"bid": 0.0}
+    provider, _ = provider_for(FakeTicker(info=info))
+
+    quote = provider.quote("AAPL")
+
+    assert (quote.bid, quote.ask) == (None, None)
+
+
+def test_quote_of_unknown_ticker_raises_unknown_ticker() -> None:
+    provider, _ = provider_for(FakeTicker(info={"trailingPegRatio": None}))
+
+    with pytest.raises(UnknownTicker):
+        provider.quote("NOSUCH")
+
+
+def test_quote_errors_raise_provider_unavailable() -> None:
+    class BrokenTicker(FakeTicker):
+        @property
+        def info(self) -> dict[str, Any]:
+            raise ConnectionError("reset")
+
+        @info.setter
+        def info(self, value: dict[str, Any]) -> None:
+            pass
+
+    provider, _ = provider_for(BrokenTicker())
+
+    with pytest.raises(ProviderUnavailable):
+        provider.quote("AAPL")
+
+
+def test_quote_without_a_time_is_unavailable() -> None:
+    info = {k: v for k, v in QUOTE_INFO.items() if k != "regularMarketTime"}
+    provider, _ = provider_for(FakeTicker(info=info))
+
+    with pytest.raises(ProviderUnavailable):
+        provider.quote("AAPL")

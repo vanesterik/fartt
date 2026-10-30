@@ -22,3 +22,11 @@ def test_history_returns_recent_closed_sessions(ticker: str) -> None:
 def test_unknown_ticker_is_reported() -> None:
     with pytest.raises(UnknownTicker):
         YFinanceProvider().history("NOSUCHTICKERXYZ", None)
+
+
+@pytest.mark.network
+def test_quote_returns_a_price_and_an_aware_time() -> None:
+    quote = YFinanceProvider().quote("AAPL")
+
+    assert quote.last > 0
+    assert quote.time.tzinfo is not None
