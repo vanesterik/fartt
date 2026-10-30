@@ -4,7 +4,7 @@
 
 **Goal:** The agent calls `get_quote(ticker)` and learns whether a stock is liquid enough to trade and where a limit order should sit: last price, bid, ask and spread, today's volume against its 20-session average, whether the market is open (and when it next opens), and how delayed the quote is.
 
-**Architecture:** `sessions.py` gains `market_status(exchange, now)` from the exchange calendar. `build_server(cache)` adds `get_quote`, taking the provider and clock from the cache (`cache.provider`, `cache.clock`, made public),, which updates the ticker's cache (for the volume average), asks the provider for the quote, and combines the two.
+**Architecture:** `sessions.py` gains `market_status(exchange, now)` from the exchange calendar. `build_server(cache)` adds `get_quote`, taking the provider and clock from the cache (`cache.provider`, `cache.clock`, made public), which updates the ticker's cache (for the volume average), asks the provider for the quote, and combines the two.
 
 **Tech Stack:** Python 3.14, MCP Python SDK v2, `exchange_calendars` (`is_open_on_minute`, `next_open`), pydantic output models, pytest with anyio, pyright strict.
 
