@@ -4,7 +4,7 @@
 
 **Goal:** Add `fartt/data/`: the `DataProvider` Protocol, its value types and errors, exchange sessions, and a yfinance implementation that returns split-adjusted daily candles, dividends, splits, listings and quotes for Euronext and US tickers.
 
-**Architecture:** It mirrors `fartt/exchange/`: a Protocol, `NamedTuple` value types, error types, and one implementation, `YFinanceProvider`, which is the only module that imports yfinance and takes an injectable ticker factory and clock for tests. `sessions.py` maps a ticker's suffix to an `exchange_calendars` calendar and decides which sessions have closed. Nothing outside `fartt/data/` changes in this story; the cache (A2) and the server (A3) start using it later.
+**Architecture:** A Protocol, `NamedTuple` value types, error types, and one implementation, `YFinanceProvider`, which is the only module that imports yfinance and takes an injectable ticker factory and clock for tests. `sessions.py` maps a ticker's suffix to an `exchange_calendars` calendar and decides which sessions have closed. Nothing outside `fartt/data/` changes in this story; the cache (A2) and the server (A3) start using it later.
 
 **Tech Stack:** Python 3.14, yfinance (`auto_adjust=False, actions=True, raise_errors=True`), exchange_calendars, pandas (only inside the yfinance module), pytest, pyright strict.
 
@@ -18,7 +18,7 @@
 - Suffix → calendar: none → `XNYS`, `.AS` → `XAMS`, `.PA` → `XPAR`, `.BR` → `XBRU`, `.LS` → `XLIS`, `.MI` → `XMIL`, `.IR` → `XDUB`, `.OL` → `XOSL`. Any other suffix raises `UnsupportedExchange`.
 - A bid or ask of `0` or missing becomes `None`, never `0`.
 - No yfinance exception leaves the provider: unknown ticker → `UnknownTicker`; anything else from yfinance or the network → `ProviderUnavailable`.
-- Before using a yfinance or exchange_calendars call, check its current signature with context7 (global CLAUDE.md). pyright runs strict on `src/`; if a library lacks usable types, add a minimal stub under `typings/` as `typings/ccxt/` does, declaring only what's called.
+- Before using a yfinance or exchange_calendars call, check its current signature with context7 (global CLAUDE.md). pyright runs strict on `src/`; if a library lacks usable types, add a minimal stub under `typings/`, declaring only what's called.
 - Live tests are marked `network` and stay deselected by default.
 
 ## Review Focus
@@ -34,7 +34,7 @@
 ### Task 1: Value types, errors, the Protocol and sessions
 
 **Files:**
-- Create: `src/fartt/data/__init__.py` (re-exports everything below, as `fartt/exchange/__init__.py` does)
+- Create: `src/fartt/data/__init__.py` (re-exports everything below)
 - Create: `src/fartt/data/types.py`
 - Create: `src/fartt/data/provider.py`
 - Create: `src/fartt/data/sessions.py`
@@ -45,8 +45,6 @@
 - Produces, in `types.py`: `Candle(date: date, open, high, low, close, volume: float)`, `Dividend(date: date, amount: float)`, `Split(date: date, ratio: float)`, `History(candles: list[Candle], dividends: list[Dividend], splits: list[Split])`, `Listing(ticker: str, name: str, currency: str, exchange: str)`, `Quote(last: float, bid: float | None, ask: float | None, volume: float | None, time: datetime, delay_minutes: int | None)`. All `NamedTuple`, fields exactly as the spec's code block.
 - Produces, in `provider.py`: `class UnknownTicker(Exception)`, `class ProviderUnavailable(Exception)`, `class UnsupportedExchange(ValueError)` (its message names the supported suffixes), and `class DataProvider(Protocol)` with `listing(ticker: str) -> Listing`, `history(ticker: str, start: date | None) -> History`, `quote(ticker: str) -> Quote`. Docstrings carry the spec's contract: `start=None` is the full history, `start` is inclusive, closed sessions only, which errors each method raises.
 - Produces, in `sessions.py`: `CLOSE_MARGIN: timedelta`, `SUFFIX_CALENDARS: dict[str, str]` (key `""` for no suffix), `calendar_for(ticker: str) -> str` (case-insensitive; raises `UnsupportedExchange`), `newest_closed_session(exchange: str, now: datetime) -> date` (`now` must be timezone-aware).
-
-The `Candle` here is new and separate from `fartt.exchange.Candle`; the old one goes in A3.
 
 - [ ] **Step 1: Write the failing tests** in `tests/data/test_sessions.py`
 
@@ -270,5 +268,5 @@ git commit -m "feat: fetch quotes through yfinance"
 
 ## After the last task
 
-- Update `CLAUDE.md`'s "Current state" and "Architecture" sections with `fartt/data/` (one paragraph, in Task 3's commit). The README's structure section follows in A3, when `fartt/exchange/` leaves.
+- Update `CLAUDE.md`'s "Current state" and "Architecture" sections with `fartt/data/` (one paragraph, in Task 3's commit).
 - Mark #102 ready for review; its description lists the commits.
