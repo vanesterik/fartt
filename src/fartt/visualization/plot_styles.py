@@ -4,10 +4,10 @@ import matplotlib.pyplot as plt
 def apply_plot_styles() -> None:
     """
     Apply matplotlib rcParams that reproduce mplfinance's built-in
-    "tradingview" style (grey axes edges, dashed grid, red titles),
-    so that every matplotlib/seaborn plot in a notebook looks consistent
-    with `visualization/candlestick_chart.py`'s charts, not just
-    mplfinance's own. Call once, right after imports, before any plotting
+    "tradingview" style (grey axes edges, dashed grid, red titles), so
+    that every matplotlib plot looks consistent with
+    `visualization/candlestick_chart.py`'s charts, not just mplfinance's
+    own. Call once, right after imports, before any plotting
     -- rcParams are global, so this affects every plot drawn afterwards
     in the same session.
 

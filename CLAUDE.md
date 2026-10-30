@@ -8,7 +8,7 @@ Fartt (Financial Analysis Real Time Trading) is an MCP server that gives an agen
 
 The plan is the PRD, `docs/product/stock-analysis-prd.md` (problem, users including the agent, the eight-step analysis procedure, tool surface, the three stages from paper trading to server-placed orders and their gates, the risk config, risks and open questions). It's delivered in epics on the board, in this order: **A** Data Foundation (#88), **B** Technical Analysis (#89), **C** Journal & Evaluation (#90), **D** Analysis Pipeline (#91; A–D are the walking skeleton, a full analysis on one ticker), then **E** Visualization (#92), **F** Market Context (#93), **G** Fundamentals & Screening (#94), **H** Trade Plan & Risk (#95), **I** Validation (#96), **J** Live Orders (#101). Stories are written just in time, one epic at a time. Epic designs live in `docs/specs/`, implementation plans in `docs/plans/`.
 
-The project follows the [cookiecutter data science](https://drivendata.github.io/cookiecutter-data-science/) layout: `notebooks/` for exploration, `docs/` for the PRD, designs and plans, `src/fartt` for library code, `tests/` for unit tests.
+The project follows the [cookiecutter data science](https://drivendata.github.io/cookiecutter-data-science/) layout: `docs/` for the PRD, designs and plans, `src/fartt` for library code, `tests/` for unit tests.
 
 ## Current state of the codebase (important)
 
@@ -58,7 +58,7 @@ There is no CLI: the agent calls the server's tools, and a ticker's cache fills 
 
 `tests/e2e/test_server_stdio.py` checks the server end to end: it starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder, calls the tools, and asserts stdout carries only JSON-RPC, including anything written at shutdown. Each new tool joins it: add its name to `EXPECTED_TOOLS` and its call to `test_tools_over_stdio`.
 
-Hooks are managed by `lefthook` (`.lefthook.yml`) and stand in for CI, which this project doesn't have. On every commit, notebooks get their outputs stripped, staged Python files get `ruff format` + `ruff check --fix`, then `pyright` and `pytest` run. On every push, `task check` runs the full suite on the whole repository (`ruff format --check .`, `ruff check .`, `pyright`, `pytest`), because pre-commit only sees staged files and a commit touching only `pyproject.toml`, `uv.lock` or `.mcp.json` would otherwise skip tests and type checks. `git push --no-verify` skips the gate for one push; use it deliberately, never by default. Tests marked `network` call Yahoo and are deselected by default; run them with `task test:network`.
+Hooks are managed by `lefthook` (`.lefthook.yml`) and stand in for CI, which this project doesn't have. On every commit, staged Python files get `ruff format` + `ruff check --fix`, then `pyright` and `pytest` run. On every push, `task check` runs the full suite on the whole repository (`ruff format --check .`, `ruff check .`, `pyright`, `pytest`), because pre-commit only sees staged files and a commit touching only `pyproject.toml`, `uv.lock` or `.mcp.json` would otherwise skip tests and type checks. `git push --no-verify` skips the gate for one push; use it deliberately, never by default. Tests marked `network` call Yahoo and are deselected by default; run them with `task test:network`.
 
 ## Development workflow and pull requests
 
