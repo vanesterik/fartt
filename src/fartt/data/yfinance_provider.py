@@ -10,7 +10,7 @@ from yfinance.exceptions import YFTickerMissingError
 
 from fartt.data.provider import ProviderUnavailable, UnknownTicker
 from fartt.data.sessions import calendar_for, newest_closed_session
-from fartt.data.types import Candle, Dividend, History, Listing, Split
+from fartt.data.types import Candle, Dividend, History, Listing, Quote, Split
 
 _PRICES = ("Open", "High", "Low", "Close")
 
@@ -109,6 +109,36 @@ class YFinanceProvider:
                 )
             )
         return History(candles, dividends, splits)
+
+    def quote(self, ticker: str) -> Quote:
+        ticker = ticker.upper()
+        calendar_for(ticker)
+        with _translate_errors(ticker):
+            info = self._ticker_factory(ticker).info
+        last = _positive(info.get("regularMarketPrice"))
+        if last is None:
+            raise UnknownTicker(f"Yahoo has no quote for '{ticker}'")
+        struck = info.get("regularMarketTime")
+        if not isinstance(struck, int | float):
+            raise ProviderUnavailable(f"Yahoo's quote for '{ticker}' has no time")
+        volume = info.get("regularMarketVolume")
+        delay = info.get("exchangeDataDelayedBy")
+        return Quote(
+            last=last,
+            bid=_positive(info.get("bid")),
+            ask=_positive(info.get("ask")),
+            volume=float(volume) if isinstance(volume, int | float) else None,
+            time=datetime.fromtimestamp(struck, UTC),
+            delay_minutes=delay if isinstance(delay, int) else None,
+        )
+
+
+def _positive(value: object) -> float | None:
+    # Yahoo reports an unknown price as 0 or leaves it out; neither may
+    # reach a spread calculation as a real price.
+    if isinstance(value, int | float) and value > 0:
+        return float(value)
+    return None
 
 
 def _rows(frame: pd.DataFrame) -> Iterator[tuple[date, dict[str, float]]]:
