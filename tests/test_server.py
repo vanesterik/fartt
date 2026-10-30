@@ -384,6 +384,33 @@ async def test_a_crossed_quote_makes_the_spread_unknown(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_a_locked_quote_makes_the_spread_unknown(tmp_path: Path) -> None:
+    days = sessions("XAMS", 20, last=date(2026, 10, 28))
+    fake = quoting(days, [1000.0] * 20, asml_quote=quote(bid=102.0, ask=102.0))
+
+    content = (await get_quote(fake, tmp_path)).structured_content
+
+    assert (content["bid"], content["ask"], content["spread"]) == (None, None, None)
+    assert "locked" in content["note"]
+
+
+@pytest.mark.anyio
+async def test_a_stale_quote_says_so_and_averages_before_it(tmp_path: Path) -> None:
+    # A suspended stock: the quote is weeks older than the cached sessions.
+    days = sessions("XAMS", 45, last=date(2026, 10, 28))
+    volumes = [1000.0] * 20 + [5000.0] * 25
+    struck = days[20]
+    old = quote(time=datetime(struck.year, struck.month, struck.day, 9, 45, tzinfo=UTC))
+    fake = quoting(days, volumes, asml_quote=old)
+
+    content = (await get_quote(fake, tmp_path)).structured_content
+
+    assert content["average_volume_20d"] == pytest.approx(1000.0)
+    assert days[20].isoformat() in content["note"]
+    assert "stale" in content["note"]
+
+
+@pytest.mark.anyio
 async def test_get_quote_with_the_provider_down_is_a_tool_error(
     tmp_path: Path,
 ) -> None:

@@ -4,7 +4,7 @@
 
 **Goal:** The agent calls `get_quote(ticker)` and learns whether a stock is liquid enough to trade and where a limit order should sit: last price, bid, ask and spread, today's volume against its 20-session average, whether the market is open (and when it next opens), and how delayed the quote is.
 
-**Architecture:** `sessions.py` gains `market_status(exchange, now)` from the exchange calendar. `build_server(cache, provider, clock)` adds `get_quote`, which updates the ticker's cache (for the volume average), asks the provider for the quote, and combines the two. `main()` passes one `YFinanceProvider` to both the cache and the server.
+**Architecture:** `sessions.py` gains `market_status(exchange, now)` from the exchange calendar. `build_server(cache)` adds `get_quote`, taking the provider and clock from the cache (`cache.provider`, `cache.clock`, made public),, which updates the ticker's cache (for the volume average), asks the provider for the quote, and combines the two.
 
 **Tech Stack:** Python 3.14, MCP Python SDK v2, `exchange_calendars` (`is_open_on_minute`, `next_open`), pydantic output models, pytest with anyio, pyright strict.
 
@@ -72,9 +72,9 @@ git commit -m "feat: tell whether an exchange is open and when it next opens"
 
 **Interfaces:**
 - Consumes: `market_status`, `MarketStatus` (Task 1); `StockCache.update`, `latest`, `listing`; `DataProvider.quote`.
-- Produces: `build_server(cache: StockCache, provider: DataProvider, clock: Callable[[], datetime] = _now) -> MCPServer`; `QuoteResult`.
+- Produces: `build_server(cache: StockCache) -> MCPServer` (unchanged signature); `StockCache.provider` and `StockCache.clock`; `exchange_date(exchange, moment) -> date` in `sessions.py`; `QuoteResult`.
 
-- [ ] **Step 1: Write the failing tests** in `tests/test_server.py` (the `call` helper takes the tool name; `build_server(cache, fake, clock=lambda: fake.now)`):
+- [ ] **Step 1: Write the failing tests** in `tests/test_server.py` (the `call` helper takes the tool name):
 
 ```python
 async def test_get_quote_during_the_session() -> None:
@@ -92,12 +92,12 @@ async def test_get_quote_of_an_unknown_ticker_is_a_tool_error() -> None:   # "NO
 async def test_the_volume_ratio_says_it_is_not_normalised() -> None:  # "time of day" in the output schema's volume_ratio description
 ```
 
-`test_the_only_tool_is_get_candles` becomes `test_the_tools_are_get_candles_and_get_quote`. `run_main`'s fake `build_server` takes `(cache, provider)` and asserts both share one provider.
+`test_the_only_tool_is_get_candles` becomes `test_the_tools_are_get_candles_and_get_quote`.
 
 - [ ] **Step 2: Run them and see them fail**
 
 Run: `uv run pytest tests/test_server.py -v`
-Expected: FAIL (`get_quote` doesn't exist; `build_server` takes one argument)
+Expected: FAIL (`get_quote` doesn't exist)
 
 - [ ] **Step 3: Implement `get_quote`.** The cache update's error mapping is shared with `get_candles` (one helper turning `UnknownTicker`, `UnsupportedExchange`, `OSError`/`ValueError`/`KeyError` into `ToolError`s); `get_quote` adds `ProviderUnavailable` → `ToolError` ("unreachable, try again later"). The quote's session is the exchange-local date of `quote.time`; the average reads `cache.latest(ticker, 21)` and keeps the last 20 dated before it. Notes are sentences joined with a space, `null` when there are none. Add "dividends kept separately" to `INSTRUCTIONS`.
 

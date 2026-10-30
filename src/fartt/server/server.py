@@ -343,11 +343,13 @@ def build_server(cache: StockCache) -> MCPServer:
         if bid is None or ask is None:
             bid = ask = None
             notes.append("The spread is unknown: the provider has no bid or ask.")
-        elif ask < bid:
+        elif ask <= bid:
+            # Matching orders would have traded: a crossed or locked quote is
+            # stale or delayed data, not a free spread.
             bid = ask = None
             notes.append(
                 "The spread is unknown: the provider's bid and ask are crossed "
-                "(stale or delayed data)."
+                "or locked (stale or delayed data)."
             )
         else:
             spread = (ask - bid) / ((ask + bid) / 2)
@@ -355,6 +357,20 @@ def build_server(cache: StockCache) -> MCPServer:
         # Sessions before the quote's own, so today is never in its average.
         today = exchange_date(listing.exchange, quote.time)
         prior = [c for c in candles if c.date < today][-AVERAGE_SESSIONS:]
+        if len(prior) < AVERAGE_SESSIONS and len(candles) > AVERAGE_SESSIONS:
+            # A quote older than the newest cached sessions: read further back.
+            try:
+                candles = cache.latest(ticker, sys.maxsize)
+            except CACHE_ERRORS as error:
+                raise _cache_error("get_quote", ticker, error) from error
+            prior = [c for c in candles if c.date < today][-AVERAGE_SESSIONS:]
+        last_closed = cache.newest_closed_session(ticker)
+        if today < last_closed:
+            notes.append(
+                f"The quote is from {today.isoformat()}, before the exchange's "
+                f"last closed session ({last_closed.isoformat()}), so it may be "
+                "stale, for instance because trading is suspended."
+            )
         average = sum(c.volume for c in prior) / len(prior) if prior else None
         if 0 < len(prior) < AVERAGE_SESSIONS:
             notes.append(
