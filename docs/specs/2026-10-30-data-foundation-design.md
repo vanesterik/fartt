@@ -16,7 +16,6 @@ The operator works with a handful of tickers a day: the ones they hold or are lo
 - A local cache of split-adjusted daily candles per ticker, plus the ticker's dividends and splits, kept correct across splits.
 - Trading sessions and exchange holidays respected: no gaps on days the exchange was closed, and no candle for a session that hasn't closed yet.
 - A `DataProvider` interface with a yfinance implementation as the only module that imports yfinance.
-- The BTC direction's code removed by the end of the epic (PRD §8).
 
 ## Non-goals
 
@@ -140,7 +139,7 @@ A ticker with any other suffix is outside the universe (PRD §5). Tools reject i
 
 ### `fartt/stock_cache.py`: the cache (A2, #98)
 
-It replaces `candle_cache.py`. The layout under `assets_dir`:
+The layout under `assets_dir`:
 
 ```
 assets/stocks/ASML.AS/candles.csv    # Date,Open,High,Low,Close,Volume — split-adjusted, ascending
@@ -151,24 +150,21 @@ assets/stocks/ASML.AS/listing.json   # the Listing, cached so tools don't ask th
 `StockCache(provider, assets_dir, clock)` serves any ticker. Its update rules:
 
 1. **First fill.** No `candles.csv` exists, so call `history(ticker, None)` and write everything.
-2. **Update.** Call `history(ticker, last_cached_date)`. This re-fetches the last cached candle, as the old cache did.
+2. **Update.** Call `history(ticker, last_cached_date)`. This re-fetches the last cached candle.
 3. **Rebuild** when the returned splits include one dated after the last cached date, *or* the re-fetched last candle's open, high, low or close differs from the cached one by more than float noise (a relative difference above 1e-6; volume is ignored). Rebuilding means fetching the full history, writing it to a temporary file next to the original, and swapping it in with `os.replace`. The update reports the reason: `split` (with its date and ratio) or `last candle amended`.
 4. **Otherwise** append the new candles and events.
 5. **Up to date already.** The last cached date is the newest closed session, so there's no call to the provider at all.
 
-*My call on rule 3:* any price amendment rebuilds, rather than a threshold that tries to tell an amendment from a split. Small-ratio splits (a 21-for-20 stock dividend) sit too close to real price revisions for any threshold to separate them. A rebuild is one call returning a few thousand rows, and it's always correct, so being wrong in the cautious direction costs a second. This drops the old cache's "replace the last line" path.
+*My call on rule 3:* any price amendment rebuilds, rather than a threshold that tries to tell an amendment from a split. Small-ratio splits (a 21-for-20 stock dividend) sit too close to real price revisions for any threshold to separate them. A rebuild is one call returning a few thousand rows, and it's always correct, so being wrong in the cautious direction costs a second.
 
 Rule 5 matters: a check-in that reads five indicators for a ticker doesn't hit Yahoo five times.
 
-Kept from the old cache:
-- the exclusive and shared `fcntl` locks on a sidecar `.lock` file, one per ticker directory
-- healing a torn last line
+It also has:
+- exclusive and shared `fcntl` locks on a sidecar `.lock` file, one per ticker directory
+- healing of a torn last line
 - an injectable `clock` for tests
 
-Dropped from it:
-- the interval arithmetic
-- the Bitvavo history start
-- paging. yfinance returns a full daily history in one call.
+There's no paging: yfinance returns a full daily history in one call.
 
 `latest(ticker, count)` returns the newest `count` cached candles. `events(ticker)` returns its dividends and splits. Both take the shared lock.
 
@@ -176,7 +172,7 @@ Dropped from it:
 
 ### The server (A3 #99, A4 #100)
 
-`build_server(cache, provider)` drops the fixed market and interval. The cost settings return in epic H's risk config.
+`build_server` takes the cache in A3; A4 adds the provider, for quotes. Cost settings belong to epic H's risk config.
 
 **Launching it (decided with the operator, 2026-10-30).** The MCP server is the only entry point; there is no CLI. Claude Code starts the server from `.mcp.json` as a child process and talks to it over stdin/stdout, so nobody runs a command by hand:
 
@@ -186,11 +182,11 @@ pyproject.toml   →  fartt = "fartt.server:main"
 server.main()    →  StockCache(YFinanceProvider(), assets_dir) → build_server(...).run()
 ```
 
-- `fartt/cli.py` (argparse, `serve`, `download`) is removed. A ticker is fetched on the spot by the tools, so filling a cache by hand has no use.
+- There's no CLI. A ticker is fetched on the spot by the tools, so filling a cache by hand has no use.
 - The cache lives in `assets/` under the repository root by default. The environment variable `FARTT_ASSETS_DIR` overrides it, which is how the tests point the server at a temporary folder. *My call:* no `.env` file until there's a second setting.
-- `main()` sends logs to stderr only, because stdout carries the protocol. The rotating `logs/cli.log` goes.
+- `main()` sends logs to stderr only, because stdout carries the protocol.
 
-**`get_candles(ticker, count=60)`**, with `count` from 1 to 200 as before:
+**`get_candles(ticker, count=60)`**, with `count` from 1 to 200:
 - It updates the cache for the ticker (fetching on the spot if it's new), then returns `ticker`, `name`, `currency`, `exchange`, `columns`, `rows` (`[date, open, high, low, close, volume]`), `new_candles`, `rebuilt` (with the reason, if any), `gaps`, `is_current` and `warning`.
 - `is_current` is true when the last row is the newest closed session.
 - `gaps` lists the missing sessions within the returned rows (dates), empty when there are none, and `warning` mentions them. *My call:* surfaced to the agent rather than only logged, because missing data that looks complete is an anti-goal, and epic B's indicators will read the same rows.
@@ -206,30 +202,28 @@ server.main()    →  StockCache(YFinanceProvider(), assets_dir) → build_serve
 - A missing bid or ask makes `bid`, `ask` and `spread` `null`, with a note saying the spread is unknown. It's never zero.
 - An unreachable provider is a `ToolError`. A quote from the cache would be stale by definition, so there's nothing to degrade to.
 
-**Server instructions** describe the stock tools: one ticker per call in Yahoo's format, prices split-adjusted, dividends kept separately, fractions as before, and `is_current: false` meaning stale data.
+**Server instructions** describe the stock tools: one ticker per call in Yahoo's format, prices split-adjusted, dividends kept separately, fractions, and `is_current: false` meaning stale data.
 
-**The end-to-end test** (`tests/e2e/test_server_stdio.py`) starts the server with `.mcp.json`'s command and a temporary `FARTT_ASSETS_DIR`, lists the tools (`get_candles`, `get_quote`), and calls both on one ticker. It's marked `network`, as now, and asserts stdout carries only JSON-RPC.
+**The end-to-end test** (`tests/e2e/test_server_stdio.py`) starts the server with `.mcp.json`'s command and a temporary `FARTT_ASSETS_DIR`, lists the tools (`get_candles`, `get_quote`), and calls both on one ticker. It's marked `network`, and asserts stdout carries only JSON-RPC.
 
-## What leaves the codebase, and when
+## Delivery order
 
 The stories are built in order, and each one leaves `task check` passing:
 
-| Story | Adds | Removes |
-|---|---|---|
-| A1 #97 | `fartt/data/` (Protocol, types, `YFinanceProvider`), `yfinance` and `exchange_calendars` dependencies | — |
-| A2 #98 | `stock_cache.py`, sessions; `fartt download --ticker` uses them | `fartt download`'s ccxt options |
-| A3 #99 | `get_candles(ticker, count)` on the new cache; new server instructions; `fartt = "fartt.server:main"` | `fartt/cli.py` (with `download` and `serve`), `logs/cli.log`, the forecast tools, `fartt/forecast/`, `fartt/model/`, the model-only visualization helpers, `fartt/exchange/`, `candle_cache.py`, the notebooks, `torch`, `ccxt` and other dependencies only they used, the BTC files in `assets/` |
-| A4 #100 | `get_quote` | — |
+| Story | Adds |
+|---|---|
+| A1 #97 | `fartt/data/` (Protocol, types, `YFinanceProvider`), `yfinance` and `exchange_calendars` dependencies |
+| A2 #98 | `stock_cache.py`, sessions |
+| A3 #99 | `get_candles(ticker, count)` on the cache; server instructions; `fartt = "fartt.server:main"` |
+| A4 #100 | `get_quote` |
 
-This changes three stories, which get updated to match when this design is approved. A1 (#97): removing ccxt moves to A3, because until then the old cache and server still use it. A2 (#98): its adjustment scenario says a split *or dividend* rewrites the candles; only a split (or an amended last candle) does, and dividends are added as event records. A3 (#99): it gains the removal of ccxt and the old cache.
-
-`calculate_trade_returns`, `calculate_candle_returns` and `calculate_technical_indicators` stay, because epics B and I build on them. So do `candlestick_chart.py` and `plot_styles.py`, which epic E builds on. *Builder's call:* any other module is removed in A3 if nothing left imports it.
+`calculate_trade_returns`, `calculate_candle_returns` and `calculate_technical_indicators` are kept for epics B and I, and `candlestick_chart.py` and `plot_styles.py` for epic E.
 
 ## Testing
 
 - **Provider:** unit tests mock yfinance at the module boundary, covering the mapping to `Candle`/`Dividend`/`Split`/`Quote`, `0` bid/ask → `None`, and errors → `UnknownTicker`/`ProviderUnavailable`. One `network` test per method hits Yahoo for `AAPL` and `ASML.AS`.
 - **Cache:** tests use an in-memory fake `DataProvider` and a fixed clock. They cover first fill, update, a rebuild on a split event, a rebuild on a mismatched last candle, a no-op when up to date, a forming session not stored, weekend and holiday (Good Friday on XAMS, Thanksgiving on XNYS) not counted as gaps, and concurrent readers during an update.
-- **Server:** in-process tool tests with the fake provider (as now), plus the stdio end-to-end test above.
+- **Server:** in-process tool tests with the fake provider, plus the stdio end-to-end test above.
 
 ## Left to the builder
 
