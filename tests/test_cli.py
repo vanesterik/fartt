@@ -1,11 +1,16 @@
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from fartt import cli
+from fartt.data import History, Listing
 from fartt.forecast import RepeatLastReturn, Settings
-from tests.fakes import HOUR_MS, FakeExchange, candle
+from fartt.stock_cache import StockCache
+from tests.fakes import HOUR_MS, FakeExchange, FakeProvider, candle, stock_candle
+
+AFTER_CLOSE = datetime(2026, 10, 29, 21, 0, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -21,6 +26,26 @@ def fake_exchange(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeExchan
     monkeypatch.setattr(cli, "DEFAULT_HISTORY_START_MS", 0)
     monkeypatch.chdir(tmp_path)  # main() writes logs/cli.log relative to the cwd
     return exchange
+
+
+@pytest.fixture
+def fake_provider(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> FakeProvider:
+    days = [date(2026, 10, 27), date(2026, 10, 28), date(2026, 10, 29)]
+    provider = FakeProvider(
+        {"ASML.AS": History([stock_candle(d) for d in days], [], [])},
+        {"ASML.AS": Listing("ASML.AS", "ASML Holding N.V.", "EUR", "XAMS")},
+        now=AFTER_CLOSE,
+    )
+    monkeypatch.setattr(cli, "YFinanceProvider", lambda: provider)
+    monkeypatch.setattr(
+        cli,
+        "StockCache",
+        lambda provider, assets_dir: StockCache(
+            provider, assets_dir, clock=lambda: provider.now
+        ),
+    )
+    monkeypatch.chdir(tmp_path)  # main() writes logs/cli.log relative to the cwd
+    return provider
 
 
 class FakeServer:
@@ -52,93 +77,12 @@ def served(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     return built
 
 
-def test_download_is_a_subcommand(fake_exchange: FakeExchange, tmp_path: Path) -> None:
-    cli.main(
-        [
-            "download",
-            "--assets-dir",
-            str(tmp_path),
-            "--market",
-            "BTC/EUR",
-            "--interval",
-            "1h",
-        ]
-    )
-
-    lines = (tmp_path / "BTC-EUR-1h.csv").read_text().splitlines()
-    assert lines[0] == "Timestamp,Open,High,Low,Close,Volume"
-    assert len(lines) == 4
-
-
-def test_download_rejects_unknown_market_with_hint(
-    fake_exchange: FakeExchange, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    with pytest.raises(SystemExit) as exit_info:
-        cli.main(
-            [
-                "download",
-                "--assets-dir",
-                str(tmp_path),
-                "--market",
-                "BTC-EUR",
-                "--interval",
-                "1h",
-            ]
-        )
-
-    assert exit_info.value.code == 2
-    error = capsys.readouterr().err
-    assert "BTC-EUR" in error
-    assert "BTC/EUR" in error
-    assert not (tmp_path / "BTC-EUR-1h.csv").exists()
-
-
 def test_no_command_prints_usage_and_fails(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exit_info:
         cli.main([])
 
     assert exit_info.value.code == 2
     assert "download" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize("interval", ["3h", "1x"])
-def test_download_rejects_an_interval_the_exchange_does_not_offer(
-    fake_exchange: FakeExchange,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    interval: str,
-) -> None:
-    with pytest.raises(SystemExit) as exit_info:
-        cli.main(["download", "--assets-dir", str(tmp_path), "--interval", interval])
-
-    assert exit_info.value.code == 2
-    error = capsys.readouterr().err
-    assert f"interval '{interval}'" in error
-    assert "1m, 1h" in error
-
-
-def test_download_rejects_an_unknown_exchange(
-    fake_exchange: FakeExchange, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    with pytest.raises(SystemExit) as exit_info:
-        cli.main(["download", "--assets-dir", str(tmp_path), "--exchange", "bitvavoo"])
-
-    assert exit_info.value.code == 2
-    assert "bitvavoo" in capsys.readouterr().err
-
-
-def test_download_exits_cleanly_when_the_exchange_is_unreachable(
-    fake_exchange: FakeExchange, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    fake_exchange.reachable = False
-
-    with pytest.raises(SystemExit) as exit_info:
-        cli.main(["download", "--assets-dir", str(tmp_path), "--interval", "1h"])
-
-    assert exit_info.value.code == 1
-    error = capsys.readouterr().err
-    assert "unavailable" in error
-    assert "Traceback" not in error
 
 
 def test_serve_runs_the_server_for_the_configured_market(
@@ -200,21 +144,6 @@ def test_serve_rejects_an_unknown_market(
     assert exit_info.value.code == 2
     assert "BTC/EUR" in capsys.readouterr().err
     assert not served
-
-
-def test_download_rejects_an_offered_interval_the_cache_cannot_handle(
-    fake_exchange: FakeExchange, tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    # Some exchanges offer intervals such as binance's lowercase `1w`.
-    fake_exchange.intervals = ["1h", "1w"]
-
-    with pytest.raises(SystemExit) as exit_info:
-        cli.main(["download", "--assets-dir", str(tmp_path), "--interval", "1w"])
-
-    assert exit_info.value.code == 2
-    error = capsys.readouterr().err
-    assert "interval '1w'" in error
-    assert "Traceback" not in error
 
 
 def test_serve_passes_the_analysis_options(
@@ -292,3 +221,83 @@ def test_serve_help_gives_an_example_fraction_for_each_rate(
     assert "0.0025 is 0.25%" in help_text
     assert "0.001 is 0.1%" in help_text
     assert "0.007 is 0.7%" in help_text
+
+
+def test_download_fills_the_ticker_cache(
+    fake_provider: FakeProvider, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    cli.main(["download", "--assets-dir", str(tmp_path), "--ticker", "asml.as"])
+
+    lines = (tmp_path / "stocks" / "ASML.AS" / "candles.csv").read_text().splitlines()
+    assert lines[0] == "Date,Open,High,Low,Close,Volume"
+    assert len(lines) == 4
+    assert "3 new candles" in capsys.readouterr().err
+
+
+def test_download_again_reports_up_to_date(
+    fake_provider: FakeProvider, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = ["download", "--assets-dir", str(tmp_path), "--ticker", "ASML.AS"]
+    cli.main(argv)
+    cli.main(argv)
+
+    assert "already up to date" in capsys.readouterr().err
+
+
+def test_download_reports_a_rebuild(
+    fake_provider: FakeProvider, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    argv = ["download", "--assets-dir", str(tmp_path), "--ticker", "ASML.AS"]
+    cli.main(argv)
+    fake_provider.histories["ASML.AS"].candles[-1] = stock_candle(
+        date(2026, 10, 29), 101.0
+    )
+    fake_provider.now = datetime(2026, 10, 30, 21, 0, tzinfo=UTC)
+
+    cli.main(argv)
+
+    assert "last candle amended" in capsys.readouterr().err
+
+
+def test_download_rejects_an_unknown_ticker(
+    fake_provider: FakeProvider, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["download", "--assets-dir", str(tmp_path), "--ticker", "NOSUCH"])
+
+    assert exit_info.value.code == 2
+    assert "NOSUCH" in capsys.readouterr().err
+
+
+def test_download_rejects_an_unsupported_exchange(
+    fake_provider: FakeProvider, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["download", "--assets-dir", str(tmp_path), "--ticker", "VOD.L"])
+
+    assert exit_info.value.code == 2
+    assert ".AS" in capsys.readouterr().err
+
+
+def test_download_exits_1_when_the_provider_is_unreachable(
+    fake_provider: FakeProvider, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake_provider.reachable = False
+
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["download", "--assets-dir", str(tmp_path), "--ticker", "ASML.AS"])
+
+    assert exit_info.value.code == 1
+    error = capsys.readouterr().err
+    assert "unreachable" in error
+    assert "Traceback" not in error
+
+
+def test_download_requires_a_ticker(
+    fake_provider: FakeProvider, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["download"])
+
+    assert exit_info.value.code == 2
+    assert "--ticker" in capsys.readouterr().err

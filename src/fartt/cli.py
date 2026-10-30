@@ -5,13 +5,18 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from loguru import logger
-from tabulate import tabulate
-from tqdm import tqdm
 
 from fartt.candle_cache import DEFAULT_HISTORY_START_MS, CandleCache
+from fartt.data import (
+    ProviderUnavailable,
+    UnknownTicker,
+    UnsupportedExchange,
+    YFinanceProvider,
+)
 from fartt.exchange import CcxtExchange, ExchangeUnavailable
 from fartt.forecast import RepeatLastReturn, Settings
 from fartt.server import build_server
+from fartt.stock_cache import StockCache
 
 LOG_FORMAT = (
     "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
@@ -79,10 +84,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     download = commands.add_parser(
         "download",
-        help="download closed candles into the local cache",
-        description="Download closed candles into the local cache, resuming where it left off.",
+        help="download a ticker's daily candles into the local cache",
+        description=(
+            "Download a ticker's split-adjusted daily candles, dividends and "
+            "splits into the local cache, fetching only what's new."
+        ),
     )
-    _add_cache_options(download, interval="1d")
+    download.add_argument(
+        "--assets-dir",
+        type=Path,
+        default=Path("assets"),
+        help="folder the cache lives in (default: %(default)s)",
+    )
+    download.add_argument(
+        "--ticker",
+        required=True,
+        help="ticker in Yahoo's format: AAPL for a US listing, ASML.AS for "
+        "Euronext Amsterdam",
+    )
 
     serve = commands.add_parser(
         "serve",
@@ -103,7 +122,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     logger.add("logs/cli.log", rotation="1 MB", level="INFO", format=LOG_FORMAT)
 
     if args.command == "download":
-        _download(parser, args.assets_dir, args.exchange, args.market, args.interval)
+        _download(parser, args.assets_dir, args.ticker)
     elif args.command == "serve":
         settings = _settings(parser, args)
         _serve(
@@ -191,30 +210,27 @@ def _settings(parser: argparse.ArgumentParser, args: argparse.Namespace) -> Sett
     return settings
 
 
-def _download(
-    parser: argparse.ArgumentParser,
-    assets_dir: Path,
-    exchange: str,
-    market: str,
-    interval: str,
-) -> None:
-    cache = _open_cache(
-        parser, assets_dir, exchange, market, interval, require_exchange=True
-    )
-    configuration = {
-        "exchange": exchange,
-        "market": market,
-        "interval": interval,
-        "filepath": str(cache.filepath),
-    }
-    logger.info(f"\n\nFartt Downloader\n\n{tabulate(configuration.items())}\n")
-
+def _download(parser: argparse.ArgumentParser, assets_dir: Path, ticker: str) -> None:
+    cache = StockCache(YFinanceProvider(), assets_dir)
     try:
-        with tqdm(desc="Downloading", unit=" candles") as progress:
-            for count in cache.iter_update():
-                progress.update(count)
-    except ExchangeUnavailable as error:
-        parser.exit(1, f"fartt: error: {error}; the candles fetched so far are kept\n")
+        result = cache.update(ticker)
+    except (UnknownTicker, UnsupportedExchange) as error:
+        parser.error(str(error))
+    except ProviderUnavailable as error:
+        parser.exit(1, f"fartt: error: {error}; the cache is unchanged\n")
+
+    directory = cache.directory(ticker)
+    if not result.fetched:
+        logger.info(f"{directory.name} is already up to date in {directory}")
+    elif result.rebuilt is not None:
+        logger.info(
+            f"Rebuilt {directory.name}'s history in {directory} "
+            f"({result.rebuilt}): {result.new_candles} candles"
+        )
+    else:
+        logger.info(
+            f"{directory.name}: {result.new_candles} new candles in {directory}"
+        )
 
 
 def _serve(

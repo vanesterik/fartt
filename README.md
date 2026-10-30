@@ -30,19 +30,15 @@ task setup
 
 ## Usage
 
-Two commands work today: `fartt download` fills a local candle cache, and `fartt serve` runs the MCP server that Claude Code starts.
+Two commands work today: `fartt download` fills a ticker's local cache, and `fartt serve` runs the MCP server that Claude Code starts.
 
 ```bash
-uv run fartt download --assets-dir assets --market BTC/EUR --interval 1h
+uv run fartt download --ticker ASML.AS
 ```
 
-`download` backfills closed OHLCV candles from Bitvavo (through [ccxt](https://github.com/ccxt/ccxt), so other exchanges are an `--exchange` option away) into a per-market/interval CSV cache under `assets_dir`, resuming from the last cached candle on each run instead of re-fetching from scratch. Markets use ccxt's format (`BTC/EUR`); the cache files keep the dash form (`BTC-EUR-1h.csv`). Candles are public, so no API keys are needed.
+`download` fetches a ticker's split-adjusted daily candles, dividends and splits from Yahoo Finance (through [yfinance](https://github.com/ranaroussi/yfinance)) into `assets/stocks/<TICKER>/`. The first run fetches the full history; later runs fetch only what's new, and rebuild the history when a split appears. Tickers use Yahoo's format: `AAPL` for a US listing, `ASML.AS` for Euronext Amsterdam. No API keys are needed.
 
-The MCP server exposes the cache to Claude Code. It's registered in `.mcp.json`, so a Claude Code session in this directory starts it (`uv run fartt serve`), and the agent can call `get_candles` for the latest closed candles. Run `fartt download` with the same market and interval first, so the first call doesn't have to fill years of history:
-
-```bash
-uv run fartt download --market BTC/EUR --interval 1h
-```
+The MCP server is registered in `.mcp.json`, so a Claude Code session in this directory starts it (`uv run fartt serve`).
 
 `fartt serve` also takes the analysis settings: `--fee`, `--slippage`, `--threshold` and `--hit-rate-window`, all fractions except the window (see `uv run fartt serve --help`).
 
@@ -78,6 +74,7 @@ The project follows the [cookiecutter data science project template](https://dri
     │
     └── src/fartt           <- Source code for use in this project.
         ├── candle_cache.py <- Append-only CSV candle cache, kept up to date through the exchange layer.
+        ├── stock_cache.py <- Per-ticker cache of daily candles, dividends and splits.
         ├── cli.py         <- argparse entrypoint (the `fartt` console script).
         ├── constants.py   <- Shared column names, indicator labels, colour palette.
         ├── utils.py       <- Path helpers (project root, candle/model file paths).
