@@ -19,6 +19,7 @@ dependencies = [
     "polars>=1.36.1",
     "pyarrow>=25.0.0",
     "pydantic>=2.12.5",
+    "python-dotenv>=1.2.4",
     "ta-lib>=0.7.1",
     "yfinance>=1.7.0",
 ]
