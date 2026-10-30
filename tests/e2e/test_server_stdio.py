@@ -1,10 +1,11 @@
 """
 End-to-end check of the MCP server over stdio, the way Claude Code runs it:
-the command and arguments come from the project's `.mcp.json`. Calls the
-live exchange, so it's marked `network` (run with `task test:network`).
+the command and arguments come from the project's `.mcp.json`, unchanged, and
+`FARTT_ASSETS_DIR` points the cache at a temporary folder. Calls the live data
+provider, so it's marked `network` (run with `task test:network`).
 
 Each tool story adds its tool to `EXPECTED_TOOLS` and its call to
-`test_trading_cycle_over_stdio`, in trading-cycle order.
+`test_tools_over_stdio`.
 """
 
 import json
@@ -21,7 +22,7 @@ from mcp import Client, StdioServerParameters
 from mcp.types import LATEST_PROTOCOL_VERSION
 
 ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_TOOLS = ["get_candles", "get_forecast", "analyze_forecast", "get_model_info"]
+EXPECTED_TOOLS = ["get_candles"]
 # Per response; also the MCP client's read timeout, which defaults to none.
 RESPONSE_TIMEOUT_S = 120
 
@@ -31,72 +32,38 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def _server_command(assets_dir: Path) -> list[str]:
+def _server_command() -> list[str]:
     server = json.loads((ROOT / ".mcp.json").read_text())["mcpServers"]["fartt"]
-    # argparse takes the last value of a repeated option, so these override
-    # .mcp.json's market interval while keeping its registration as is.
-    return [
-        server["command"],
-        *server["args"],
-        "--assets-dir",
-        str(assets_dir),
-        "--interval",
-        "1d",
-    ]
+    return [server["command"], *server["args"]]
+
+
+def _environment(assets_dir: Path) -> dict[str, str]:
+    return {**os.environ, "FARTT_ASSETS_DIR": str(assets_dir)}
 
 
 @pytest.mark.network
 @pytest.mark.anyio
-async def test_trading_cycle_over_stdio(tmp_path: Path) -> None:
-    command, *args = _server_command(tmp_path)
-    params = StdioServerParameters(command=command, args=args, cwd=str(ROOT))
+async def test_tools_over_stdio(tmp_path: Path) -> None:
+    command, *args = _server_command()
+    params = StdioServerParameters(
+        command=command, args=args, cwd=str(ROOT), env=_environment(tmp_path)
+    )
 
     async with Client(params, read_timeout_seconds=RESPONSE_TIMEOUT_S) as client:
         tools = sorted(tool.name for tool in (await client.list_tools()).tools)
         assert tools == sorted(EXPECTED_TOOLS)
 
-        candles = await client.call_tool("get_candles", {"count": 5})
+        candles = await client.call_tool(
+            "get_candles", {"ticker": "ASML.AS", "count": 5}
+        )
         assert not candles.is_error, candles.content
         content = candles.structured_content
-        assert content["market"] == "BTC/EUR"
-        assert content["interval"] == "1d"
-        assert content["columns"] == ["time", "open", "high", "low", "close", "volume"]
+        assert content["ticker"] == "ASML.AS"
+        assert content["exchange"] == "XAMS"
+        assert content["columns"] == ["date", "open", "high", "low", "close", "volume"]
         assert len(content["rows"]) == 5
-        assert content["is_current"] is True
-        assert content["warning"] is None
 
-        forecast = await client.call_tool("get_forecast", {})
-        assert not forecast.is_error, forecast.content
-        prediction = forecast.structured_content
-        assert prediction["market"] == "BTC/EUR"
-        assert prediction["model"] == "repeat-last-return"
-        assert isinstance(prediction["expected_return"], float)
-        assert prediction["based_on"] == content["rows"][-1][0]
-        assert prediction["applies_to"] > prediction["based_on"]
-        assert prediction["is_current"] is True
-
-        analysis = await client.call_tool("analyze_forecast", {})
-        assert not analysis.is_error, analysis.content
-        numbers = analysis.structured_content
-        assert numbers["applies_to"] == prediction["applies_to"]
-        assert numbers["expected_return"] == prediction["expected_return"]
-        assert numbers["round_trip_cost"] == pytest.approx(0.007)
-        assert numbers["threshold"] == pytest.approx(0.007)
-        assert 0 < numbers["hit_rate_candles"] <= 100
-        assert 0 <= numbers["hit_rate"] <= 1
-        assert numbers["is_current"] is True
-
-        info = await client.call_tool("get_model_info", {})
-        assert not info.is_error, info.content
-        model = info.structured_content
-        assert model["name"] == "repeat-last-return"
-        assert model["kind"] == "naive baseline"
-        assert model["required_candles"] == 2
-        assert model["trained_at"] is None
-        assert model["metrics"] is None
-        assert model["newest_cached"] == content["rows"][-1][0]
-        assert model["newest_closed"] == model["newest_cached"]
-        assert model["is_current"] is True
+    assert (tmp_path / "stocks" / "ASML.AS" / "candles.csv").exists()
 
 
 @pytest.mark.network
@@ -118,18 +85,22 @@ def test_stdout_carries_only_the_protocol(tmp_path: Path) -> None:
             "jsonrpc": "2.0",
             "id": 3,
             "method": "tools/call",
-            "params": {"name": "get_candles", "arguments": {"count": 2}},
+            "params": {
+                "name": "get_candles",
+                "arguments": {"ticker": "ASML.AS", "count": 2},
+            },
         },
     ]
     process = subprocess.Popen(
-        _server_command(tmp_path),
+        _server_command(),
         cwd=ROOT,
+        env=_environment(tmp_path),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         text=True,
         # Its own process group, so a failed test can kill `uv` and the
-        # `fartt serve` it started together; killing `uv` alone leaves the
+        # server it started together; killing `uv` alone leaves the
         # server running.
         start_new_session=True,
     )

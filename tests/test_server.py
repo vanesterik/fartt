@@ -1,14 +1,23 @@
-from dataclasses import replace
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+import exchange_calendars as xcals
 import pytest
 from mcp import Client
 
-from fartt.candle_cache import CandleCache
-from fartt.forecast import Forecaster, RepeatLastReturn, Settings
+from fartt.data import History, Listing
 from fartt.server import build_server
-from tests.fakes import HOUR_MS, FakeExchange, candle
+from fartt.server import server as server_module
+from fartt.stock_cache import StockCache
+from tests.fakes import FakeProvider, stock_candle
+
+ROOT = Path(__file__).resolve().parents[1]
+ASML = Listing("ASML.AS", "ASML Holding N.V.", "EUR", "XAMS")
+AAPL = Listing("AAPL", "Apple Inc.", "USD", "XNYS")
+# Euronext Amsterdam and NYSE have both closed (plus margin) for 2026-10-29.
+AFTER_CLOSE = datetime(2026, 10, 29, 21, 0, tzinfo=UTC)
+AFTER_CLOSE_27 = datetime(2026, 10, 27, 21, 0, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -16,568 +25,263 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def _cache(exchange: FakeExchange, tmp_path: Path, batch_limit: int = 2) -> CandleCache:
-    return CandleCache(
-        exchange=exchange,
-        assets_dir=tmp_path,
-        market="BTC/EUR",
-        interval="1h",
-        history_start_ms=0,
-        batch_limit=batch_limit,
-        clock=lambda: exchange.now_ms,
+def sessions(exchange: str, count: int, last: date = date(2026, 10, 29)) -> list[date]:
+    """The `count` sessions of `exchange` up to and including `last`."""
+    window = xcals.get_calendar(exchange).sessions_window(last.isoformat(), -count)
+    return [session.date() for session in window]
+
+
+def history(days: list[date]) -> History:
+    return History([stock_candle(day, 100.0 + i) for i, day in enumerate(days)], [], [])
+
+
+def provider(asml_days: list[date], now: datetime = AFTER_CLOSE) -> FakeProvider:
+    return FakeProvider(
+        histories={
+            "ASML.AS": history(asml_days),
+            "AAPL": history(sessions("XNYS", 3)),
+        },
+        listings={"ASML.AS": ASML, "AAPL": AAPL},
+        now=now,
     )
 
 
-def _server(
-    cache: CandleCache,
-    settings: Settings | None = None,
-    forecaster: Forecaster | None = None,
-) -> Any:
-    return build_server(
-        cache,
-        "BTC/EUR",
-        "1h",
-        forecaster or RepeatLastReturn(),
-        settings or Settings(),
-    )
+def cache_for(fake: FakeProvider, assets_dir: Path) -> StockCache:
+    return StockCache(fake, assets_dir, clock=lambda: fake.now)
 
 
-async def _get_forecast(cache: CandleCache) -> Any:
-    async with Client(_server(cache)) as client:
-        return await client.call_tool("get_forecast", {})
-
-
-async def _analyze_forecast(
-    cache: CandleCache, settings: Settings | None = None
-) -> Any:
-    async with Client(_server(cache, settings)) as client:
-        return await client.call_tool("analyze_forecast", {})
-
-
-async def _get_model_info(
-    cache: CandleCache, forecaster: Forecaster | None = None
-) -> Any:
-    async with Client(_server(cache, forecaster=forecaster)) as client:
-        return await client.call_tool("get_model_info", {})
-
-
-async def _get_candles(cache: CandleCache, **arguments: Any) -> Any:
-    async with Client(_server(cache)) as client:
+async def call(cache: StockCache, arguments: dict[str, Any]) -> Any:
+    async with Client(build_server(cache)) as client:
         return await client.call_tool("get_candles", arguments)
 
 
 @pytest.mark.anyio
-async def test_get_candles_returns_latest_closed_candles(tmp_path: Path) -> None:
-    exchange = FakeExchange([candle(h) for h in range(3)], now_ms=3 * HOUR_MS)
+async def test_get_candles_returns_the_newest_closed_sessions(tmp_path: Path) -> None:
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
 
-    result = await _get_candles(_cache(exchange, tmp_path), count=2)
+    result = await call(cache, {"ticker": "asml.as", "count": 2})
 
-    assert not result.is_error
-    assert result.structured_content == {
-        "market": "BTC/EUR",
-        "interval": "1h",
-        "columns": ["time", "open", "high", "low", "close", "volume"],
-        "rows": [
-            ["1970-01-01T01:00:00+00:00", 100.0, 101.0, 99.0, 100.0, 2.5],
-            ["1970-01-01T02:00:00+00:00", 100.0, 101.0, 99.0, 100.0, 2.5],
-        ],
-        "new_candles": 3,
-        "is_current": True,
-        "warning": None,
-    }
-
-
-@pytest.mark.anyio
-async def test_get_candles_brings_the_cache_up_to_date(tmp_path: Path) -> None:
-    exchange = FakeExchange([candle(h) for h in range(3)], now_ms=3 * HOUR_MS)
-    cache = _cache(exchange, tmp_path)
-
-    await _get_candles(cache)
-
-    assert cache.latest(10) == [candle(h) for h in range(3)]
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert content["ticker"] == "ASML.AS"
+    assert (content["name"], content["currency"], content["exchange"]) == (
+        "ASML Holding N.V.",
+        "EUR",
+        "XAMS",
+    )
+    assert content["columns"] == ["date", "open", "high", "low", "close", "volume"]
+    assert content["rows"] == [
+        ["2026-10-28", 100.5, 102.0, 100.0, 101.0, 1000.0],
+        ["2026-10-29", 101.5, 103.0, 101.0, 102.0, 1000.0],
+    ]
+    assert content["is_current"] is True
+    assert content["warning"] is None
+    assert content["gaps"] == []
+    assert content["rebuilt"] is None
 
 
 @pytest.mark.anyio
-async def test_get_candles_returns_what_is_cached_when_count_exceeds_it(
-    tmp_path: Path,
-) -> None:
-    exchange = FakeExchange([candle(h) for h in range(3)], now_ms=3 * HOUR_MS)
+async def test_count_defaults_to_60_and_is_capped_at_200(tmp_path: Path) -> None:
+    cache = cache_for(provider(sessions("XAMS", 61)), tmp_path)
 
-    result = await _get_candles(_cache(exchange, tmp_path), count=200)
+    default = await call(cache, {"ticker": "ASML.AS"})
+    too_many = await call(cache, {"ticker": "ASML.AS", "count": 201})
 
+    assert len(default.structured_content["rows"]) == 60
+    assert too_many.is_error
+    assert "count" in too_many.content[0].text
+
+
+@pytest.mark.anyio
+async def test_count_beyond_the_history_returns_what_is_cached(tmp_path: Path) -> None:
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    result = await call(cache, {"ticker": "ASML.AS", "count": 50})
+
+    assert not result.is_error, result.content
     assert len(result.structured_content["rows"]) == 3
 
 
 @pytest.mark.anyio
-async def test_get_candles_rejects_count_out_of_range(tmp_path: Path) -> None:
-    cache = _cache(FakeExchange([], now_ms=0), tmp_path)
+async def test_first_call_reports_the_fill_and_later_calls_do_not(
+    tmp_path: Path,
+) -> None:
+    cache = cache_for(provider(sessions("XAMS", 5)), tmp_path)
 
-    for count in (0, 201):
-        result = await _get_candles(cache, count=count)
-        assert result.is_error
-        assert "count" in result.content[0].text
+    first = await call(cache, {"ticker": "ASML.AS"})
+    second = await call(cache, {"ticker": "ASML.AS"})
+
+    assert first.structured_content["new_candles"] == 5
+    assert second.structured_content["new_candles"] == 0
 
 
 @pytest.mark.anyio
-async def test_get_candles_serves_stale_cache_when_exchange_is_unreachable(
+async def test_a_rebuild_is_reported(tmp_path: Path) -> None:
+    days = sessions("XAMS", 3)
+    fake = provider(days, now=AFTER_CLOSE_27)
+    cache = cache_for(fake, tmp_path)
+    cache.update("ASML.AS")
+    fake.now = AFTER_CLOSE
+    amended = fake.histories["ASML.AS"].candles
+    amended[0] = amended[0]._replace(close=90.0)
+
+    content = (await call(cache, {"ticker": "ASML.AS"})).structured_content
+
+    assert content["rebuilt"] == "last candle amended"
+
+
+@pytest.mark.anyio
+async def test_gaps_are_reported_in_a_warning(tmp_path: Path) -> None:
+    days = [d for d in sessions("XAMS", 4) if d != date(2026, 10, 27)]
+    cache = cache_for(provider(days), tmp_path)
+
+    content = (await call(cache, {"ticker": "ASML.AS"})).structured_content
+
+    assert content["gaps"] == ["2026-10-27"]
+    assert "2026-10-27" in content["warning"]
+    assert content["is_current"] is True
+
+
+@pytest.mark.anyio
+async def test_a_session_the_provider_has_not_published_is_not_current(
     tmp_path: Path,
 ) -> None:
-    exchange = FakeExchange([candle(h) for h in range(3)], now_ms=3 * HOUR_MS)
-    cache = _cache(exchange, tmp_path)
-    cache.update()
-    exchange.reachable = False
-    exchange.now_ms = 5 * HOUR_MS  # two more periods closed meanwhile
+    days = sessions("XAMS", 3, last=date(2026, 10, 28))
+    cache = cache_for(provider(days), tmp_path)
 
-    result = await _get_candles(cache, count=2)
+    content = (await call(cache, {"ticker": "ASML.AS"})).structured_content
 
+    assert content["is_current"] is False
+    assert "2026-10-29" in content["warning"]
+
+
+@pytest.mark.anyio
+async def test_an_unreachable_provider_serves_the_cache_with_a_warning(
+    tmp_path: Path,
+) -> None:
+    fake = provider(sessions("XAMS", 5), now=AFTER_CLOSE_27)
+    cache = cache_for(fake, tmp_path)
+    cache.update("ASML.AS")
+    fake.now = AFTER_CLOSE
+    fake.reachable = False
+
+    result = await call(cache, {"ticker": "ASML.AS", "count": 2})
+
+    assert not result.is_error, result.content
     content = result.structured_content
-    assert not result.is_error
-    assert [row[0] for row in content["rows"]] == [
-        "1970-01-01T01:00:00+00:00",
-        "1970-01-01T02:00:00+00:00",
-    ]
+    assert [row[0] for row in content["rows"]] == ["2026-10-26", "2026-10-27"]
+    assert content["is_current"] is False
+    assert "2 sessions behind" in content["warning"]
     assert content["new_candles"] == 0
-    assert content["is_current"] is False
-    assert "unavailable" in content["warning"]
-    assert "hold" in content["warning"]
 
 
 @pytest.mark.anyio
-async def test_get_candles_keeps_batches_written_before_the_exchange_failed(
+async def test_an_unreachable_provider_and_no_cache_is_a_tool_error(
     tmp_path: Path,
 ) -> None:
-    exchange = FakeExchange(
-        [candle(h) for h in range(5)], now_ms=5 * HOUR_MS, fail_after_fetches=1
-    )
+    fake = provider(sessions("XAMS", 3))
+    fake.reachable = False
 
-    result = await _get_candles(_cache(exchange, tmp_path), count=10)
-
-    content = result.structured_content
-    assert len(content["rows"]) == 2
-    assert content["new_candles"] == 2
-    assert content["is_current"] is False
-    assert "unavailable" in content["warning"]
-
-
-@pytest.mark.anyio
-async def test_get_candles_flags_a_missing_newest_candle(tmp_path: Path) -> None:
-    # Reachable, but the exchange hasn't published the 2h candle yet.
-    exchange = FakeExchange([candle(0), candle(1)], now_ms=3 * HOUR_MS)
-
-    result = await _get_candles(_cache(exchange, tmp_path), count=2)
-
-    content = result.structured_content
-    assert content["is_current"] is False
-    assert "not published" in content["warning"]
-
-
-@pytest.mark.anyio
-async def test_get_candles_errors_when_nothing_is_cached_and_exchange_is_down(
-    tmp_path: Path,
-) -> None:
-    exchange = FakeExchange([], now_ms=3 * HOUR_MS, reachable=False)
-
-    result = await _get_candles(_cache(exchange, tmp_path))
+    result = await call(cache_for(fake, tmp_path), {"ticker": "ASML.AS"})
 
     assert result.is_error
-    assert "No BTC/EUR 1h candles are cached" in result.content[0].text
-    assert "Retry next cycle" in result.content[0].text
+    assert "unreachable" in result.content[0].text
 
 
 @pytest.mark.anyio
-async def test_server_offers_get_candles_as_a_read_only_tool(tmp_path: Path) -> None:
-    cache = _cache(FakeExchange([], now_ms=0), tmp_path)
-
-    async with Client(_server(cache)) as client:
-        tools = (await client.list_tools()).tools
-
-    assert [tool.name for tool in tools] == [
-        "get_candles",
-        "get_forecast",
-        "analyze_forecast",
-        "get_model_info",
-    ]
-    assert tools[0].annotations is not None
-    assert tools[0].annotations.read_only_hint is True
-    assert tools[0].input_schema["properties"]["count"]["maximum"] == 200
-    forecast_tool = tools[1]
-    assert forecast_tool.annotations is not None
-    assert forecast_tool.annotations.read_only_hint is True
-    assert forecast_tool.annotations.open_world_hint is False
-    assert forecast_tool.input_schema.get("properties", {}) == {}
-    assert forecast_tool.output_schema is not None
-    expected_return = forecast_tool.output_schema["properties"]["expected_return"]
-    assert "fraction" in expected_return["description"]
-    analysis_tool = tools[2]
-    assert analysis_tool.annotations is not None
-    assert analysis_tool.annotations.read_only_hint is True
-    assert analysis_tool.annotations.open_world_hint is False
-    assert analysis_tool.input_schema.get("properties", {}) == {}
-    assert analysis_tool.output_schema is not None
-    hit_rate = analysis_tool.output_schema["properties"]["hit_rate"]
-    assert "fraction" in hit_rate["description"]
-    info_tool = tools[3]
-    assert info_tool.annotations is not None
-    assert info_tool.annotations.read_only_hint is True
-    assert info_tool.annotations.open_world_hint is False
-    assert info_tool.input_schema.get("properties", {}) == {}
-    assert info_tool.output_schema is not None
-    trained_through = info_tool.output_schema["properties"]["trained_through"]
-    assert "last candle in the training data" in trained_through["description"]
-
-
-@pytest.mark.anyio
-async def test_get_candles_at_the_maximum_count_stays_compact(tmp_path: Path) -> None:
-    # Claude Code caps MCP tool output (about 25k tokens by default); numbers
-    # cost roughly one token per three characters, so stay well under that.
-    exchange = FakeExchange([candle(h) for h in range(200)], now_ms=200 * HOUR_MS)
-
-    result = await _get_candles(_cache(exchange, tmp_path, batch_limit=1000), count=200)
-
-    assert len(result.structured_content["rows"]) == 200
-    assert len(result.content[0].text) < 40_000
-
-
-@pytest.mark.anyio
-async def test_get_candles_is_not_current_when_the_update_failed(
+async def test_an_unknown_ticker_is_a_tool_error_with_the_format(
     tmp_path: Path,
 ) -> None:
-    # The cache already holds the newest closed period, but it couldn't be
-    # re-checked: one signal, not "current" plus a warning to hold.
-    exchange = FakeExchange([candle(h) for h in range(3)], now_ms=3 * HOUR_MS)
-    cache = _cache(exchange, tmp_path)
-    cache.update()
-    exchange.reachable = False
-
-    content = (await _get_candles(cache, count=2)).structured_content
-
-    assert content["is_current"] is False
-    assert "unavailable" in content["warning"]
-
-
-@pytest.mark.anyio
-async def test_get_candles_explains_a_market_the_exchange_does_not_list(
-    tmp_path: Path,
-) -> None:
-    # `fartt serve` starts without checking the market when the exchange is
-    # down at startup; once it's back, a mistyped market must be explained.
-    exchange = FakeExchange([], now_ms=3 * HOUR_MS, markets={"ETH/EUR"})
-
-    result = await _get_candles(_cache(exchange, tmp_path))
+    result = await call(cache_for(provider([]), tmp_path), {"ticker": "NOSUCH"})
 
     assert result.is_error
     text = result.content[0].text
-    assert "BTC/EUR" in text
-    assert "restart" in text.lower()
+    assert "NOSUCH" in text
+    assert "ASML.AS" in text
 
 
 @pytest.mark.anyio
-async def test_get_candles_explains_a_cache_it_cannot_write(tmp_path: Path) -> None:
+async def test_an_unsupported_exchange_is_a_tool_error(tmp_path: Path) -> None:
+    result = await call(cache_for(provider([]), tmp_path), {"ticker": "VOD.L"})
+
+    assert result.is_error
+    assert ".AS" in result.content[0].text
+
+
+@pytest.mark.anyio
+async def test_a_ticker_that_names_no_exchange_is_a_tool_error(
+    tmp_path: Path,
+) -> None:
+    result = await call(cache_for(provider([]), tmp_path), {"ticker": ".."})
+
+    assert result.is_error
+    assert not (tmp_path / "stocks").exists()
+
+
+@pytest.mark.anyio
+async def test_an_unwritable_cache_is_a_tool_error_for_the_operator(
+    tmp_path: Path,
+) -> None:
     blocked = tmp_path / "not-a-directory"
     blocked.write_text("")
-    exchange = FakeExchange([candle(0)], now_ms=2 * HOUR_MS)
-    cache = CandleCache(
-        exchange=exchange,
-        assets_dir=blocked,
-        market="BTC/EUR",
-        interval="1h",
-        history_start_ms=0,
-        clock=lambda: exchange.now_ms,
-    )
+    cache = cache_for(provider(sessions("XAMS", 3)), blocked)
 
-    result = await _get_candles(cache)
-
-    assert result.is_error
-    assert "cache" in result.content[0].text
-    assert "not-a-directory" in result.content[0].text
-
-
-@pytest.mark.anyio
-async def test_get_forecast_returns_the_next_candles_expected_return(
-    tmp_path: Path,
-) -> None:
-    exchange = FakeExchange(
-        [candle(0, close=100.0), candle(1, close=100.0), candle(2, close=101.0)],
-        now_ms=3 * HOUR_MS,
-    )
-    cache = _cache(exchange, tmp_path)
-    cache.update()
-
-    result = await _get_forecast(cache)
-
-    assert not result.is_error, result.content
-    assert result.structured_content == {
-        "market": "BTC/EUR",
-        "interval": "1h",
-        "model": "repeat-last-return",
-        "expected_return": pytest.approx(0.01),
-        "applies_to": "1970-01-01T03:00:00+00:00",
-        "based_on": "1970-01-01T02:00:00+00:00",
-        "is_current": True,
-        "warning": None,
-    }
-
-
-@pytest.mark.anyio
-async def test_get_forecast_keeps_the_sign_of_a_fall(tmp_path: Path) -> None:
-    exchange = FakeExchange(
-        [candle(0, close=100.0), candle(1, close=98.0)], now_ms=2 * HOUR_MS
-    )
-    cache = _cache(exchange, tmp_path)
-    cache.update()
-
-    content = (await _get_forecast(cache)).structured_content
-
-    assert content["expected_return"] == pytest.approx(-0.02)
-
-
-@pytest.mark.anyio
-async def test_get_forecast_flags_a_stale_cache(tmp_path: Path) -> None:
-    exchange = FakeExchange([candle(h) for h in range(3)], now_ms=3 * HOUR_MS)
-    cache = _cache(exchange, tmp_path)
-    cache.update()
-    exchange.now_ms = 5 * HOUR_MS  # two more periods closed; cache not updated
-
-    content = (await _get_forecast(cache)).structured_content
-
-    assert content["is_current"] is False
-    assert content["based_on"] == "1970-01-01T02:00:00+00:00"
-    assert "get_candles" in content["warning"]
-
-
-@pytest.mark.anyio
-async def test_get_forecast_stale_warning_holds_on_any_stale_get_candles(
-    tmp_path: Path,
-) -> None:
-    # get_candles already ran, but the exchange hasn't published the newest
-    # candle: the warning must end the cycle, not send the agent back.
-    exchange = FakeExchange([candle(0), candle(1)], now_ms=3 * HOUR_MS)
-    cache = _cache(exchange, tmp_path)
-    await _get_candles(cache)
-
-    warning = (await _get_forecast(cache)).structured_content["warning"]
-
-    assert "also reports is_current: false" in warning
-    assert "hold" in warning
-
-
-@pytest.mark.anyio
-async def test_get_forecast_explains_too_little_history(tmp_path: Path) -> None:
-    cache = _cache(FakeExchange([], now_ms=3 * HOUR_MS), tmp_path)
-
-    result = await _get_forecast(cache)
+    result = await call(cache, {"ticker": "ASML.AS"})
 
     assert result.is_error
     text = result.content[0].text
-    assert "needs 2" in text
-    assert "holds 0" in text
-    assert "uv run fartt download --market BTC/EUR --interval 1h" in text
+    assert "operator" in text
+    assert "not-a-directory" in text
 
 
 @pytest.mark.anyio
-async def test_get_forecast_never_calls_the_exchange(tmp_path: Path) -> None:
-    exchange = FakeExchange([candle(h) for h in range(3)], now_ms=3 * HOUR_MS)
-    cache = _cache(exchange, tmp_path)
-    cache.update()
-    exchange.fetch_calls.clear()
-    exchange.reachable = False  # it would raise if called
+async def test_the_only_tool_is_get_candles(tmp_path: Path) -> None:
+    async with Client(build_server(cache_for(provider([]), tmp_path))) as client:
+        tools = (await client.list_tools()).tools
 
-    result = await _get_forecast(cache)
-
-    assert not result.is_error, result.content
-    assert exchange.fetch_calls == []
+    assert [tool.name for tool in tools] == ["get_candles"]
 
 
-@pytest.mark.anyio
-async def test_analyze_forecast_returns_the_after_cost_analysis(
-    tmp_path: Path,
+class FakeServer:
+    def __init__(self, cache: StockCache) -> None:
+        self.cache = cache
+        self.ran = False
+
+    def run(self) -> None:
+        self.ran = True
+
+
+def run_main(monkeypatch: pytest.MonkeyPatch) -> FakeServer:
+    built: list[FakeServer] = []
+
+    def fake_build_server(cache: StockCache) -> FakeServer:
+        built.append(FakeServer(cache))
+        return built[-1]
+
+    monkeypatch.setattr(server_module, "build_server", fake_build_server)
+    monkeypatch.setattr(server_module, "YFinanceProvider", lambda: provider([]))
+    server_module.main()
+    assert built[0].ran
+    return built[0]
+
+
+def test_main_uses_the_repository_assets_by_default(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    exchange = FakeExchange(
-        [candle(0, close=100.0), candle(1, close=101.0), candle(2, close=102.0)],
-        now_ms=3 * HOUR_MS,
-    )
-    cache = _cache(exchange, tmp_path)
-    cache.update()
+    monkeypatch.delenv(server_module.ASSETS_DIR_ENV, raising=False)
+    monkeypatch.chdir(tmp_path)
 
-    result = await _analyze_forecast(cache)
+    server = run_main(monkeypatch)
 
-    assert not result.is_error, result.content
-    expected_return = 102 / 101 - 1
-    assert result.structured_content == {
-        "market": "BTC/EUR",
-        "interval": "1h",
-        "model": "repeat-last-return",
-        "applies_to": "1970-01-01T03:00:00+00:00",
-        "based_on": "1970-01-01T02:00:00+00:00",
-        "is_current": True,
-        "warning": None,
-        "expected_return": pytest.approx(expected_return),
-        "round_trip_cost": pytest.approx(0.007),
-        "expected_return_after_costs": pytest.approx(expected_return - 0.007),
-        "threshold": pytest.approx(0.007),
-        "clears_entry_threshold": True,
-        "clears_exit_threshold": False,
-        "hit_rate": 1.0,  # candle 2 rose, as candle 1 did
-        "hit_rate_candles": 1,
-    }
+    assert server_module.DEFAULT_ASSETS_DIR == ROOT / "assets"
+    assert server.cache.directory("AAPL") == ROOT / "assets" / "stocks" / "AAPL"
 
 
-@pytest.mark.anyio
-async def test_analyze_forecast_uses_the_servers_settings(tmp_path: Path) -> None:
-    exchange = FakeExchange(
-        [candle(0, close=100.0), candle(1, close=101.0)], now_ms=2 * HOUR_MS
-    )
-    cache = _cache(exchange, tmp_path)
-    cache.update()
-
-    settings = Settings(fee=0.0, slippage=0.0, threshold=0.02)
-    content = (await _analyze_forecast(cache, settings)).structured_content
-
-    assert content["round_trip_cost"] == 0.0
-    assert content["expected_return_after_costs"] == pytest.approx(0.01)
-    assert content["threshold"] == 0.02
-    assert content["clears_entry_threshold"] is False
-
-
-@pytest.mark.anyio
-async def test_analyze_forecast_flags_a_stale_cache(tmp_path: Path) -> None:
-    exchange = FakeExchange([candle(h) for h in range(3)], now_ms=3 * HOUR_MS)
-    cache = _cache(exchange, tmp_path)
-    cache.update()
-    exchange.now_ms = 5 * HOUR_MS  # two more periods closed; cache not updated
-
-    content = (await _analyze_forecast(cache)).structured_content
-
-    assert content["is_current"] is False
-    assert "get_candles" in content["warning"]
-
-
-@pytest.mark.anyio
-async def test_analyze_forecast_explains_too_little_history(tmp_path: Path) -> None:
-    cache = _cache(FakeExchange([], now_ms=3 * HOUR_MS), tmp_path)
-
-    result = await _analyze_forecast(cache)
-
-    assert result.is_error
-    text = result.content[0].text
-    assert "needs 2" in text
-    assert "holds 0" in text
-    assert "uv run fartt download --market BTC/EUR --interval 1h" in text
-
-
-@pytest.mark.anyio
-async def test_analyze_forecast_never_calls_the_exchange(tmp_path: Path) -> None:
-    exchange = FakeExchange([candle(h) for h in range(3)], now_ms=3 * HOUR_MS)
-    cache = _cache(exchange, tmp_path)
-    cache.update()
-    exchange.fetch_calls.clear()
-    exchange.reachable = False  # it would raise if called
-
-    result = await _analyze_forecast(cache)
-
-    assert not result.is_error, result.content
-    assert exchange.fetch_calls == []
-
-
-@pytest.mark.anyio
-async def test_get_model_info_describes_the_baseline(tmp_path: Path) -> None:
-    exchange = FakeExchange([candle(h) for h in range(3)], now_ms=3 * HOUR_MS)
-    cache = _cache(exchange, tmp_path)
-    cache.update()
-
-    result = await _get_model_info(cache)
-
-    assert not result.is_error, result.content
-    content = dict(result.structured_content)
-    note = content.pop("note")
-    assert content == {
-        "market": "BTC/EUR",
-        "interval": "1h",
-        "name": "repeat-last-return",
-        "kind": "naive baseline",
-        "required_candles": 2,
-        "trained_through": None,
-        "trained_at": None,
-        "metrics": None,
-        "newest_cached": "1970-01-01T02:00:00+00:00",
-        "newest_closed": "1970-01-01T02:00:00+00:00",
-        "is_current": True,
-    }
-    assert "no training date" in note
-    assert "trained model" in note
-
-
-@pytest.mark.anyio
-async def test_get_model_info_answers_with_an_empty_cache(tmp_path: Path) -> None:
-    cache = _cache(FakeExchange([], now_ms=3 * HOUR_MS), tmp_path)
-
-    result = await _get_model_info(cache)
-
-    assert not result.is_error, result.content
-    content = result.structured_content
-    assert content["newest_cached"] is None
-    assert content["newest_closed"] == "1970-01-01T02:00:00+00:00"
-    assert content["is_current"] is False
-    assert "empty" in content["note"]
-    assert "uv run fartt download --market BTC/EUR --interval 1h" in content["note"]
-
-
-@pytest.mark.anyio
-async def test_get_model_info_flags_stale_data(tmp_path: Path) -> None:
-    exchange = FakeExchange([candle(h) for h in range(3)], now_ms=3 * HOUR_MS)
-    cache = _cache(exchange, tmp_path)
-    cache.update()
-    exchange.now_ms = 5 * HOUR_MS  # two more periods closed; cache not updated
-
-    content = (await _get_model_info(cache)).structured_content
-
-    assert content["newest_cached"] == "1970-01-01T02:00:00+00:00"
-    assert content["newest_closed"] == "1970-01-01T04:00:00+00:00"
-    assert content["is_current"] is False
-    assert "get_candles" in content["note"]
-
-
-@pytest.mark.anyio
-async def test_get_model_info_stale_note_holds_on_any_stale_get_candles(
-    tmp_path: Path,
+def test_main_reads_the_assets_dir_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # get_candles already ran, but the exchange hasn't published the newest
-    # candle: the note must end the cycle, not send the agent back.
-    exchange = FakeExchange([candle(0), candle(1)], now_ms=3 * HOUR_MS)
-    cache = _cache(exchange, tmp_path)
-    await _get_candles(cache)
+    monkeypatch.setenv(server_module.ASSETS_DIR_ENV, str(tmp_path))
 
-    note = (await _get_model_info(cache)).structured_content["note"]
+    server = run_main(monkeypatch)
 
-    assert "also reports is_current: false" in note
-    assert "hold" in note
-
-
-@pytest.mark.anyio
-async def test_get_model_info_reports_the_training_data_cutoff(
-    tmp_path: Path,
-) -> None:
-    exchange = FakeExchange([candle(h) for h in range(3)], now_ms=3 * HOUR_MS)
-    cache = _cache(exchange, tmp_path)
-    cache.update()
-    trained = replace(RepeatLastReturn(), trained_through_ms=HOUR_MS)
-
-    content = (await _get_model_info(cache, trained)).structured_content
-
-    assert content["trained_through"] == "1970-01-01T01:00:00+00:00"
-    assert content["trained_at"] is None  # the cutoff is not the training date
-    assert content["metrics"] is None
-
-
-@pytest.mark.anyio
-async def test_get_model_info_never_calls_the_exchange(tmp_path: Path) -> None:
-    exchange = FakeExchange([candle(h) for h in range(3)], now_ms=3 * HOUR_MS)
-    cache = _cache(exchange, tmp_path)
-    cache.update()
-    exchange.fetch_calls.clear()
-    exchange.reachable = False  # it would raise if called
-
-    result = await _get_model_info(cache)
-
-    assert not result.is_error, result.content
-    assert exchange.fetch_calls == []
+    assert server.cache.directory("AAPL") == tmp_path / "stocks" / "AAPL"
