@@ -98,6 +98,16 @@ def _row(candle: Candle) -> Row:
     )
 
 
+def _cache_error(ticker: str, error: Exception) -> ToolError:
+    # A folder it can't write, or a file it can't parse: retrying won't help.
+    logger.error(f"get_candles {ticker}: {error}")
+    return ToolError(
+        f"The stock cache for {ticker} can't be read or written: {error}. "
+        "Retrying won't help until the operator fixes or deletes the ticker's "
+        "cache folder."
+    )
+
+
 def build_server(cache: StockCache) -> MCPServer:
     """
     Build the MCP server on `cache`.
@@ -148,19 +158,24 @@ def build_server(cache: StockCache) -> MCPServer:
         except ProviderUnavailable as error:
             logger.warning(f"get_candles {ticker}: {error}")
             update = None
-        except OSError as error:
-            logger.error(f"get_candles {ticker}: {error}")
-            raise ToolError(
-                f"Couldn't write the stock cache for {ticker}: {error}. Retrying "
-                "won't help until the operator fixes the cache folder."
-            ) from error
+        except (OSError, ValueError, KeyError) as error:
+            raise _cache_error(ticker, error) from error
 
-        candles = cache.latest(ticker, count)
-        listing = cache.listing(ticker)
-        if not candles or listing is None:
+        try:
+            candles = cache.latest(ticker, count)
+            listing = cache.listing(ticker)
+        except (OSError, ValueError, KeyError) as error:
+            raise _cache_error(ticker, error) from error
+        if update is None and (not candles or listing is None):
             raise ToolError(
                 f"Nothing is cached for {ticker} yet and the data provider is "
                 "unreachable. Try again later."
+            )
+        if not candles or listing is None:
+            raise ToolError(
+                f"The data provider has no closed sessions for {ticker} yet, "
+                "for instance because it listed today. Try again after its "
+                "first session closes."
             )
 
         newest = cache.newest_closed_session(ticker)

@@ -148,9 +148,9 @@ select = [
 "notebooks/*" = ["DTZ001"]
 
 [tool.pytest.ini_options]
-# Tests marked `network` call a live exchange API. They are deselected by
+# Tests marked `network` call Yahoo Finance. They are deselected by
 # default so the suite, and the lefthook gate that runs it, stays offline;
 # run them with `uv run pytest -m network`. Strict markers turn a misspelt
 # marker into an error instead of a test that silently always runs.
 addopts = ["--strict-markers", "-m", "not network"]
-markers = ["network: calls a live exchange API"]
+markers = ["network: calls Yahoo Finance"]
