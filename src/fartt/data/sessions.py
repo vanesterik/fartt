@@ -107,6 +107,11 @@ def missing_sessions(exchange: str, dates: Sequence[date]) -> list[date]:
     ]
 
 
+def exchange_date(exchange: str, moment: datetime) -> date:
+    """The date `moment` (timezone-aware) falls on in the exchange's time zone."""
+    return moment.astimezone(_calendar(exchange).tz).date()
+
+
 class MarketStatus(NamedTuple):
     open: bool
     next_open: datetime | None  # UTC; None while the exchange is open

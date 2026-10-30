@@ -7,6 +7,7 @@ from fartt.data import (
     UnknownTicker,
     UnsupportedExchange,
     calendar_for,
+    exchange_date,
     market_status,
     missing_sessions,
     newest_closed_session,
@@ -124,3 +125,9 @@ def test_market_status_on_a_holiday() -> None:
 
 def test_market_status_in_amsterdam() -> None:
     assert market_status("XAMS", utc(2026, 10, 29, 10, 0)).open is True
+
+
+def test_exchange_date_is_the_date_on_the_exchange() -> None:
+    # 01:00 UTC on the 30th is still the 29th in New York.
+    assert exchange_date("XNYS", utc(2026, 10, 30, 1, 0)) == date(2026, 10, 29)
+    assert exchange_date("XAMS", utc(2026, 10, 29, 23, 30)) == date(2026, 10, 30)
