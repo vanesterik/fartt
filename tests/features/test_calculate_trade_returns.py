@@ -11,14 +11,14 @@ def test_calculate_trade_returns_opens_and_closes_a_trade() -> None:
     returns, profits = calculate_trade_returns(candle_returns, initial_capital=500)
 
     gross_return = (1 + 0.02) * (1 - 0.01)
-    cost_factor = (1 - 0.0025) ** 2
+    cost_factor = (1 - 0.0005) ** 2
     expected_return = gross_return * cost_factor - 1
     assert returns == pytest.approx([expected_return])
     assert profits == pytest.approx([500 * expected_return])
 
 
 def test_calculate_trade_returns_no_trade_within_threshold() -> None:
-    candle_returns = [0.001, -0.002, 0.003]
+    candle_returns = [0.0001, -0.0002, 0.0003]
 
     returns, profits = calculate_trade_returns(candle_returns)
 
@@ -47,7 +47,7 @@ def test_calculate_trade_returns_force_closes_open_position_at_end() -> None:
     returns, _ = calculate_trade_returns(candle_returns)
 
     gross_return = 1 + 0.02
-    cost_factor = (1 - 0.0025) ** 2
+    cost_factor = (1 - 0.0005) ** 2
     expected_return = gross_return * cost_factor - 1
     assert returns == pytest.approx([expected_return])
 
@@ -93,7 +93,7 @@ def test_calculate_trade_returns_max_holding_period_force_closes_early() -> None
     capped_returns, _ = calculate_trade_returns(candle_returns, max_holding_period=2)
 
     gross_return = (1 + 0.001) * (1 + 0.001)
-    cost_factor = (1 - 0.0025) ** 2
+    cost_factor = (1 - 0.0005) ** 2
     expected_capped_return = gross_return * cost_factor - 1
     assert len(unlimited_returns) == 1
     assert len(capped_returns) == 1
@@ -120,11 +120,13 @@ def test_calculate_trade_returns_stop_loss_force_closes_before_signal() -> None:
     # trade has freed up the position.
     candle_returns = [0.01] + [-0.004] * 6 + [0.05, 0.05]
 
-    unstopped_returns, _ = calculate_trade_returns(candle_returns)
-    stopped_returns, _ = calculate_trade_returns(candle_returns, stop_loss_pct=0.02)
+    unstopped_returns, _ = calculate_trade_returns(candle_returns, threshold=0.005)
+    stopped_returns, _ = calculate_trade_returns(
+        candle_returns, threshold=0.005, stop_loss_pct=0.02
+    )
 
     gross_return = (1 - 0.004) ** 6
-    cost_factor = (1 - 0.0025) ** 2
+    cost_factor = (1 - 0.0005) ** 2
     expected_stopped_return = gross_return * cost_factor - 1
     assert len(unstopped_returns) == 1
     assert len(stopped_returns) == 2
@@ -169,7 +171,7 @@ def test_calculate_trade_returns_predicted_candle_returns_can_act_before_the_mov
         candle_returns, predicted_candle_returns
     )
 
-    cost_factor = (1 - 0.0025) ** 2
+    cost_factor = (1 - 0.0005) ** 2
     expected_reactive_return = (1 + 0.001) * (1 - 0.01) * cost_factor - 1
     expected_oracle_return = (1 + 0.05) * (1 + 0.001) * cost_factor - 1
     assert reactive_returns == pytest.approx([expected_reactive_return])
@@ -193,6 +195,6 @@ def test_calculate_trade_returns_predicted_candle_returns_trailing_nan_is_no_sig
 
     returns, _ = calculate_trade_returns(candle_returns, predicted_candle_returns)
 
-    cost_factor = (1 - 0.0025) ** 2
+    cost_factor = (1 - 0.0005) ** 2
     expected_return = (1 - 0.01) * cost_factor - 1
     assert returns == pytest.approx([expected_return])
