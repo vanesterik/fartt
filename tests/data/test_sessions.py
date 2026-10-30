@@ -2,7 +2,14 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from fartt.data import UnsupportedExchange, calendar_for, newest_closed_session
+from fartt.data import (
+    UnknownTicker,
+    UnsupportedExchange,
+    calendar_for,
+    missing_sessions,
+    newest_closed_session,
+    normalise_ticker,
+)
 
 
 def utc(year: int, month: int, day: int, hour: int, minute: int) -> datetime:
@@ -46,3 +53,44 @@ def test_early_close_counts() -> None:
     assert newest_closed_session("XNYS", utc(2026, 11, 27, 18, 30)) == date(
         2026, 11, 27
     )
+
+
+def test_normalise_ticker_strips_and_upper_cases() -> None:
+    assert normalise_ticker(" asml.as ") == "ASML.AS"
+    assert normalise_ticker("brk-b") == "BRK-B"
+
+
+@pytest.mark.parametrize("ticker", ["", "../X", "A/B", "AAPL;rm"])
+def test_normalise_ticker_rejects_what_cannot_be_a_ticker(ticker: str) -> None:
+    with pytest.raises(UnknownTicker):
+        normalise_ticker(ticker)
+
+
+def test_calendar_for_ignores_surrounding_whitespace() -> None:
+    assert calendar_for(" asml.as ") == "XAMS"
+
+
+def test_holidays_and_weekends_are_not_gaps() -> None:
+    # Euronext is closed on Good Friday and Easter Monday 2026; NYSE on Thanksgiving.
+    assert missing_sessions("XAMS", [date(2026, 4, 2), date(2026, 4, 7)]) == []
+    assert missing_sessions("XNYS", [date(2026, 11, 25), date(2026, 11, 27)]) == []
+
+
+def test_a_missing_trading_day_is_a_gap() -> None:
+    dates = [date(2026, 10, 26), date(2026, 10, 28)]
+
+    assert missing_sessions("XNYS", dates) == [date(2026, 10, 27)]
+
+
+def test_fewer_than_two_dates_have_no_gaps() -> None:
+    assert missing_sessions("XNYS", []) == []
+    assert missing_sessions("XNYS", [date(2026, 10, 26)]) == []
+
+
+def test_dates_before_the_calendar_starts_are_not_checked() -> None:
+    dates = [date(1980, 12, 12), date(2026, 10, 26), date(2026, 10, 27)]
+
+    gaps = missing_sessions("XNYS", dates)
+
+    assert gaps
+    assert min(gaps).year >= 2000
