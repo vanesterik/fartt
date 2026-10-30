@@ -3,7 +3,11 @@ from typing import Any
 
 import pandas as pd
 import pytest
-from yfinance.exceptions import YFRateLimitError, YFTzMissingError
+from yfinance.exceptions import (
+    YFPricesMissingError,
+    YFRateLimitError,
+    YFTzMissingError,
+)
 
 from fartt.data import (
     Candle,
@@ -171,12 +175,21 @@ def test_unknown_ticker_raises_unknown_ticker() -> None:
 
 
 def test_missing_prices_after_start_is_an_empty_history() -> None:
-    error = YFTzMissingError("AAPL")
+    error = YFPricesMissingError("AAPL", "start date cannot be after end date")
     provider, _ = provider_for(FakeTicker(error=error))
 
     history = provider.history("AAPL", date(2026, 10, 29))
 
     assert history == ([], [], [])
+
+
+def test_delisted_ticker_after_start_still_raises() -> None:
+    # A ticker delisted or renamed after it was cached must not look like
+    # "nothing new" forever.
+    provider, _ = provider_for(FakeTicker(error=YFTzMissingError("TWTR")))
+
+    with pytest.raises(UnknownTicker):
+        provider.history("TWTR", date(2026, 10, 1))
 
 
 @pytest.mark.parametrize("error", [YFRateLimitError(), ConnectionError("reset")])
@@ -315,3 +328,34 @@ def test_quote_without_a_time_is_unavailable() -> None:
 
     with pytest.raises(ProviderUnavailable):
         provider.quote("AAPL")
+
+
+def test_http_404_after_start_still_raises() -> None:
+    provider, _ = provider_for(FakeTicker(error=HTTPError(404)))
+
+    with pytest.raises(UnknownTicker):
+        provider.history("TWTR", date(2026, 10, 1))
+
+
+def test_duplicate_session_rows_keep_the_last() -> None:
+    # Yahoo sometimes returns a midnight row and a later row for one session.
+    index = pd.DatetimeIndex(
+        [
+            pd.Timestamp("2026-10-28 00:00", tz=NY),
+            pd.Timestamp("2026-10-28 15:59", tz=NY),
+        ]
+    )
+    rows = pd.DataFrame([row(10.0), row(11.0)], index=index, columns=COLUMNS)
+    provider, _ = provider_for(FakeTicker(rows))
+
+    history = provider.history("AAPL", None)
+
+    assert [(c.date, c.close) for c in history.candles] == [(date(2026, 10, 28), 11.0)]
+
+
+def test_a_frame_without_price_columns_is_unavailable() -> None:
+    rows = frame([("2026-10-28", row(10.0))]).drop(columns=["Open"])
+    provider, _ = provider_for(FakeTicker(rows))
+
+    with pytest.raises(ProviderUnavailable):
+        provider.history("AAPL", None)
