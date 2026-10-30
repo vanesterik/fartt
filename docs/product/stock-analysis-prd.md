@@ -33,7 +33,7 @@ The first three cost money directly. The fourth makes it likely. The fifth hides
 ### Evidence
 
 - The operator's own account of how picks go wrong (the five points above, confirmed 2026-10-29).
-- Fartt's earlier direction (forecasting BTC returns from price history alone) found no model with an edge. That's a reason to distrust any single signal, and to measure rather than assume an edge.
+- Forecasting returns from price history alone is hard to trust: a single model rarely shows a lasting edge after costs. That's a reason to distrust any single signal, and to measure rather than assume an edge.
 - An LLM is good at building a convincing story from mixed signals. Without scoring, the agent's analysis could fix point 4 while making points 1–3 feel safer than they are.
 
 ## 3. Target Users & Personas
@@ -55,7 +55,7 @@ The first three cost money directly. The fourth makes it likely. The fifth hides
 
 ### Why now?
 
-The BTC forecasting direction showed no edge, and its server, test harness, data layer and cache patterns are built and reusable. Moving to stocks and to many signals reuses that foundation for a problem the operator actually has, now, with their own money.
+The operator picks stocks today, with their own money, and the five problems above cost money on every pick. An MCP server with Claude Code as the analyst is cheap to build for one person, and a journal scored against the index answers within months whether the effort beats simply holding it.
 
 ### End state
 
@@ -185,7 +185,7 @@ Built in this order. Each epic is a GitHub issue on the [project board](https://
 
 | Epic | Issue | Scope |
 |---|---|---|
-| A. Data Foundation | #88 | `DataProvider` (yfinance), stock candle cache, `get_candles`, `get_quote`; the BTC direction's code removed |
+| A. Data Foundation | #88 | `DataProvider` (yfinance), stock candle cache, `get_candles`, `get_quote` |
 | B. Technical Analysis | #89 | `get_indicators`, `get_support_resistance`, `get_trend` |
 | C. Journal & Evaluation | #90 | `record_decision`, `score_decisions`, `get_performance` |
 | D. Analysis Pipeline | #91 | The procedure as an MCP prompt; the permission profile |
@@ -212,8 +212,8 @@ Stories are written just in time, one epic at a time, as GitHub issues in the Us
 
 ## 8. Out of Scope
 
-- **Forecast models.** The BTC direction's model pipeline (MLP, CNN, the forecast package, PyTorch, the notebooks) is removed in epic A. If a forecast returns, it's rebuilt for stocks as one signal among many.
-- **Crypto.** The ccxt exchange layer and the BTC candle data are removed in epic A.
+- **Forecast models.** A price forecast may return later as one signal among many, not as the basis of a decision.
+- **Crypto,** and any market outside Euronext and the US exchanges.
 - **Order book (L2) data.** It's expensive and of little value for holding periods of days to weeks. Revisit only if the journal shows a real hit rate.
 - **Intraday trading** and timeframes shorter than a day.
 - **News and sentiment signals, and agent-driven retraining.**
@@ -227,7 +227,7 @@ Stories are written just in time, one epic at a time, as GitHub issues in the Us
 
 - **yfinance** for development data. It's unofficial and can break or be rate-limited without notice.
 - **An IBKR account and its paper trading account**, and later market data subscriptions for Euronext and the US. Open them while developing on yfinance.
-- **The MCP SDK** and Claude Code's MCP support, as in the earlier direction.
+- **The MCP SDK** and Claude Code's MCP support.
 
 ### Risks and mitigations
 
