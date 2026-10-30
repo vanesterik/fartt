@@ -8,7 +8,9 @@ from fartt.data.sessions import (
     CLOSE_MARGIN,
     SUFFIX_CALENDARS,
     calendar_for,
+    missing_sessions,
     newest_closed_session,
+    normalise_ticker,
 )
 from fartt.data.types import Candle, Dividend, History, Listing, Quote, Split
 from fartt.data.yfinance_provider import YFinanceProvider
@@ -28,5 +30,7 @@ __all__ = [
     "UnsupportedExchange",
     "YFinanceProvider",
     "calendar_for",
+    "missing_sessions",
     "newest_closed_session",
+    "normalise_ticker",
 ]

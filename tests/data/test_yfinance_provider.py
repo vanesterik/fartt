@@ -359,3 +359,12 @@ def test_a_frame_without_price_columns_is_unavailable() -> None:
 
     with pytest.raises(ProviderUnavailable):
         provider.history("AAPL", None)
+
+
+def test_tickers_are_normalised_before_the_request() -> None:
+    info = {"currency": "EUR", "quoteType": "EQUITY", "longName": "ASML Holding N.V."}
+    provider, requested = provider_for(FakeTicker(info=info))
+
+    provider.listing(" asml.as ")
+
+    assert requested == ["ASML.AS"]

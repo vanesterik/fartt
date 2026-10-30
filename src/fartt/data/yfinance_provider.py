@@ -9,7 +9,11 @@ import yfinance
 from yfinance.exceptions import YFPricesMissingError, YFTickerMissingError
 
 from fartt.data.provider import ProviderUnavailable, UnknownTicker
-from fartt.data.sessions import calendar_for, newest_closed_session
+from fartt.data.sessions import (
+    calendar_for,
+    newest_closed_session,
+    normalise_ticker,
+)
 from fartt.data.types import Candle, Dividend, History, Listing, Quote, Split
 
 _PRICES = ("Open", "High", "Low", "Close")
@@ -55,7 +59,7 @@ class YFinanceProvider:
         yfinance.config.debug.hide_exceptions = False
 
     def listing(self, ticker: str) -> Listing:
-        ticker = ticker.upper()
+        ticker = normalise_ticker(ticker)
         exchange = calendar_for(ticker)
         with _translate_errors(ticker):
             info = self._ticker_factory(ticker).info
@@ -65,7 +69,7 @@ class YFinanceProvider:
         return Listing(ticker, str(name), str(info["currency"]), exchange)
 
     def history(self, ticker: str, start: date | None) -> History:
-        ticker = ticker.upper()
+        ticker = normalise_ticker(ticker)
         exchange = calendar_for(ticker)
         window: dict[str, str] = (
             {"period": "max"} if start is None else {"start": start.isoformat()}
@@ -119,7 +123,7 @@ class YFinanceProvider:
         return History(candles, dividends, splits)
 
     def quote(self, ticker: str) -> Quote:
-        ticker = ticker.upper()
+        ticker = normalise_ticker(ticker)
         calendar_for(ticker)
         with _translate_errors(ticker):
             info = self._ticker_factory(ticker).info
