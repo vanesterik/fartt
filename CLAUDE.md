@@ -54,7 +54,7 @@ uv run ruff check . --fix        # lint
 uv run pyright                   # type check (strict mode, src/ only — tests/ excluded)
 ```
 
-There is no CLI: the agent calls the server's tools, and a ticker's cache fills on its first call. The server reads `FARTT_ASSETS_DIR` for the cache's folder, defaulting to `assets/` in the repository wherever it was started from. It logs to stderr only, since stdout carries the protocol.
+There is no CLI: the agent calls the server's tools, and a ticker's cache fills on its first call. The server reads `FARTT_ASSETS_DIR` for the cache's folder from the environment or else the repository's `.env` (copy `.env.example`), defaulting to `assets/` in the repository wherever it was started from; a relative path is relative to the repository. It logs to stderr only, since stdout carries the protocol.
 
 `tests/e2e/test_server_stdio.py` checks the server end to end: it starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder, calls the tools, and asserts stdout carries only JSON-RPC, including anything written at shutdown. Each new tool joins it: add its name to `EXPECTED_TOOLS` and its call to `test_tools_over_stdio`.
 

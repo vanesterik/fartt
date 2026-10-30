@@ -281,7 +281,9 @@ class FakeServer:
         self.ran = True
 
 
-def run_main(monkeypatch: pytest.MonkeyPatch) -> FakeServer:
+def run_main(
+    monkeypatch: pytest.MonkeyPatch, env_file: Path | None = None
+) -> FakeServer:
     built: list[FakeServer] = []
 
     def fake_build_server(cache: StockCache) -> FakeServer:
@@ -290,6 +292,10 @@ def run_main(monkeypatch: pytest.MonkeyPatch) -> FakeServer:
 
     monkeypatch.setattr(server_module, "build_server", fake_build_server)
     monkeypatch.setattr(server_module, "YFinanceProvider", lambda: provider([]))
+    # A developer's own .env must not decide what these tests see.
+    monkeypatch.setattr(
+        server_module, "ENV_FILE", env_file or ROOT / "no-such-dir" / ".env"
+    )
     server_module.main()
     assert built[0].ran
     return built[0]
@@ -307,11 +313,42 @@ def test_main_uses_the_repository_assets_by_default(
     assert server.cache.directory("AAPL") == ROOT / "assets" / "stocks" / "AAPL"
 
 
-def test_main_reads_the_assets_dir_from_the_environment(
+def test_main_reads_the_assets_dir_from_the_env_file(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setenv(server_module.ASSETS_DIR_ENV, str(tmp_path))
+    monkeypatch.delenv(server_module.ASSETS_DIR_ENV, raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"FARTT_ASSETS_DIR={tmp_path / 'cache'}\n")
 
-    server = run_main(monkeypatch)
+    server = run_main(monkeypatch, env_file)
 
-    assert server.cache.directory("AAPL") == tmp_path / "stocks" / "AAPL"
+    assert server.cache.directory("AAPL") == tmp_path / "cache" / "stocks" / "AAPL"
+
+
+def test_a_relative_assets_dir_is_relative_to_the_repository(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv(server_module.ASSETS_DIR_ENV, raising=False)
+    monkeypatch.chdir(tmp_path)
+    env_file = tmp_path / ".env"
+    env_file.write_text("FARTT_ASSETS_DIR=data\n")
+
+    server = run_main(monkeypatch, env_file)
+
+    assert server.cache.directory("AAPL") == ROOT / "data" / "stocks" / "AAPL"
+
+
+def test_the_environment_wins_over_the_env_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(server_module.ASSETS_DIR_ENV, str(tmp_path / "from-env"))
+    env_file = tmp_path / ".env"
+    env_file.write_text(f"FARTT_ASSETS_DIR={tmp_path / 'from-file'}\n")
+
+    server = run_main(monkeypatch, env_file)
+
+    assert server.cache.directory("AAPL") == tmp_path / "from-env" / "stocks" / "AAPL"
+
+
+def test_the_example_env_file_names_the_assets_dir() -> None:
+    assert server_module.ASSETS_DIR_ENV in (ROOT / ".env.example").read_text()

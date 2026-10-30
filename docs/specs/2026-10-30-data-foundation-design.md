@@ -183,7 +183,7 @@ server.main()    →  StockCache(YFinanceProvider(), assets_dir) → build_serve
 ```
 
 - There's no CLI. A ticker is fetched on the spot by the tools, so filling a cache by hand has no use.
-- The cache lives in `assets/` under the repository root by default. The environment variable `FARTT_ASSETS_DIR` overrides it, which is how the tests point the server at a temporary folder. *My call:* no `.env` file until there's a second setting.
+- The cache lives in `assets/` under the repository root by default. `FARTT_ASSETS_DIR` overrides it, set in the repository's `.env` (with `.env.example` as the template, decided with the operator on 2026-10-30) or in the environment, which wins; that's how the tests point the server at a temporary folder. A relative path is relative to the repository.
 - `main()` sends logs to stderr only, because stdout carries the protocol.
 
 **`get_candles(ticker, count=60)`**, with `count` from 1 to 200:

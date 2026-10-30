@@ -34,7 +34,7 @@ Open Claude Code in the repository and ask about a stock. The MCP server is regi
 > How has ASML.AS traded over the last three months?
 ```
 
-The server's one tool so far, `get_candles`, returns a ticker's newest closed daily sessions. Tickers use Yahoo's format: `AAPL` for a US listing, `ASML.AS` for Euronext Amsterdam (`.PA`, `.BR`, `.LS`, `.MI`, `.IR` and `.OL` for the other Euronext markets). The first call for a ticker fetches its full history from Yahoo Finance (through [yfinance](https://github.com/ranaroussi/yfinance)) into `assets/stocks/<TICKER>/`; later calls fetch only what's new, and rebuild the history when a split appears. Prices are split-adjusted, not dividend-adjusted; dividends and splits are kept separately. No API keys are needed. `FARTT_ASSETS_DIR` moves the cache elsewhere.
+The server's one tool so far, `get_candles`, returns a ticker's newest closed daily sessions. Tickers use Yahoo's format: `AAPL` for a US listing, `ASML.AS` for Euronext Amsterdam (`.PA`, `.BR`, `.LS`, `.MI`, `.IR` and `.OL` for the other Euronext markets). The first call for a ticker fetches its full history from Yahoo Finance (through [yfinance](https://github.com/ranaroussi/yfinance)) into `assets/stocks/<TICKER>/`; later calls fetch only what's new, and rebuild the history when a split appears. Prices are split-adjusted, not dividend-adjusted; dividends and splits are kept separately. No API keys are needed. To move the cache elsewhere, copy `.env.example` to `.env` and set `FARTT_ASSETS_DIR`.
 
 ## Project Structure
 
@@ -57,6 +57,7 @@ The project follows the [cookiecutter data science project template](https://dri
     ├── .python-version    <- The pinned Python version (3.14).
     ├── Taskfile.yml       <- Everyday commands (`task --list`).
     ├── .mcp.json          <- Registers the MCP server for Claude Code.
+    ├── .env.example       <- Template for .env, the server's settings (not in git).
     │
     └── src/fartt           <- Source code for use in this project.
         ├── stock_cache.py <- Per-ticker cache of daily candles, dividends, splits and listing.

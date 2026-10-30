@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 from typing import Annotated
 
+from dotenv import dotenv_values
 from loguru import logger
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -27,10 +28,14 @@ MAX_CANDLES = 200
 
 COLUMNS = ["date", "open", "high", "low", "close", "volume"]
 
-# The cache lives in the repository's assets/ wherever Claude Code starts the
-# server from; FARTT_ASSETS_DIR points it elsewhere (the end-to-end test does).
-DEFAULT_ASSETS_DIR = Path(__file__).resolve().parents[3] / "assets"
+# Paths are relative to the repository, wherever Claude Code starts the server
+# from. This assumes an editable install (`uv sync`), as the project runs.
+ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_ASSETS_DIR = ROOT / "assets"
+# FARTT_ASSETS_DIR moves the cache, set in the environment (the end-to-end
+# test does) or in the repository's .env (see .env.example).
 ASSETS_DIR_ENV = "FARTT_ASSETS_DIR"
+ENV_FILE = ROOT / ".env"
 
 INSTRUCTIONS = (
     "Fartt's stock analysis server. Tools take one ticker per call, in "
@@ -234,6 +239,9 @@ def main() -> None:
     """
     logger.remove()
     logger.add(sys.stderr, level="INFO")
-    assets_dir = Path(os.environ.get(ASSETS_DIR_ENV) or DEFAULT_ASSETS_DIR)
+    setting = os.environ.get(ASSETS_DIR_ENV) or dotenv_values(ENV_FILE).get(
+        ASSETS_DIR_ENV
+    )
+    assets_dir = ROOT / setting if setting else DEFAULT_ASSETS_DIR
     logger.info(f"Serving stocks cached in {assets_dir} over stdio")
     build_server(StockCache(YFinanceProvider(), assets_dir)).run()
