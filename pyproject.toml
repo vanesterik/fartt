@@ -52,7 +52,7 @@ explicit = true
 
 
 [project.scripts]
-fartt = "fartt.cli:main"
+fartt = "fartt.server:main"
 
 
 [build-system]
