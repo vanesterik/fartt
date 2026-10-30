@@ -23,16 +23,10 @@ pre-push:
 
 pre-commit:
   commands:
-    clean-jupyter:
-      priority: 2
-      files: git ls-files
-      glob: '*.ipynb'
-      run: uv run jupyter nbconvert --clear-output --inplace {staged_files}
-      stage_fixed: true
     format:
       priority: 2
       files: git ls-files
-      glob: '*.{py,ipynb}'
+      glob: '*.py'
       run: uv run ruff format {staged_files}
       stage_fixed: true
     ruff:
@@ -43,7 +37,7 @@ pre-commit:
     test:
       priority: 2
       files: git ls-files
-      glob: '*.{py,ipynb}'
+      glob: '*.py'
       run: uv run pytest; code=$?; [ "$code" = "5" ] && exit 0 || exit "$code"
     typecheck:
       priority: 2

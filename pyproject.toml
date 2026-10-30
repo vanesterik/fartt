@@ -25,7 +25,6 @@ dependencies = [
 
 [dependency-groups]
 dev = [
-    "jupyter>=1.0.0",
     "lefthook>=2.1.17",
     "pandas-stubs>=3.1.0.261029",
     "pyright>=1.1.414",
@@ -141,11 +140,6 @@ select = [
     "YTT101", "YTT102", "YTT103", "YTT201", "YTT202", "YTT203", "YTT204", "YTT301",
     "YTT302", "YTT303",
 ]
-
-[tool.ruff.lint.per-file-ignores]
-# Notebooks compare against the `Datetime` column, which `pl.from_epoch` makes
-# timezone-naive UTC; a timezone-aware literal would not compare with it.
-"notebooks/*" = ["DTZ001"]
 
 [tool.pytest.ini_options]
 # Tests marked `network` call Yahoo Finance. They are deselected by

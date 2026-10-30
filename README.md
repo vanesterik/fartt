@@ -51,8 +51,6 @@ The project follows the [cookiecutter data science project template](https://dri
     │   ├── specs          <- Design docs for individual pieces of work.
     │   └── plans          <- Implementation plans.
     │
-    ├── notebooks          <- Jupyter notebooks. Naming convention is a number (for ordering), the creator's initials, and a short `-` delimited description, e.g. `1.0-kve-exploratory-data-analysis`.
-    │
     ├── tests              <- Unit tests, mirroring the src/fartt layout.
     │
     ├── pyproject.toml     <- Project + dependency config (managed with `uv`).
