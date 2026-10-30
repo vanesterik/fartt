@@ -11,6 +11,7 @@ from fartt.data.sessions import (
     newest_closed_session,
 )
 from fartt.data.types import Candle, Dividend, History, Listing, Quote, Split
+from fartt.data.yfinance_provider import YFinanceProvider
 
 __all__ = [
     "CLOSE_MARGIN",
@@ -25,6 +26,7 @@ __all__ = [
     "Split",
     "UnknownTicker",
     "UnsupportedExchange",
+    "YFinanceProvider",
     "calendar_for",
     "newest_closed_session",
 ]
