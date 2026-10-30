@@ -46,7 +46,7 @@ A dividend never changes the stored prices. **Only a new split does**: it rescal
 
 ### One ticker per call, fetched on the spot (decided with the operator)
 
-Tools take one ticker. A ticker the cache has never seen is fetched when it's first asked for, with its full available history (`period="max"`). Later calls fetch only what's newer. There's no watchlist and no setup step. `fartt download --ticker` exists for filling a cache by hand, through the same code path.
+Tools take one ticker. A ticker the cache has never seen is fetched when it's first asked for, with its full available history (`period="max"`). Later calls fetch only what's newer. There's no watchlist and no setup step.
 
 ### yfinance first (decided with the operator)
 
@@ -176,7 +176,19 @@ Dropped from it:
 
 ### The server (A3 #99, A4 #100)
 
-`build_server(cache, provider)` drops the fixed market and interval. `fartt serve` keeps `--assets-dir` and loses `--exchange`, `--market`, `--interval`, `--fee`, `--slippage`, `--threshold` and `--hit-rate-window`. The cost settings return in epic H's risk config.
+`build_server(cache, provider)` drops the fixed market and interval. The cost settings return in epic H's risk config.
+
+**Launching it (decided with the operator, 2026-10-30).** The MCP server is the only entry point; there is no CLI. Claude Code starts the server from `.mcp.json` as a child process and talks to it over stdin/stdout, so nobody runs a command by hand:
+
+```
+.mcp.json        →  uv run fartt
+pyproject.toml   →  fartt = "fartt.server:main"
+server.main()    →  StockCache(YFinanceProvider(), assets_dir) → build_server(...).run()
+```
+
+- `fartt/cli.py` (argparse, `serve`, `download`) is removed. A ticker is fetched on the spot by the tools, so filling a cache by hand has no use.
+- The cache lives in `assets/` under the repository root by default. The environment variable `FARTT_ASSETS_DIR` overrides it, which is how the tests point the server at a temporary folder. *My call:* no `.env` file until there's a second setting.
+- `main()` sends logs to stderr only, because stdout carries the protocol. The rotating `logs/cli.log` goes.
 
 **`get_candles(ticker, count=60)`**, with `count` from 1 to 200 as before:
 - It updates the cache for the ticker (fetching on the spot if it's new), then returns `ticker`, `name`, `currency`, `exchange`, `columns`, `rows` (`[date, open, high, low, close, volume]`), `new_candles`, `rebuilt` (with the reason, if any), `gaps`, `is_current` and `warning`.
@@ -196,7 +208,7 @@ Dropped from it:
 
 **Server instructions** describe the stock tools: one ticker per call in Yahoo's format, prices split-adjusted, dividends kept separately, fractions as before, and `is_current: false` meaning stale data.
 
-**The end-to-end test** (`tests/e2e/test_server_stdio.py`) starts `fartt serve` from `.mcp.json` with a temporary `--assets-dir`, lists the tools (`get_candles`, `get_quote`), and calls both on one ticker. It's marked `network`, as now, and asserts stdout carries only JSON-RPC.
+**The end-to-end test** (`tests/e2e/test_server_stdio.py`) starts the server with `.mcp.json`'s command and a temporary `FARTT_ASSETS_DIR`, lists the tools (`get_candles`, `get_quote`), and calls both on one ticker. It's marked `network`, as now, and asserts stdout carries only JSON-RPC.
 
 ## What leaves the codebase, and when
 
@@ -206,7 +218,7 @@ The stories are built in order, and each one leaves `task check` passing:
 |---|---|---|
 | A1 #97 | `fartt/data/` (Protocol, types, `YFinanceProvider`), `yfinance` and `exchange_calendars` dependencies | — |
 | A2 #98 | `stock_cache.py`, sessions; `fartt download --ticker` uses them | `fartt download`'s ccxt options |
-| A3 #99 | `get_candles(ticker, count)` on the new cache; new server instructions | the forecast tools, `fartt/forecast/`, `fartt/model/`, the model-only visualization helpers, `fartt/exchange/`, `candle_cache.py`, the notebooks, `torch`, `ccxt` and other dependencies only they used, the BTC files in `assets/`, the old `serve` options |
+| A3 #99 | `get_candles(ticker, count)` on the new cache; new server instructions; `fartt = "fartt.server:main"` | `fartt/cli.py` (with `download` and `serve`), `logs/cli.log`, the forecast tools, `fartt/forecast/`, `fartt/model/`, the model-only visualization helpers, `fartt/exchange/`, `candle_cache.py`, the notebooks, `torch`, `ccxt` and other dependencies only they used, the BTC files in `assets/` |
 | A4 #100 | `get_quote` | — |
 
 This changes three stories, which get updated to match when this design is approved. A1 (#97): removing ccxt moves to A3, because until then the old cache and server still use it. A2 (#98): its adjustment scenario says a split *or dividend* rewrites the candles; only a split (or an amended last candle) does, and dividends are added as event records. A3 (#99): it gains the removal of ccxt and the old cache.
