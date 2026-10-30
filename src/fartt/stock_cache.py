@@ -60,9 +60,9 @@ class StockCache:
         assets_dir: Path,
         clock: Callable[[], datetime] = _now,
     ) -> None:
-        self._provider = provider
+        self.provider = provider
         self._root = assets_dir / "stocks"
-        self._clock = clock
+        self.clock = clock
 
     def directory(self, ticker: str) -> Path:
         # calendar_for normalises the ticker and rejects any that names no
@@ -71,7 +71,7 @@ class StockCache:
         return self._root / normalise_ticker(ticker)
 
     def newest_closed_session(self, ticker: str) -> date:
-        return newest_closed_session(calendar_for(ticker), self._clock())
+        return newest_closed_session(calendar_for(ticker), self.clock())
 
     def update(self, ticker: str) -> UpdateResult:
         """
@@ -96,7 +96,7 @@ class StockCache:
             if last.date >= self.newest_closed_session(ticker):
                 return UpdateResult(0, None, False)
 
-            history = self._provider.history(ticker, last.date)
+            history = self.provider.history(ticker, last.date)
             reason = _rebuild_reason(last, history)
             if reason is not None:
                 return self._rebuild(ticker, reason)
@@ -149,8 +149,8 @@ class StockCache:
         return Listing(**fields)
 
     def _rebuild(self, ticker: str, reason: str | None) -> UpdateResult:
-        listing = self._provider.listing(ticker)
-        history = self._provider.history(ticker, None)
+        listing = self.provider.listing(ticker)
+        history = self.provider.history(ticker, None)
         self._write_all(ticker, listing, history)
         return UpdateResult(len(history.candles), reason, True)
 

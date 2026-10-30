@@ -16,6 +16,8 @@ from fartt.data import (
     UnknownTicker,
     UnsupportedExchange,
     YFinanceProvider,
+    exchange_date,
+    market_status,
     missing_sessions,
     normalise_ticker,
 )
@@ -42,7 +44,8 @@ INSTRUCTIONS = (
     "Yahoo's format: AAPL for a US listing, ASML.AS for Euronext Amsterdam "
     "(.PA Paris, .BR Brussels, .LS Lisbon, .MI Milan, .IR Dublin, .OL Oslo). "
     "A ticker the server hasn't seen is fetched on the spot. Prices are daily "
-    "and split-adjusted, not dividend-adjusted: they are prices that traded. "
+    "and split-adjusted, not dividend-adjusted: they are prices that traded, "
+    "with dividends kept separately. "
     "Returns, costs and rates are fractions: 0.004 means 0.4%. If is_current "
     "is false the data is stale: read the warning before relying on it."
 )
@@ -92,6 +95,58 @@ class CandlesResult(BaseModel):
     )
 
 
+AVERAGE_SESSIONS = 20
+
+
+class QuoteResult(BaseModel):
+    ticker: str = Field(description="The ticker, in Yahoo's format.")
+    currency: str = Field(description="The currency prices are quoted in.")
+    last: float = Field(description="The last traded price.")
+    bid: float | None = Field(
+        description="The best bid. Null when unknown; then so are ask and spread."
+    )
+    ask: float | None = Field(
+        description="The best ask. Null when unknown; then so are bid and spread."
+    )
+    spread: float | None = Field(
+        description=(
+            "Ask minus bid as a fraction of their midpoint: 0.002 means 0.2%. "
+            "Null when unknown, never 0."
+        )
+    )
+    volume: float | None = Field(
+        description="Shares traded in the current (or last) session so far."
+    )
+    average_volume_20d: float | None = Field(
+        description=(
+            "Mean daily volume over the 20 cached sessions before the quote's session."
+        )
+    )
+    volume_ratio: float | None = Field(
+        description=(
+            "volume / average_volume_20d. Not normalised for time of day: "
+            "during the session it compares a partial day with full days, so "
+            "it reads low early on."
+        )
+    )
+    market_open: bool = Field(
+        description="Whether the ticker's exchange is trading now."
+    )
+    next_open: str | None = Field(
+        description=(
+            "When the next session opens, ISO 8601 in UTC. Null while the "
+            "exchange is open."
+        )
+    )
+    quote_time: str = Field(description="When the quote was struck, ISO 8601 in UTC.")
+    delay_minutes: int | None = Field(
+        description="How many minutes the provider delays this exchange's quotes."
+    )
+    note: str | None = Field(
+        default=None, description="What's missing or unusual, if anything."
+    )
+
+
 def _row(candle: Candle) -> Row:
     return (
         candle.date.isoformat(),
@@ -103,9 +158,9 @@ def _row(candle: Candle) -> Row:
     )
 
 
-def _cache_error(ticker: str, error: Exception) -> ToolError:
+def _cache_error(tool: str, ticker: str, error: Exception) -> ToolError:
     # A folder it can't write, or a file it can't parse: retrying won't help.
-    logger.error(f"get_candles {ticker}: {error}")
+    logger.error(f"{tool} {ticker}: {error}")
     return ToolError(
         f"The stock cache for {ticker} can't be read or written: {error}. "
         "Retrying won't help until the operator fixes or deletes the ticker's "
@@ -113,9 +168,55 @@ def _cache_error(ticker: str, error: Exception) -> ToolError:
     )
 
 
+# What a cache folder it can't write or a file it can't parse raises.
+CACHE_ERRORS = (OSError, ValueError, KeyError)
+
+
+def _unknown_ticker(ticker: str) -> str:
+    return (
+        f"The data provider doesn't know {ticker}. Check the ticker: Yahoo's "
+        "format is AAPL for a US listing, ASML.AS for Euronext Amsterdam."
+    )
+
+
+def _update(
+    tool: str, cache: StockCache, ticker: str
+) -> tuple[str, UpdateResult | None]:
+    """
+    The ticker normalised, and the result of bringing its cache up to date,
+    or `None` when the provider is unreachable. Every other failure becomes
+    a ToolError: the SDK reports any other exception to the agent as a bare
+    "Error executing tool", so each one says what to do.
+
+    """
+    try:
+        ticker = normalise_ticker(ticker)
+    except UnknownTicker as error:
+        raise ToolError(str(error)) from error
+    try:
+        return ticker, cache.update(ticker)
+    except UnsupportedExchange as error:
+        raise ToolError(str(error)) from error
+    except UnknownTicker as error:
+        raise ToolError(_unknown_ticker(ticker)) from error
+    except ProviderUnavailable as error:
+        logger.warning(f"{tool} {ticker}: {error}")
+        return ticker, None
+    except CACHE_ERRORS as error:
+        raise _cache_error(tool, ticker, error) from error
+
+
+def _unreachable(ticker: str) -> ToolError:
+    return ToolError(
+        f"The data provider is unreachable, so there's no quote for {ticker}. "
+        "Try again later."
+    )
+
+
 def build_server(cache: StockCache) -> MCPServer:
     """
-    Build the MCP server on `cache`.
+    Build the MCP server on `cache`, which also supplies the provider (for
+    quotes) and the clock (for market hours).
 
     A factory rather than a module-level server, so tests can pass a cache
     over an in-memory provider and connect with the SDK's in-memory client.
@@ -143,34 +244,12 @@ def build_server(cache: StockCache) -> MCPServer:
         bringing its local cache up to date. A ticker not cached yet is
         fetched in full first.
         """
-        # The SDK reports any exception other than ToolError to the agent as
-        # a bare "Error executing tool", so every failure is turned into a
-        # ToolError that says what to do.
-        try:
-            ticker = normalise_ticker(ticker)
-        except UnknownTicker as error:
-            raise ToolError(str(error)) from error
-        try:
-            update: UpdateResult | None = cache.update(ticker)
-        except UnsupportedExchange as error:
-            raise ToolError(str(error)) from error
-        except UnknownTicker as error:
-            raise ToolError(
-                f"The data provider doesn't know {ticker}. Check the ticker: "
-                "Yahoo's format is AAPL for a US listing, ASML.AS for Euronext "
-                "Amsterdam."
-            ) from error
-        except ProviderUnavailable as error:
-            logger.warning(f"get_candles {ticker}: {error}")
-            update = None
-        except (OSError, ValueError, KeyError) as error:
-            raise _cache_error(ticker, error) from error
-
+        ticker, update = _update("get_candles", cache, ticker)
         try:
             candles = cache.latest(ticker, count)
             listing = cache.listing(ticker)
-        except (OSError, ValueError, KeyError) as error:
-            raise _cache_error(ticker, error) from error
+        except CACHE_ERRORS as error:
+            raise _cache_error("get_candles", ticker, error) from error
         if update is None and (not candles or listing is None):
             raise ToolError(
                 f"Nothing is cached for {ticker} yet and the data provider is "
@@ -226,6 +305,85 @@ def build_server(cache: StockCache) -> MCPServer:
             gaps=[day.isoformat() for day in gaps],
             is_current=is_current,
             warning=" ".join(warnings) or None,
+        )
+
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+    def get_quote(
+        ticker: Annotated[
+            str,
+            Field(description="One ticker in Yahoo's format: AAPL, ASML.AS."),
+        ],
+    ) -> QuoteResult:
+        """
+        Return a ticker's latest quote: last price, bid, ask and spread,
+        today's volume against its 20-session average, whether its exchange
+        is open, and how delayed the quote is. Use it to judge liquidity and
+        where a limit order should sit.
+        """
+        ticker, update = _update("get_quote", cache, ticker)
+        if update is None:
+            raise _unreachable(ticker)
+        try:
+            quote = cache.provider.quote(ticker)
+        except UnknownTicker as error:
+            raise ToolError(_unknown_ticker(ticker)) from error
+        except ProviderUnavailable as error:
+            logger.warning(f"get_quote {ticker}: {error}")
+            raise _unreachable(ticker) from error
+        try:
+            listing = cache.listing(ticker)
+            candles = cache.latest(ticker, AVERAGE_SESSIONS + 1)
+        except CACHE_ERRORS as error:
+            raise _cache_error("get_quote", ticker, error) from error
+        if listing is None:
+            raise _unreachable(ticker)
+
+        notes: list[str] = []
+        bid, ask, spread = quote.bid, quote.ask, None
+        if bid is None or ask is None:
+            bid = ask = None
+            notes.append("The spread is unknown: the provider has no bid or ask.")
+        elif ask < bid:
+            bid = ask = None
+            notes.append(
+                "The spread is unknown: the provider's bid and ask are crossed "
+                "(stale or delayed data)."
+            )
+        else:
+            spread = (ask - bid) / ((ask + bid) / 2)
+
+        # Sessions before the quote's own, so today is never in its average.
+        today = exchange_date(listing.exchange, quote.time)
+        prior = [c for c in candles if c.date < today][-AVERAGE_SESSIONS:]
+        average = sum(c.volume for c in prior) / len(prior) if prior else None
+        if 0 < len(prior) < AVERAGE_SESSIONS:
+            notes.append(
+                f"The average volume covers only {len(prior)} sessions, all that "
+                "are cached."
+            )
+        elif not prior:
+            notes.append("No earlier sessions are cached to average volume over.")
+        ratio = quote.volume / average if quote.volume is not None and average else None
+
+        status = market_status(listing.exchange, cache.clock())
+        logger.info(
+            f"get_quote {ticker}: {quote.last} {listing.currency}, open={status.open}"
+        )
+        return QuoteResult(
+            ticker=listing.ticker,
+            currency=listing.currency,
+            last=quote.last,
+            bid=bid,
+            ask=ask,
+            spread=spread,
+            volume=quote.volume,
+            average_volume_20d=average,
+            volume_ratio=ratio,
+            market_open=status.open,
+            next_open=status.next_open.isoformat() if status.next_open else None,
+            quote_time=quote.time.isoformat(),
+            delay_minutes=quote.delay_minutes,
+            note=" ".join(notes) or None,
         )
 
     return server

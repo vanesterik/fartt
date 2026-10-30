@@ -16,7 +16,7 @@ class FakeProvider:
     """
     In-memory `DataProvider`: serves each ticker's stored `History` the way
     `YFinanceProvider` does -- closed sessions only (judged against `now`),
-    from `start` onwards. Tests change `now` and the stored histories to
+    from `start` onwards, and each ticker's stored `Quote`. Tests change `now` and the stored histories to
     simulate the next day, a split or an amended candle.
 
     """
@@ -26,8 +26,10 @@ class FakeProvider:
         histories: dict[str, History],
         listings: dict[str, Listing],
         now: datetime,
+        quotes: dict[str, Quote] | None = None,
     ) -> None:
         self.histories = histories
+        self.quotes = quotes or {}
         self.listings = listings
         self.now = now
         self.reachable = True
@@ -58,7 +60,9 @@ class FakeProvider:
         )
 
     def quote(self, ticker: str) -> Quote:
-        raise NotImplementedError
+        ticker = normalise_ticker(ticker)
+        self._check(ticker)
+        return self.quotes[ticker]
 
     def _check(self, ticker: str) -> None:
         if not self.reachable:

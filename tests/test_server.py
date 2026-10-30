@@ -6,7 +6,7 @@ import exchange_calendars as xcals
 import pytest
 from mcp import Client
 
-from fartt.data import History, Listing
+from fartt.data import History, Listing, Quote
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
@@ -50,9 +50,11 @@ def cache_for(fake: FakeProvider, assets_dir: Path) -> StockCache:
     return StockCache(fake, assets_dir, clock=lambda: fake.now)
 
 
-async def call(cache: StockCache, arguments: dict[str, Any]) -> Any:
+async def call(
+    cache: StockCache, arguments: dict[str, Any], tool: str = "get_candles"
+) -> Any:
     async with Client(build_server(cache)) as client:
-        return await client.call_tool("get_candles", arguments)
+        return await client.call_tool(tool, arguments)
 
 
 @pytest.mark.anyio
@@ -265,11 +267,153 @@ async def test_an_unwritable_cache_is_a_tool_error_for_the_operator(
 
 
 @pytest.mark.anyio
-async def test_the_only_tool_is_get_candles(tmp_path: Path) -> None:
+async def test_the_tools_are_get_candles_and_get_quote(tmp_path: Path) -> None:
     async with Client(build_server(cache_for(provider([]), tmp_path))) as client:
         tools = (await client.list_tools()).tools
 
-    assert [tool.name for tool in tools] == ["get_candles"]
+    assert sorted(tool.name for tool in tools) == ["get_candles", "get_quote"]
+
+
+# Euronext Amsterdam trades 08:00-16:30 UTC in winter time.
+DURING_ASML_SESSION = datetime(2026, 10, 29, 10, 0, tzinfo=UTC)
+
+
+def quote(
+    bid: float | None = 101.9,
+    ask: float | None = 102.1,
+    volume: float | None = 500.0,
+    time: datetime = datetime(2026, 10, 29, 9, 45, tzinfo=UTC),
+) -> Quote:
+    return Quote(102.0, bid, ask, volume, time, 15)
+
+
+def quoting(
+    days: list[date],
+    volumes: list[float],
+    now: datetime = DURING_ASML_SESSION,
+    asml_quote: Quote | None = None,
+) -> FakeProvider:
+    fake = provider([], now=now)
+    candles = [stock_candle(d, volume=v) for d, v in zip(days, volumes, strict=True)]
+    fake.histories["ASML.AS"] = History(candles, [], [])
+    fake.quotes["ASML.AS"] = asml_quote or quote()
+    return fake
+
+
+async def get_quote(fake: FakeProvider, tmp_path: Path, ticker: str = "ASML.AS") -> Any:
+    return await call(cache_for(fake, tmp_path), {"ticker": ticker}, "get_quote")
+
+
+@pytest.mark.anyio
+async def test_get_quote_during_the_session(tmp_path: Path) -> None:
+    days = sessions("XAMS", 25, last=date(2026, 10, 28))
+    volumes = [1000.0 + 10 * i for i in range(25)]
+
+    result = await get_quote(quoting(days, volumes), tmp_path)
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    average = sum(volumes[-20:]) / 20
+    assert (content["ticker"], content["currency"]) == ("ASML.AS", "EUR")
+    assert (content["last"], content["bid"], content["ask"]) == (102.0, 101.9, 102.1)
+    assert content["spread"] == pytest.approx(0.2 / 102.0)
+    assert content["volume"] == 500.0
+    assert content["average_volume_20d"] == pytest.approx(average)
+    assert content["volume_ratio"] == pytest.approx(500.0 / average)
+    assert content["market_open"] is True
+    assert content["next_open"] is None
+    assert content["quote_time"] == "2026-10-29T09:45:00+00:00"
+    assert content["delay_minutes"] == 15
+    assert content["note"] is None
+
+
+@pytest.mark.anyio
+async def test_get_quote_outside_the_session(tmp_path: Path) -> None:
+    days = sessions("XAMS", 25)
+    fake = quoting(days, [1000.0] * 25, now=AFTER_CLOSE)
+
+    content = (await get_quote(fake, tmp_path)).structured_content
+
+    assert content["market_open"] is False
+    assert content["next_open"] == "2026-10-30T08:00:00+00:00"
+
+
+@pytest.mark.anyio
+async def test_today_is_not_in_its_own_average(tmp_path: Path) -> None:
+    # After the close the cache holds today's session too.
+    days = sessions("XAMS", 21)
+    after_close = quote(time=datetime(2026, 10, 29, 16, 30, tzinfo=UTC))
+    fake = quoting(days, [1000.0] * 20 + [10_000.0], AFTER_CLOSE, after_close)
+
+    content = (await get_quote(fake, tmp_path)).structured_content
+
+    assert content["average_volume_20d"] == pytest.approx(1000.0)
+
+
+@pytest.mark.anyio
+async def test_a_short_history_averages_what_is_cached(tmp_path: Path) -> None:
+    days = sessions("XAMS", 5, last=date(2026, 10, 28))
+    volumes = [100.0, 200.0, 300.0, 400.0, 500.0]
+
+    content = (await get_quote(quoting(days, volumes), tmp_path)).structured_content
+
+    assert content["average_volume_20d"] == pytest.approx(300.0)
+    assert "5 sessions" in content["note"]
+
+
+@pytest.mark.anyio
+async def test_a_missing_bid_or_ask_makes_the_spread_unknown(tmp_path: Path) -> None:
+    days = sessions("XAMS", 20, last=date(2026, 10, 28))
+    fake = quoting(days, [1000.0] * 20, asml_quote=quote(bid=None))
+
+    content = (await get_quote(fake, tmp_path)).structured_content
+
+    assert (content["bid"], content["ask"], content["spread"]) == (None, None, None)
+    assert "spread is unknown" in content["note"]
+
+
+@pytest.mark.anyio
+async def test_a_crossed_quote_makes_the_spread_unknown(tmp_path: Path) -> None:
+    days = sessions("XAMS", 20, last=date(2026, 10, 28))
+    fake = quoting(days, [1000.0] * 20, asml_quote=quote(bid=102.2, ask=102.1))
+
+    content = (await get_quote(fake, tmp_path)).structured_content
+
+    assert (content["bid"], content["ask"], content["spread"]) == (None, None, None)
+    assert "crossed" in content["note"]
+
+
+@pytest.mark.anyio
+async def test_get_quote_with_the_provider_down_is_a_tool_error(
+    tmp_path: Path,
+) -> None:
+    fake = quoting(sessions("XAMS", 3), [1000.0] * 3)
+    fake.reachable = False
+
+    result = await get_quote(fake, tmp_path)
+
+    assert result.is_error
+    assert "unreachable" in result.content[0].text
+
+
+@pytest.mark.anyio
+async def test_get_quote_of_an_unknown_ticker_is_a_tool_error(tmp_path: Path) -> None:
+    result = await get_quote(quoting([], []), tmp_path, ticker="NOSUCH")
+
+    assert result.is_error
+    text = result.content[0].text
+    assert "NOSUCH" in text
+    assert "ASML.AS" in text
+
+
+@pytest.mark.anyio
+async def test_the_volume_ratio_says_it_is_not_normalised(tmp_path: Path) -> None:
+    async with Client(build_server(cache_for(provider([]), tmp_path))) as client:
+        tools = {tool.name: tool for tool in (await client.list_tools()).tools}
+
+    schema = tools["get_quote"].output_schema
+    assert schema is not None
+    assert "time of day" in schema["properties"]["volume_ratio"]["description"]
 
 
 class FakeServer:
