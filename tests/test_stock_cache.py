@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from fartt.data import Dividend, History, Listing, ProviderUnavailable
+from fartt.data import Candle, Dividend, History, Listing, ProviderUnavailable, Split
 from fartt.stock_cache import StockCache, UpdateResult
 from tests.fakes import FakeProvider, stock_candle
 
@@ -109,3 +109,141 @@ def test_a_reader_waits_for_a_running_update(
     writer.join(timeout=5)
     reader.join(timeout=5)
     assert read == [3]
+
+
+def filled(cache: StockCache, provider: FakeProvider) -> list[Candle]:
+    """Fill the cache during the 10-29 session, then move past its close."""
+    cache.update("AAPL")
+    provider.now = AFTER_CLOSE
+    return cache.latest("AAPL", 10)
+
+
+def test_next_day_appends_only_the_new_session(
+    cache: StockCache, provider: FakeProvider
+) -> None:
+    filled(cache, provider)
+
+    assert cache.update("AAPL") == UpdateResult(1, None, True)
+    assert provider.history_calls[-1] == ("AAPL", date(2026, 10, 28))
+    assert [c.date for c in cache.latest("AAPL", 10)] == DAYS
+
+
+def test_an_up_to_date_cache_does_not_call_the_provider(
+    cache: StockCache, provider: FakeProvider
+) -> None:
+    cache.update("AAPL")
+
+    assert cache.update("AAPL") == UpdateResult(0, None, False)
+    assert len(provider.history_calls) == 1
+
+
+def test_a_new_split_rebuilds_the_history(
+    cache: StockCache, provider: FakeProvider
+) -> None:
+    before = filled(cache, provider)
+    split = History(
+        [stock_candle(c.date, c.close / 4) for c in aapl_history().candles[:3]]
+        + [stock_candle(DAYS[3], 26.0)],
+        [Dividend(date(2026, 10, 27), 0.065)],
+        [Split(DAYS[3], 4.0)],
+    )
+    provider.histories["AAPL"] = split
+
+    result = cache.update("AAPL")
+
+    assert result == UpdateResult(
+        4, "split on 2026-10-29 (4.0 new shares per old)", True
+    )
+    assert cache.latest("AAPL", 10)[0].close == pytest.approx(before[0].close / 4)
+    assert cache.events("AAPL") == (
+        [Dividend(date(2026, 10, 27), 0.065)],
+        [Split(DAYS[3], 4.0)],
+    )
+
+
+def test_an_amended_last_candle_rebuilds_the_history(
+    cache: StockCache, provider: FakeProvider
+) -> None:
+    filled(cache, provider)
+    provider.histories["AAPL"].candles[2] = stock_candle(DAYS[2], 102.5)
+
+    result = cache.update("AAPL")
+
+    assert result.rebuilt == "last candle amended"
+    assert cache.latest("AAPL", 2)[0].close == 102.5
+
+
+def test_a_volume_only_change_is_not_an_amendment(
+    cache: StockCache, provider: FakeProvider
+) -> None:
+    filled(cache, provider)
+    provider.histories["AAPL"].candles[2] = stock_candle(DAYS[2], 102.0, volume=5.0)
+
+    assert cache.update("AAPL") == UpdateResult(1, None, True)
+
+
+def test_a_new_dividend_is_appended_and_no_price_changes(
+    cache: StockCache, provider: FakeProvider
+) -> None:
+    before = filled(cache, provider)
+    provider.histories["AAPL"].dividends.append(Dividend(DAYS[3], 0.26))
+
+    cache.update("AAPL")
+
+    assert cache.latest("AAPL", 10)[:-1] == before
+    assert cache.events("AAPL")[0][-1] == Dividend(DAYS[3], 0.26)
+
+
+def test_a_dividend_on_the_last_cached_date_is_not_recorded_twice(
+    provider: FakeProvider, tmp_path: Path
+) -> None:
+    provider.histories["AAPL"].dividends.append(Dividend(DAYS[2], 0.1))
+    cache = StockCache(provider, tmp_path, clock=lambda: provider.now)
+    filled(cache, provider)
+
+    cache.update("AAPL")  # re-fetches from 10-28, which carries the dividend
+
+    assert cache.events("AAPL")[0].count(Dividend(DAYS[2], 0.1)) == 1
+
+
+def test_a_torn_last_line_is_healed_before_updating(
+    cache: StockCache, provider: FakeProvider, tmp_path: Path
+) -> None:
+    filled(cache, provider)
+    with (tmp_path / "stocks" / "AAPL" / "candles.csv").open("a") as file:
+        file.write("2026-10-29,10")  # a killed update's half line
+
+    assert cache.update("AAPL") == UpdateResult(1, None, True)
+    assert [c.date for c in cache.latest("AAPL", 2)] == DAYS[2:]
+
+
+def test_a_whole_last_line_missing_its_newline_is_kept(
+    cache: StockCache, provider: FakeProvider, tmp_path: Path
+) -> None:
+    filled(cache, provider)
+    path = tmp_path / "stocks" / "AAPL" / "candles.csv"
+    path.write_text(path.read_text().rstrip("\n"))
+
+    assert cache.update("AAPL") == UpdateResult(1, None, True)
+    assert [c.date for c in cache.latest("AAPL", 10)] == DAYS
+
+
+def test_a_failed_rebuild_leaves_the_old_files(
+    cache: StockCache, provider: FakeProvider
+) -> None:
+    before = filled(cache, provider)
+    provider.histories["AAPL"].splits.append(Split(DAYS[3], 4.0))
+    provider.fail_on_full_history = True
+
+    with pytest.raises(ProviderUnavailable):
+        cache.update("AAPL")
+    assert cache.latest("AAPL", 10) == before
+
+
+def test_an_empty_refetch_appends_nothing(
+    cache: StockCache, provider: FakeProvider
+) -> None:
+    filled(cache, provider)
+    provider.histories["AAPL"] = History([], [], [])
+
+    assert cache.update("AAPL") == UpdateResult(0, None, True)
