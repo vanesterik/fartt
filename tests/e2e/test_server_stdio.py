@@ -22,7 +22,7 @@ from mcp import Client, StdioServerParameters
 from mcp.types import LATEST_PROTOCOL_VERSION
 
 ROOT = Path(__file__).resolve().parents[2]
-EXPECTED_TOOLS = ["get_candles", "get_quote"]
+EXPECTED_TOOLS = ["get_candles", "get_quote", "get_indicators"]
 # Per response; also the MCP client's read timeout, which defaults to none.
 RESPONSE_TIMEOUT_S = 120
 
@@ -69,6 +69,13 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
         assert prices["ticker"] == "ASML.AS"
         assert prices["last"] > 0
         assert isinstance(prices["market_open"], bool)
+
+        indicators = await client.call_tool("get_indicators", {"ticker": "ASML.AS"})
+        assert not indicators.is_error, indicators.content
+        values = indicators.structured_content
+        assert values["ticker"] == "ASML.AS"
+        assert values["sma_200"] is not None
+        assert len(json.dumps(values)) < 2000
 
     assert (tmp_path / "stocks" / "ASML.AS" / "candles.csv").exists()
 

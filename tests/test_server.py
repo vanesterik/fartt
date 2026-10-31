@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -6,7 +7,7 @@ import exchange_calendars as xcals
 import pytest
 from mcp import Client
 
-from fartt.data import History, Listing, Quote
+from fartt.data import Dividend, History, Listing, Quote
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
@@ -267,11 +268,15 @@ async def test_an_unwritable_cache_is_a_tool_error_for_the_operator(
 
 
 @pytest.mark.anyio
-async def test_the_tools_are_get_candles_and_get_quote(tmp_path: Path) -> None:
+async def test_the_tools_are_listed(tmp_path: Path) -> None:
     async with Client(build_server(cache_for(provider([]), tmp_path))) as client:
         tools = (await client.list_tools()).tools
 
-    assert sorted(tool.name for tool in tools) == ["get_candles", "get_quote"]
+    assert sorted(tool.name for tool in tools) == [
+        "get_candles",
+        "get_indicators",
+        "get_quote",
+    ]
 
 
 # Euronext Amsterdam trades 08:00-16:30 UTC in winter time.
@@ -441,6 +446,97 @@ async def test_the_volume_ratio_says_it_is_not_normalised(tmp_path: Path) -> Non
     schema = tools["get_quote"].output_schema
     assert schema is not None
     assert "time of day" in schema["properties"]["volume_ratio"]["description"]
+
+
+async def get_indicators(
+    fake: FakeProvider, tmp_path: Path, ticker: str = "ASML.AS"
+) -> Any:
+    return await call(cache_for(fake, tmp_path), {"ticker": ticker}, "get_indicators")
+
+
+@pytest.mark.anyio
+async def test_get_indicators_returns_every_block(tmp_path: Path) -> None:
+    result = await get_indicators(provider(sessions("XAMS", 250)), tmp_path)
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert (content["ticker"], content["currency"]) == ("ASML.AS", "EUR")
+    assert content["based_on"] == "2026-10-29"
+    assert content["close"] == 349.0
+    for block in ["sma_20", "sma_50", "sma_200", "ema_20", "rsi", "macd", "atr"]:
+        assert content[block] is not None, block
+    assert content["volume"]["ratio"] == 1.0
+    assert content["note"] is None
+    assert content["is_current"] is True
+    assert content["warning"] is None
+
+
+@pytest.mark.anyio
+async def test_get_indicators_stays_within_its_size_budget(tmp_path: Path) -> None:
+    result = await get_indicators(provider(sessions("XAMS", 250)), tmp_path)
+
+    assert not result.is_error, result.content
+    assert len(json.dumps(result.structured_content)) < 2000
+
+
+@pytest.mark.anyio
+async def test_get_indicators_on_a_short_history_says_what_is_missing(
+    tmp_path: Path,
+) -> None:
+    result = await get_indicators(provider(sessions("XAMS", 30)), tmp_path)
+
+    content = result.structured_content
+    assert content["sma_200"] is None
+    assert "sma_200 needs 205 sessions" in content["note"]
+
+
+@pytest.mark.anyio
+async def test_get_indicators_leaves_ex_dividend_sessions_out(tmp_path: Path) -> None:
+    days = sessions("XAMS", 30)
+    # Closes alternate 101, 100, ...; the heavy down day is an ex-dividend date.
+    volumes = [5000.0 if i == 27 else 1000.0 for i in range(30)]
+    candles = [
+        stock_candle(day, 101.0 - i % 2, volumes[i]) for i, day in enumerate(days)
+    ]
+    fake = provider([])
+    fake.histories["ASML.AS"] = History(candles, [Dividend(days[27], 1.0)], [])
+
+    result = await get_indicators(fake, tmp_path)
+
+    assert result.structured_content["volume"]["down_day_ratio"] == 1.0
+
+
+@pytest.mark.anyio
+async def test_get_indicators_with_the_provider_down_serves_the_cache(
+    tmp_path: Path,
+) -> None:
+    fake = provider(sessions("XAMS", 30), now=AFTER_CLOSE_27)
+    cache = cache_for(fake, tmp_path)
+    cache.update("ASML.AS")
+    fake.now = AFTER_CLOSE
+    fake.reachable = False
+
+    result = await call(cache, {"ticker": "ASML.AS"}, "get_indicators")
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert content["based_on"] == "2026-10-27"
+    assert content["is_current"] is False
+    assert "2 sessions behind" in content["warning"]
+
+
+@pytest.mark.anyio
+async def test_get_indicators_of_an_unknown_ticker_is_a_tool_error(
+    tmp_path: Path,
+) -> None:
+    result = await get_indicators(provider([]), tmp_path, ticker="NOSUCH")
+
+    assert result.is_error
+    assert "NOSUCH" in result.content[0].text
+
+
+def test_the_instructions_say_indicators_are_evidence() -> None:
+    assert "evidence, not signals" in server_module.INSTRUCTIONS
 
 
 class FakeServer:

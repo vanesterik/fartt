@@ -23,6 +23,14 @@ from fartt.data import (
     normalise_ticker,
 )
 from fartt.stock_cache import StockCache, UpdateResult
+from fartt.technical import (
+    Atr,
+    Macd,
+    MovingAverage,
+    Rsi,
+    Volume,
+    calculate_indicators,
+)
 
 # Claude Code caps MCP tool output at about 25k tokens by default, and
 # numbers cost roughly one token per three characters. 200 compact rows stay
@@ -48,7 +56,9 @@ INSTRUCTIONS = (
     "and split-adjusted, not dividend-adjusted: they are prices that traded, "
     "with dividends kept separately. "
     "Returns, costs and rates are fractions: 0.004 means 0.4%. If is_current "
-    "is false the data is stale: read the warning before relying on it."
+    "is false the data is stale: read the warning before relying on it. "
+    "Indicators, trend and support/resistance zones are evidence, not "
+    "signals: weigh them together."
 )
 
 Row = tuple[str, float, float, float, float, float]
@@ -146,6 +156,35 @@ class QuoteResult(BaseModel):
     note: str | None = Field(
         default=None, description="What's missing or unusual, if anything."
     )
+
+
+class IndicatorsResult(BaseModel):
+    ticker: str = Field(description="The ticker, in Yahoo's format.")
+    currency: str = Field(description="The currency prices are quoted in.")
+    based_on: str = Field(
+        description="The session the values are as of, ISO 8601: the last cached."
+    )
+    close: float = Field(description="That session's close.")
+    sma_20: MovingAverage | None = Field(description="The 20-session simple average.")
+    sma_50: MovingAverage | None = Field(description="The 50-session simple average.")
+    sma_200: MovingAverage | None = Field(description="The 200-session simple average.")
+    ema_20: MovingAverage | None = Field(
+        description="The 20-session exponential average."
+    )
+    rsi: Rsi | None = Field(description="RSI 14.")
+    macd: Macd | None = Field(description="MACD (12, 26, 9).")
+    atr: Atr | None = Field(description="ATR 14.")
+    volume: Volume | None = Field(description="Volume against its 20-session average.")
+    note: str | None = Field(
+        default=None, description="Which indicators are null and why, if any."
+    )
+    is_current: bool = Field(
+        description=(
+            "True when based_on is the exchange's most recently closed session. "
+            "False means the data is stale; see warning."
+        )
+    )
+    warning: str | None = Field(default=None, description="What's stale, if anything.")
 
 
 def _row(candle: Candle) -> Row:
@@ -424,6 +463,50 @@ def build_server(cache: StockCache) -> MCPServer:
             quote_time=quote.time.isoformat(),
             delay_minutes=quote.delay_minutes,
             note=" ".join(notes) or None,
+        )
+
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+    def get_indicators(
+        ticker: Annotated[
+            str,
+            Field(description="One ticker in Yahoo's format: AAPL, ASML.AS."),
+        ],
+    ) -> IndicatorsResult:
+        """
+        Return a ticker's daily moving averages (SMA 20, 50, 200 and EMA 20),
+        RSI, MACD, ATR and volume, each with its state, as of the last cached
+        session (based_on). Use it to judge whether a dip is overdone.
+        """
+        listing, candles, _, is_current, warning = _snapshot(
+            "get_indicators", cache, ticker, sys.maxsize
+        )
+        ticker = listing.ticker
+        try:
+            dividends, _ = cache.events(ticker)
+        except CACHE_ERRORS as error:
+            raise _cache_error("get_indicators", ticker, error) from error
+        indicators = calculate_indicators(
+            candles, frozenset(dividend.date for dividend in dividends)
+        )
+        logger.info(
+            f"get_indicators {ticker}: {len(candles)} sessions, current={is_current}"
+        )
+        return IndicatorsResult(
+            ticker=ticker,
+            currency=listing.currency,
+            based_on=candles[-1].date.isoformat(),
+            close=indicators.close,
+            sma_20=indicators.sma_20,
+            sma_50=indicators.sma_50,
+            sma_200=indicators.sma_200,
+            ema_20=indicators.ema_20,
+            rsi=indicators.rsi,
+            macd=indicators.macd,
+            atr=indicators.atr,
+            volume=indicators.volume,
+            note=indicators.note,
+            is_current=is_current,
+            warning=warning,
         )
 
     return server
