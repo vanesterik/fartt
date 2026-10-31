@@ -24,6 +24,7 @@ from fartt.data import (
 )
 from fartt.stock_cache import StockCache, UpdateResult
 from fartt.technical import (
+    DECIMALS,
     Atr,
     Macd,
     MovingAverage,
@@ -188,13 +189,15 @@ class IndicatorsResult(BaseModel):
 
 
 def _row(candle: Candle) -> Row:
+    # Rounded as get_indicators rounds: Yahoo's prices are 32-bit floats, so
+    # 1666.2 would otherwise arrive as 1666.199951171875.
     return (
         candle.date.isoformat(),
-        candle.open,
-        candle.high,
-        candle.low,
-        candle.close,
-        candle.volume,
+        round(candle.open, DECIMALS),
+        round(candle.high, DECIMALS),
+        round(candle.low, DECIMALS),
+        round(candle.close, DECIMALS),
+        round(candle.volume, DECIMALS),
     )
 
 
