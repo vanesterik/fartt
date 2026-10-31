@@ -1,7 +1,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, NamedTuple
 
 from dotenv import dotenv_values
 from loguru import logger
@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from fartt.data import (
     Candle,
+    Listing,
     ProviderUnavailable,
     UnknownTicker,
     UnsupportedExchange,
@@ -206,6 +207,59 @@ def _update(
         raise _cache_error(tool, ticker, error) from error
 
 
+class Snapshot(NamedTuple):
+    listing: Listing
+    candles: list[Candle]  # Oldest first
+    update: UpdateResult | None  # None when the provider was unreachable
+    is_current: bool
+    warning: str | None  # What's stale, if anything
+
+
+def _snapshot(tool: str, cache: StockCache, ticker: str, count: int) -> Snapshot:
+    """
+    Up to `count` of the ticker's newest cached candles after bringing its
+    cache up to date, and whether they're current. An unreachable provider
+    serves what's cached, with a warning saying how far behind it is; with
+    nothing cached, or no closed sessions yet, it's a ToolError.
+
+    """
+    ticker, update = _update(tool, cache, ticker)
+    try:
+        candles = cache.latest(ticker, count)
+        listing = cache.listing(ticker)
+    except CACHE_ERRORS as error:
+        raise _cache_error(tool, ticker, error) from error
+    if update is None and (not candles or listing is None):
+        raise ToolError(
+            f"Nothing is cached for {ticker} yet and the data provider is "
+            "unreachable. Try again later."
+        )
+    if not candles or listing is None:
+        raise ToolError(
+            f"The data provider has no closed sessions for {ticker} yet, "
+            "for instance because it listed today. Try again after its "
+            "first session closes."
+        )
+
+    newest = cache.newest_closed_session(ticker)
+    last = candles[-1].date
+    is_current = last == newest
+    warning = None
+    if update is None and not is_current:
+        behind = len(missing_sessions(listing.exchange, [last, newest])) + 1
+        warning = (
+            f"The data provider is unreachable, so these are cached sessions "
+            f"through {last.isoformat()}, {behind} "
+            f"session{'s' if behind != 1 else ''} behind. Try again later."
+        )
+    elif not is_current:
+        warning = (
+            f"The provider hasn't published {newest.isoformat()}'s session "
+            f"yet; the last session is {last.isoformat()}. Try again later."
+        )
+    return Snapshot(listing, candles, update, is_current, warning)
+
+
 def _unreachable(ticker: str) -> ToolError:
     return ToolError(
         f"The data provider is unreachable, so there's no quote for {ticker}. "
@@ -244,42 +298,12 @@ def build_server(cache: StockCache) -> MCPServer:
         bringing its local cache up to date. A ticker not cached yet is
         fetched in full first.
         """
-        ticker, update = _update("get_candles", cache, ticker)
-        try:
-            candles = cache.latest(ticker, count)
-            listing = cache.listing(ticker)
-        except CACHE_ERRORS as error:
-            raise _cache_error("get_candles", ticker, error) from error
-        if update is None and (not candles or listing is None):
-            raise ToolError(
-                f"Nothing is cached for {ticker} yet and the data provider is "
-                "unreachable. Try again later."
-            )
-        if not candles or listing is None:
-            raise ToolError(
-                f"The data provider has no closed sessions for {ticker} yet, "
-                "for instance because it listed today. Try again after its "
-                "first session closes."
-            )
-
-        newest = cache.newest_closed_session(ticker)
-        last = candles[-1].date
-        is_current = last == newest
-        dates = [c.date for c in candles]
-        gaps = missing_sessions(listing.exchange, dates)
-        warnings: list[str] = []
-        if update is None and not is_current:
-            behind = len(missing_sessions(listing.exchange, [last, newest])) + 1
-            warnings.append(
-                f"The data provider is unreachable, so these are cached sessions "
-                f"through {last.isoformat()}, {behind} "
-                f"session{'s' if behind != 1 else ''} behind. Try again later."
-            )
-        elif not is_current:
-            warnings.append(
-                f"The provider hasn't published {newest.isoformat()}'s session "
-                f"yet; the last row is {last.isoformat()}. Try again later."
-            )
+        listing, candles, update, is_current, warning = _snapshot(
+            "get_candles", cache, ticker, count
+        )
+        ticker = listing.ticker
+        gaps = missing_sessions(listing.exchange, [c.date for c in candles])
+        warnings = [warning] if warning else []
         if gaps:
             warnings.append(
                 "The provider has no data for these sessions: "
