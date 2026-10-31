@@ -1,3 +1,9 @@
-from fartt.server.server import CandlesResult, QuoteResult, build_server, main
+from fartt.server.server import (
+    CandlesResult,
+    IndicatorsResult,
+    QuoteResult,
+    build_server,
+    main,
+)
 
-__all__ = ["CandlesResult", "QuoteResult", "build_server", "main"]
+__all__ = ["CandlesResult", "IndicatorsResult", "QuoteResult", "build_server", "main"]
