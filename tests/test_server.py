@@ -7,7 +7,7 @@ import exchange_calendars as xcals
 import pytest
 from mcp import Client
 
-from fartt.data import Dividend, History, Listing, Quote
+from fartt.data import Candle, Dividend, History, Listing, Quote
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
@@ -619,3 +619,18 @@ def test_the_environment_wins_over_the_env_file(
 
 def test_the_example_env_file_names_the_assets_dir() -> None:
     assert server_module.ASSETS_DIR_ENV in (ROOT / ".env.example").read_text()
+
+
+@pytest.mark.anyio
+async def test_get_candles_rounds_prices_to_4_decimals(tmp_path: Path) -> None:
+    # Yahoo's prices are 32-bit floats: 1666.2 arrives as 1666.199951171875.
+    day = sessions("XAMS", 1)[0]
+    candle = Candle(day, 1660.0, 1666.199951171875, 1639.0, 1656.199951171875, 1.0)
+    fake = provider([])
+    fake.histories["ASML.AS"] = History([candle], [], [])
+
+    result = await call(cache_for(fake, tmp_path), {"ticker": "ASML.AS"})
+
+    assert result.structured_content["rows"] == [
+        [day.isoformat(), 1660.0, 1666.2, 1639.0, 1656.2, 1.0]
+    ]

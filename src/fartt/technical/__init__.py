@@ -1,4 +1,5 @@
 from fartt.technical.indicators import (
+    DECIMALS,
     Atr,
     Cross,
     Indicators,
@@ -10,6 +11,7 @@ from fartt.technical.indicators import (
 )
 
 __all__ = [
+    "DECIMALS",
     "Atr",
     "Cross",
     "Indicators",
