@@ -1,3 +1,4 @@
+import random
 from datetime import date, timedelta
 from itertools import pairwise
 from statistics import mean
@@ -233,3 +234,41 @@ def test_a_short_history_is_null_with_a_note() -> None:
 def test_each_threshold_is_exact(name: str, needs: int) -> None:
     assert getattr(calculate_indicators(candles(rising(needs - 1))), name) is None
     assert getattr(calculate_indicators(candles(rising(needs))), name) is not None
+
+
+def walk(count: int, seed: int = 1) -> list[float]:
+    """A random walk of closes at two decimals, as prices are quoted."""
+    rng = random.Random(seed)
+    closes = [40.0]
+    for _ in range(count - 1):
+        closes.append(round(closes[-1] + rng.uniform(-1, 1), 2))
+    return closes
+
+
+def test_a_flat_stretch_after_movement_counts_ties_as_above() -> None:
+    closes = walk(300)
+    closes += [closes[-1]] * 30
+
+    result = calculate_indicators(candles(closes))
+
+    average = result.sma_20
+    assert average is not None
+    assert average.price_vs == "above"
+    assert average.slope == "flat"
+    assert average.distance == 0.0
+    assert average.days >= 30 - 20 + 1  # Every session whose window is flat
+
+
+def test_a_suspended_stock_has_no_rsi() -> None:
+    result = calculate_indicators(candles(rising(60) + [159.0] * 15))
+
+    assert result.rsi is None
+    assert result.note is not None
+    assert "rsi is undefined" in result.note
+
+
+def test_a_zero_close_leaves_the_fraction_null() -> None:
+    result = calculate_indicators(candles(walk(30) + [0.0]))
+
+    assert result.atr is not None
+    assert result.atr.fraction is None

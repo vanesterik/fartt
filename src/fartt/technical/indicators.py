@@ -79,7 +79,9 @@ class Macd(BaseModel):
 
 class Atr(BaseModel):
     value: float = Field(description="The average true range, in price.")
-    fraction: float = Field(description="ATR / close: a day's typical move.")
+    fraction: float | None = Field(
+        description="ATR / close: a day's typical move. Null on a zero close."
+    )
     stretch: float | None = Field(
         description=(
             "(close - SMA 20) / ATR: how many ATRs price has run from its 20-day "
@@ -124,6 +126,9 @@ def _round(value: float) -> float:
 
 
 def _direction(now: float, before: float) -> Direction:
+    # On rounded values: TA-Lib's running sums leave noise in the last digits,
+    # which would turn a flat stretch into rising or falling.
+    now, before = _round(now), _round(before)
     if now > before:
         return "rising"
     if now < before:
@@ -142,13 +147,15 @@ def _streak(flags: list[bool]) -> int:
 
 
 def _moving_average(closes: Array, values: Array) -> MovingAverage:
-    close, value = float(closes[-1]), float(values[-1])
+    close, value = _round(closes[-1]), _round(values[-1])
     defined = ~np.isnan(values)
+    # Rounded, so a close on its average counts as above despite float noise.
     above = [
-        bool(c >= v) for c, v in zip(closes[defined], values[defined], strict=True)
+        _round(c) >= _round(v)
+        for c, v in zip(closes[defined], values[defined], strict=True)
     ]
     return MovingAverage(
-        value=_round(value),
+        value=value,
         price_vs="above" if above[-1] else "below",
         distance=_round((close - value) / value),
         slope=_direction(value, float(values[-1 - SLOPE_SESSIONS])),
@@ -266,10 +273,14 @@ def calculate_indicators(
 
     rsi = None
     if enough("rsi", config.rsi.period + 1):
-        if np.all(closes[1:] == closes[:-1]):
-            # No gains and no losses: TA-Lib reports 0, which would read as
-            # oversold.
-            notes.append("rsi is undefined: the close hasn't moved.")
+        recent = closes[-1 - config.rsi.period :]
+        if np.all(recent == recent[0]):
+            # No gains and no losses over the period, as on a suspended stock:
+            # TA-Lib keeps the old reading or reports 0 (oversold), and either
+            # would look real.
+            notes.append(
+                f"rsi is undefined: the close hasn't moved in {len(recent)} sessions."
+            )
         else:
             rsi = _rsi(RSI(closes, timeperiod=config.rsi.period), config)
 
@@ -292,7 +303,7 @@ def calculate_indicators(
         close = float(closes[-1])
         atr = Atr(
             value=_round(value),
-            fraction=_round(value / close),
+            fraction=_round(value / close) if close > 0 else None,
             stretch=(
                 _round((close - sma_20) / value)
                 if not np.isnan(sma_20) and value > 0
