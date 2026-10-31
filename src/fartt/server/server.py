@@ -108,6 +108,9 @@ class CandlesResult(BaseModel):
 
 
 AVERAGE_SESSIONS = 20
+# A spread is a small fraction (0.0002 on a liquid stock), so it keeps more
+# decimals than prices do.
+SPREAD_DECIMALS = 6
 
 
 class QuoteResult(BaseModel):
@@ -186,6 +189,10 @@ class IndicatorsResult(BaseModel):
         )
     )
     warning: str | None = Field(default=None, description="What's stale, if anything.")
+
+
+def _rounded(value: float | None, decimals: int = DECIMALS) -> float | None:
+    return round(value, decimals) if value is not None else None
 
 
 def _row(candle: Candle) -> Row:
@@ -454,13 +461,13 @@ def build_server(cache: StockCache) -> MCPServer:
         return QuoteResult(
             ticker=listing.ticker,
             currency=listing.currency,
-            last=quote.last,
-            bid=bid,
-            ask=ask,
-            spread=spread,
-            volume=quote.volume,
-            average_volume_20d=average,
-            volume_ratio=ratio,
+            last=round(quote.last, DECIMALS),
+            bid=_rounded(bid),
+            ask=_rounded(ask),
+            spread=_rounded(spread, SPREAD_DECIMALS),
+            volume=_rounded(quote.volume),
+            average_volume_20d=_rounded(average),
+            volume_ratio=_rounded(ratio),
             market_open=status.open,
             next_open=status.next_open.isoformat() if status.next_open else None,
             quote_time=quote.time.isoformat(),

@@ -321,15 +321,35 @@ async def test_get_quote_during_the_session(tmp_path: Path) -> None:
     average = sum(volumes[-20:]) / 20
     assert (content["ticker"], content["currency"]) == ("ASML.AS", "EUR")
     assert (content["last"], content["bid"], content["ask"]) == (102.0, 101.9, 102.1)
-    assert content["spread"] == pytest.approx(0.2 / 102.0)
+    assert content["spread"] == 0.001961  # 0.2 / 102, to 6 decimals
     assert content["volume"] == 500.0
-    assert content["average_volume_20d"] == pytest.approx(average)
-    assert content["volume_ratio"] == pytest.approx(500.0 / average)
+    assert content["average_volume_20d"] == average
+    assert content["volume_ratio"] == 0.4367  # 500 / 1145, to 4 decimals
     assert content["market_open"] is True
     assert content["next_open"] is None
     assert content["quote_time"] == "2026-10-29T09:45:00+00:00"
     assert content["delay_minutes"] == 15
     assert content["note"] is None
+
+
+@pytest.mark.anyio
+async def test_get_quote_rounds_its_prices(tmp_path: Path) -> None:
+    # Yahoo's prices are 32-bit floats: 1412.8 arrives as 1412.800048828125.
+    raw = Quote(
+        1412.800048828125,
+        1412.199951171875,
+        1413.4000244140625,
+        500.0,
+        datetime(2026, 10, 29, 9, 45, tzinfo=UTC),
+        15,
+    )
+    days = sessions("XAMS", 3, last=date(2026, 10, 28))
+
+    result = await get_quote(quoting(days, [1000.0] * 3, asml_quote=raw), tmp_path)
+
+    content = result.structured_content
+    assert (content["last"], content["bid"], content["ask"]) == (1412.8, 1412.2, 1413.4)
+    assert content["spread"] == 0.000849  # 1.2 / 1412.8, to 6 decimals
 
 
 @pytest.mark.anyio
