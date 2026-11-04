@@ -1,4 +1,5 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime
+from typing import Any
 
 from fartt.data import (
     Candle,
@@ -10,6 +11,7 @@ from fartt.data import (
     newest_closed_session,
     normalise_ticker,
 )
+from fartt.journal import BenchmarkClose, DecisionDraft, Signal
 
 
 class FakeProvider:
@@ -74,3 +76,27 @@ class FakeProvider:
 def stock_candle(day: date, close: float = 100.0, volume: float = 1000.0) -> Candle:
     """A daily candle for `day` around `close`."""
     return Candle(day, close - 0.5, close + 1.0, close - 1.0, close, volume)
+
+
+def decision_draft(**changes: Any) -> DecisionDraft:
+    """A call on ASML.AS recorded after 2026-10-29's close, with `changes`."""
+    fields: dict[str, Any] = {
+        "recorded_at": datetime(2026, 10, 29, 21, 0, tzinfo=UTC),
+        "ticker": "ASML.AS",
+        "currency": "EUR",
+        "exchange": "XAMS",
+        "direction": "buy",
+        "horizon": 20,
+        "reasoning": "Trend up, support holding.",
+        "signals": [
+            Signal(name="trend", stance="for", note="up, aligned"),
+            Signal(name="rsi", stance="against"),
+        ],
+        "decision_session": date(2026, 10, 29),
+        "close": 612.4,
+        "horizon_ends": date(2026, 11, 26),
+        "benchmark": BenchmarkClose(
+            ticker="IWDA.AS", currency="EUR", session=date(2026, 10, 29), close=101.25
+        ),
+    }
+    return DecisionDraft(**(fields | changes))
