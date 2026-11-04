@@ -8,7 +8,7 @@ tune them against how often zones held.
 
 import math
 from datetime import date
-from typing import Literal
+from typing import Literal, NamedTuple
 
 import numpy as np
 
@@ -46,6 +46,11 @@ MIN_TURNS = 2
 TURNS_FULL = 10
 VOLUME_FULL = 0.10
 SOURCES_FULL = 3
+# Strength weights: turns dominate, then recency, then volume, then sources.
+TURNS_WEIGHT = 0.55
+RECENCY_WEIGHT = 0.20
+VOLUME_WEIGHT = 0.15
+SOURCES_WEIGHT = 0.10
 # Zones are listed within this many ATRs of the last close, this many a side.
 REACH_ATR = 5
 PER_SIDE = 3
@@ -181,3 +186,123 @@ def group_zones(candidates: list[tuple[float, Source]], atr: float) -> list[Zone
     if prices:
         zones.append(_zone(prices, sources, atr))
     return zones
+
+
+class ZoneMeasure(NamedTuple):
+    touches: int
+    turns: int
+    last_touch: int | None  # Index into the window of the latest touch's last session
+    volume_share: float
+
+
+class _Touch(NamedTuple):
+    start: int  # First session of the episode
+    end: int  # Last session of the episode
+    gap: bool  # Closes on opposite sides with no session inside: never a turn
+
+
+def _enters(candle: Candle, low: float, high: float) -> bool:
+    return round_value(candle.high) >= low and round_value(candle.low) <= high
+
+
+def _side(close: float, low: float, high: float) -> int:
+    """1 above the zone, -1 below it, 0 inside."""
+    close = round_value(close)
+    return 1 if close > high else -1 if close < low else 0
+
+
+def _touches(low: float, high: float, window: list[Candle]) -> list[_Touch]:
+    """The episodes whose range enters the zone, and the gaps across it, in order."""
+    touches: list[_Touch] = []
+    start: int | None = None
+    for i, candle in enumerate(window):
+        if _enters(candle, low, high):
+            if start is None:
+                start = i
+            continue
+        if start is not None:
+            touches.append(_Touch(start, i - 1, gap=False))
+            start = None
+        elif i > 0:
+            # Neither this session nor the one before entered the zone.
+            before = _side(window[i - 1].close, low, high)
+            if before and _side(candle.close, low, high) == -before:
+                touches.append(_Touch(i, i, gap=True))
+    if start is not None:
+        touches.append(_Touch(start, len(window) - 1, gap=False))
+    return touches
+
+
+def _is_turn(
+    touch: _Touch, low: float, high: float, window: list[Candle], atrs: list[float]
+) -> bool:
+    if touch.gap or touch.start == 0:
+        return False
+    side = _side(window[touch.start - 1].close, low, high)
+    atr = atrs[touch.end]
+    if side == 0 or math.isnan(atr):
+        return False
+    after = [c.close for c in window[touch.end : touch.end + BOUNCE_SESSIONS]]
+    if not any(_side(close, low, high) == side for close in after[:TURN_SESSIONS]):
+        return False
+    edge = high if side > 0 else low
+    for close in after:
+        if _side(close, low, high) == -side:
+            return False
+        if side * (round_value(close) - edge) >= BOUNCE_ATR * atr:
+            return True
+    return False
+
+
+def _overlap(candle: Candle, low: float, high: float) -> float:
+    """The share of the session's range that lies in the zone."""
+    if candle.high == candle.low:
+        return 1.0 if low <= round_value(candle.high) <= high else 0.0
+    inside = min(candle.high, high) - max(candle.low, low)
+    return max(0.0, inside) / (candle.high - candle.low)
+
+
+def measure_zone(
+    low: float, high: float, window: list[Candle], atrs: list[float]
+) -> ZoneMeasure:
+    """
+    How the zone `low`-`high` was traded over `window`: its touches, the
+    touches that turned, the latest touch, and its share of the volume.
+    `atrs` holds each session's ATR, aligned with `window`.
+
+    """
+    touches = _touches(low, high, window)
+    total = sum(c.volume for c in window)
+    traded = sum(c.volume * _overlap(c, low, high) for c in window)
+    return ZoneMeasure(
+        touches=len(touches),
+        turns=sum(_is_turn(t, low, high, window, atrs) for t in touches),
+        last_touch=touches[-1].end if touches else None,
+        volume_share=traded / total if total > 0 else 0.0,
+    )
+
+
+def zone_strength(
+    measure: ZoneMeasure, sources: frozenset[Source], window_length: int
+) -> int:
+    """
+    0-100: turns weigh most, then how recent the last touch is, then the
+    zone's share of the volume, then how many kinds of level (round numbers
+    aside) it holds.
+
+    """
+    recency = (
+        1 - (window_length - 1 - measure.last_touch) / window_length
+        if measure.last_touch is not None
+        else 0.0
+    )
+    others = len(sources - {"round"})
+    return round(
+        100
+        * (
+            TURNS_WEIGHT * min(measure.turns / TURNS_FULL, 1)
+            + RECENCY_WEIGHT * recency
+            + VOLUME_WEIGHT * min(measure.volume_share / VOLUME_FULL, 1)
+            + SOURCES_WEIGHT * min(others / SOURCES_FULL, 1)
+        )
+    )
