@@ -7,13 +7,17 @@ tune them against how often zones held.
 """
 
 import math
+from collections.abc import Callable
 from datetime import date
 from typing import Literal, NamedTuple
 
 import numpy as np
+from pydantic import BaseModel, Field
+from talib import ATR
 
 from fartt.data import Candle
-from fartt.technical.indicators import round_value
+from fartt.technical.indicators import calculate_indicators, round_value
+from fartt.technical.trend import weekly_candles
 
 Source = Literal[
     "swing_high", "swing_low", "volume", "pivot", "sma_50", "sma_200", "round"
@@ -70,6 +74,72 @@ ROUND_STEPS = ((20.0, 1.0), (100.0, 5.0), (500.0, 10.0))
 ROUND_STEP_ABOVE = 50.0
 
 ZoneRange = tuple[float, float, frozenset[Source]]
+Side = Literal["support", "resistance"]
+
+
+class Zone(BaseModel):
+    low: float = Field(description="The zone's lowest price.")
+    high: float = Field(description="The zone's highest price.")
+    sources: list[Source] = Field(
+        description=(
+            "The kinds of level in it: swing highs and lows, a volume node, "
+            "last week's pivots, the SMA 50 or 200, a round number."
+        )
+    )
+    touches: int = Field(
+        description=(
+            "Times price entered the zone (or gapped across it) over the "
+            "sessions measured."
+        )
+    )
+    turns: int = Field(
+        description=(
+            f"Touches after which price closed back out within {TURN_SESSIONS} "
+            f"sessions and moved {BOUNCE_ATR:g} ATR away within "
+            f"{BOUNCE_SESSIONS}, on the side it came from."
+        )
+    )
+    last_touch: str = Field(
+        description="The last session of the latest touch, ISO 8601."
+    )
+    volume_share: float = Field(
+        description="The zone's share of the volume traded over the sessions measured."
+    )
+    strength: int = Field(
+        description=(
+            "0-100: turns weigh most, then how recent the last touch is, then "
+            "the volume share, then how many kinds of level it holds."
+        )
+    )
+    distance: float = Field(
+        description=(
+            "(nearest edge - last) / last: -0.03 means 3% below. 0 when the "
+            "last close is inside the zone."
+        )
+    )
+    distance_atr: float = Field(description="The same distance in ATRs.")
+
+
+class Sign(BaseModel):
+    sign: str = Field(description="What the evidence is, e.g. daily_trend.")
+    points: Literal["holding", "breaking"] = Field(
+        description="Whether it points to the support holding or breaking."
+    )
+    detail: str = Field(description="The evidence, briefly.")
+
+
+class Levels(BaseModel):
+    based_on: str = Field(description="The session the zones are as of, ISO 8601.")
+    last: float = Field(description="That session's close.")
+    atr: float | None = Field(
+        description=f"ATR {ATR_PERIOD} as of that session; null for too short a history."
+    )
+    support: list[Zone]
+    resistance: list[Zone]
+    signs: list[Sign]
+    note: str | None = Field(
+        default=None, description="What's missing or unusual, if anything."
+    )
 
 
 def _swings(
@@ -152,7 +222,7 @@ def _round_step(price: float) -> float:
     return ROUND_STEP_ABOVE
 
 
-def _zone(prices: list[float], sources: set[Source], atr: float) -> ZoneRange:
+def _range(prices: list[float], sources: set[Source], atr: float) -> ZoneRange:
     low, high = min(prices), max(prices)
     centre = (low + high) / 2
     half = MIN_WIDTH_ATR * atr / 2
@@ -179,12 +249,12 @@ def group_zones(candidates: list[tuple[float, Source]], atr: float) -> list[Zone
             price - prices[-1] > MERGE_ATR * atr
             or price - prices[0] > MAX_WIDTH_ATR * atr
         ):
-            zones.append(_zone(prices, sources, atr))
+            zones.append(_range(prices, sources, atr))
             prices, sources = [], set()
         prices.append(price)
         sources.add(source)
     if prices:
-        zones.append(_zone(prices, sources, atr))
+        zones.append(_range(prices, sources, atr))
     return zones
 
 
@@ -193,6 +263,14 @@ class ZoneMeasure(NamedTuple):
     turns: int
     last_touch: int | None  # Index into the window of the latest touch's last session
     volume_share: float
+
+
+class MeasuredZone(NamedTuple):
+    low: float
+    high: float
+    sources: frozenset[Source]
+    measure: ZoneMeasure
+    strength: int
 
 
 class _Touch(NamedTuple):
@@ -305,4 +383,201 @@ def zone_strength(
             + VOLUME_WEIGHT * min(measure.volume_share / VOLUME_FULL, 1)
             + SOURCES_WEIGHT * min(others / SOURCES_FULL, 1)
         )
+    )
+
+
+def _measured_zones(
+    candles: list[Candle],
+    atrs: list[float],
+    atr: float,
+    ex_dividend: frozenset[date],
+    pivot_week: Candle | None,
+    sma_50: float | None,
+    sma_200: float | None,
+) -> list[MeasuredZone]:
+    candidates = candidate_levels(
+        candles, atr, ex_dividend, pivot_week, sma_50, sma_200
+    )
+    zones: list[MeasuredZone] = []
+    for low, high, sources in group_zones(candidates, atr):
+        measure = measure_zone(low, high, candles, atrs)
+        strength = zone_strength(measure, sources, len(candles))
+        zones.append(MeasuredZone(low, high, sources, measure, strength))
+    return zones
+
+
+def _gap(zone: MeasuredZone, last: float, side: Side) -> float:
+    """How far the zone's nearest edge lies from the last close; 0 inside it."""
+    if zone.low <= last <= zone.high:
+        return 0.0
+    return last - zone.high if side == "support" else zone.low - last
+
+
+def pick_zones(
+    zones: list[MeasuredZone], last: float, atr: float, side: Side
+) -> tuple[list[MeasuredZone], bool]:
+    """
+    The zones to list on one side of the last close, nearest first, and
+    whether they lie beyond reach. Support is a zone whose low is at or below
+    the last close, resistance one whose low is above it; either needs
+    MIN_TURNS. The PER_SIDE strongest within REACH_ATR are listed, a zone
+    holding the last close always among them; with none within reach, the
+    nearest beyond is listed alone.
+
+    """
+    eligible = [
+        z
+        for z in zones
+        if z.measure.turns >= MIN_TURNS
+        and ((z.low <= last) if side == "support" else (z.low > last))
+    ]
+    within = [z for z in eligible if _gap(z, last, side) <= REACH_ATR * atr]
+    if not within:
+        nearest = min(eligible, key=lambda z: _gap(z, last, side), default=None)
+        return ([nearest], True) if nearest is not None else ([], False)
+    ranked = sorted(within, key=lambda z: (_gap(z, last, side) > 0, -z.strength))
+    return sorted(ranked[:PER_SIDE], key=lambda z: _gap(z, last, side)), False
+
+
+def _zone(
+    zone: MeasuredZone, candles: list[Candle], last: float, atr: float, side: Side
+) -> Zone:
+    gap = _gap(zone, last, side)
+    signed = -gap if side == "support" else gap
+    last_touch = zone.measure.last_touch
+    assert last_touch is not None  # a zone with turns was touched
+    return Zone(
+        low=zone.low,
+        high=zone.high,
+        sources=sorted(zone.sources),
+        touches=zone.measure.touches,
+        turns=zone.measure.turns,
+        last_touch=candles[last_touch].date.isoformat(),
+        volume_share=round_value(zone.measure.volume_share),
+        strength=zone.strength,
+        distance=round_value(signed / last) if last else 0.0,
+        distance_atr=round_value(signed / atr),
+    )
+
+
+def _side_zones(
+    side: Side,
+    candles: list[Candle],
+    window: list[Candle],
+    zones: list[MeasuredZone],
+    full_zones: Callable[[], list[MeasuredZone]],
+    last: float,
+    atr: float,
+    notes: list[str],
+) -> list[Zone]:
+    above = side == "resistance"
+    earlier = candles[:-1]
+    if above and last > max(round_value(c.high) for c in earlier):
+        notes.append("There's no resistance from history above the price.")
+        return []
+    if not above and last < min(round_value(c.low) for c in earlier):
+        notes.append("There's no support from history below the price.")
+        return []
+    measured_over = window
+    chosen, beyond = pick_zones(zones, last, atr, side)
+    if not chosen and len(candles) > len(window):
+        measured_over = candles
+        chosen, beyond = pick_zones(full_zones(), last, atr, side)
+    if not chosen:
+        where = "above" if above else "below"
+        notes.append(f"No {side}: price never turned {where} the last close.")
+        return []
+    if beyond:
+        notes.append(
+            f"The nearest {side} zone lies further than {REACH_ATR} ATR from "
+            "the last close."
+        )
+    listed = [_zone(z, measured_over, last, atr, side) for z in chosen]
+    if not above and listed[0].distance == 0:
+        notes.append(
+            f"The last close is inside the support zone {listed[0].low:g}-"
+            f"{listed[0].high:g}."
+        )
+    return listed
+
+
+def calculate_levels(
+    candles: list[Candle], exchange: str, ex_dividend: frozenset[date] = frozenset()
+) -> Levels:
+    """
+    Support and resistance zones around the last close of `candles` (oldest
+    first, at least one; the whole cached history) on `exchange`: where price
+    turned before, found and measured over the last WINDOW sessions, with
+    older history searched for a side the window has none on. `ex_dividend`
+    holds the ex-dividend dates: a swing low on one isn't a level.
+
+    """
+    count = len(candles)
+    based_on = candles[-1].date.isoformat()
+    last = round_value(candles[-1].close)
+    if count < MIN_SESSIONS:
+        return Levels(
+            based_on=based_on,
+            last=last,
+            atr=None,
+            support=[],
+            resistance=[],
+            signs=[],
+            note=f"Zones need {MIN_SESSIONS} sessions, {count} are cached.",
+        )
+
+    highs = np.array([c.high for c in candles], dtype=np.float64)
+    lows = np.array([c.low for c in candles], dtype=np.float64)
+    closes = np.array([c.close for c in candles], dtype=np.float64)
+    atrs = [float(v) for v in ATR(highs, lows, closes, timeperiod=ATR_PERIOD)]
+    atr = round_value(atrs[-1])
+    if atr == 0:
+        return Levels(
+            based_on=based_on,
+            last=last,
+            atr=atr,
+            support=[],
+            resistance=[],
+            signs=[],
+            note="Price hasn't moved: the ATR is 0, so there are no zones.",
+        )
+
+    indicators = calculate_indicators(candles, ex_dividend)
+    weeks, _ = weekly_candles(candles, exchange)
+
+    def measured(over: list[Candle], over_atrs: list[float]) -> list[MeasuredZone]:
+        return _measured_zones(
+            over,
+            over_atrs,
+            atr,
+            ex_dividend,
+            weeks[-1] if weeks else None,
+            indicators.sma_50.value if indicators.sma_50 else None,
+            indicators.sma_200.value if indicators.sma_200 else None,
+        )
+
+    window = candles[-WINDOW:]
+    zones = measured(window, atrs[-WINDOW:])
+    full: list[list[MeasuredZone]] = []
+
+    def full_zones() -> list[MeasuredZone]:
+        if not full:
+            full.append(measured(candles, atrs))
+        return full[0]
+
+    notes: list[str] = []
+    support = _side_zones(
+        "support", candles, window, zones, full_zones, last, atr, notes
+    )
+    resistance = _side_zones(
+        "resistance", candles, window, zones, full_zones, last, atr, notes
+    )
+    return Levels(
+        based_on=based_on,
+        last=last,
+        atr=atr,
+        support=support,
+        resistance=resistance,
+        signs=[],
+        note=" ".join(notes) or None,
     )

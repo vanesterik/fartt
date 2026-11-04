@@ -1,14 +1,19 @@
 from datetime import date, timedelta
 
+import exchange_calendars as xcals
 import pytest
 
 from fartt.data import Candle
 from fartt.technical.levels import (
+    Levels,
+    MeasuredZone,
     Source,
     ZoneMeasure,
+    calculate_levels,
     candidate_levels,
     group_zones,
     measure_zone,
+    pick_zones,
     zone_strength,
 )
 
@@ -338,3 +343,225 @@ def test_a_zone_never_touched_has_no_recency() -> None:
     )
 
     assert strength == round(100 * 0.10 / 3)
+
+
+# Choosing the zones to list. Series run on XAMS sessions; each session's
+# range is its close +/- 0.5, so with steps of 2 the ATR is 2.5.
+FRIDAY = date(2026, 10, 30)
+STEP = 2.0
+
+
+def sessions(count: int, last: date = FRIDAY) -> list[date]:
+    window = xcals.get_calendar("XAMS").sessions_window(last.isoformat(), -count)
+    return [session.date() for session in window]
+
+
+def path(closes: list[float]) -> list[Candle]:
+    return [
+        Candle(day, close, close + 0.5, close - 0.5, close, 1000.0)
+        for day, close in zip(sessions(len(closes)), closes, strict=True)
+    ]
+
+
+def walk(start: float, *targets: float) -> list[float]:
+    """Closes from `start` to each target in turn, STEP at a time."""
+    closes = [start]
+    for target in targets:
+        while closes[-1] != target:
+            move = min(STEP, abs(target - closes[-1]))
+            closes.append(closes[-1] + (move if target > closes[-1] else -move))
+    return closes
+
+
+def zigzag(
+    low: float, high: float, cycles: int, start: float | None = None
+) -> list[float]:
+    """From `start` (the midpoint by default) down to `low` and up to `high`, `cycles` times."""
+    begin = (low + high) / 2 if start is None else start
+    return walk(begin, *[low, high] * cycles)
+
+
+def levels(closes: list[float], ex_dividend: frozenset[date] = frozenset()) -> Levels:
+    return calculate_levels(path(closes), "XAMS", ex_dividend)
+
+
+def test_zones_are_split_by_the_last_close_nearest_first() -> None:
+    result = levels(walk(*zigzag(90, 110, 15), 100))
+
+    assert result.support and result.resistance
+    assert all(zone.low <= result.last for zone in result.support)
+    assert all(zone.low > result.last for zone in result.resistance)
+    for side in (result.support, result.resistance):
+        assert len(side) <= 3
+        assert [abs(z.distance) for z in side] == sorted(abs(z.distance) for z in side)
+        assert all(zone.turns >= 2 for zone in side)
+    assert result.support[0].low == pytest.approx(88.875)
+    assert result.resistance[0].high == pytest.approx(111.125)
+
+
+def zone(low: float, high: float, strength: int, turns: int = 4) -> MeasuredZone:
+    return MeasuredZone(
+        low,
+        high,
+        frozenset({"swing_low"}),
+        ZoneMeasure(turns + 1, turns, 0, 0.0),
+        strength,
+    )
+
+
+def test_the_strongest_within_five_atr_are_listed() -> None:
+    zones = [zone(80, 81, 90), zone(84, 85, 20), zone(88, 89, 70), zone(92, 93, 50)]
+
+    chosen, beyond = pick_zones(zones, last=100.0, atr=4.0, side="support")
+
+    assert [z.low for z in chosen] == [92, 88, 80]
+    assert beyond is False
+
+
+def test_zones_beyond_reach_are_left_out() -> None:
+    zones = [zone(70, 71, 99), zone(92, 93, 10)]
+
+    chosen, _ = pick_zones(zones, last=100.0, atr=4.0, side="support")
+
+    assert [z.low for z in chosen] == [92]
+
+
+def test_a_zone_needs_two_turns() -> None:
+    zones = [zone(92, 93, 90, turns=1), zone(88, 89, 10, turns=2)]
+
+    chosen, _ = pick_zones(zones, last=100.0, atr=4.0, side="support")
+
+    assert [z.low for z in chosen] == [88]
+
+
+def test_the_zone_holding_the_last_close_is_always_listed() -> None:
+    zones = [zone(99, 101, 5), zone(96, 97, 50), zone(92, 93, 60), zone(88, 89, 70)]
+
+    chosen, _ = pick_zones(zones, last=100.0, atr=4.0, side="support")
+
+    assert [z.low for z in chosen] == [99, 92, 88]
+
+
+def test_resistance_is_picked_above_the_last_close() -> None:
+    zones = [zone(99, 101, 90), zone(104, 105, 50), zone(140, 141, 70)]
+
+    chosen, beyond = pick_zones(zones, last=100.0, atr=4.0, side="resistance")
+
+    assert [z.low for z in chosen] == [104]
+    assert beyond is False
+
+
+def test_a_side_with_nothing_within_reach_lists_the_nearest_beyond() -> None:
+    # A rally from the 90-110 range to 128: the top zone (~111) is 6.8 ATR away.
+    result = levels(walk(*zigzag(90, 110, 15), 128))
+
+    assert len(result.support) == 1
+    assert result.support[0].high == pytest.approx(111.125)
+    assert result.support[0].distance_atr < -5
+    assert result.note is not None and "further than 5 ATR" in result.note
+
+
+def test_a_close_inside_a_zone_is_support_at_distance_zero() -> None:
+    result = levels(walk(*zigzag(90, 110, 15), 90))
+
+    first = result.support[0]
+    assert first.low <= result.last <= first.high
+    assert (first.distance, first.distance_atr) == (0, 0)
+    assert result.note is not None and "inside" in result.note
+
+
+def test_a_new_high_has_no_resistance() -> None:
+    result = levels(walk(*zigzag(90, 110, 15), 120))
+
+    assert result.resistance == []
+    assert result.support
+    assert result.note is not None
+    assert "no resistance from history above the price" in result.note
+
+
+def test_a_new_low_has_no_support() -> None:
+    result = levels(walk(*zigzag(90, 110, 15), 80))
+
+    assert result.support == []
+    assert result.resistance
+    assert result.note is not None
+    assert "no support from history below the price" in result.note
+
+
+def test_older_history_is_searched_when_the_window_has_no_zone() -> None:
+    old = zigzag(90, 110, 15, start=100)  # about 300 sessions turning at 90 and 110
+    recent = walk(old[-1], 70) + zigzag(60, 80, 25, start=70)[1:]
+    closes = walk(*(old + recent[1:]), 84)
+    assert len(closes) > 700
+
+    result = levels(closes)
+
+    assert result.resistance
+    assert result.resistance[0].low > result.last
+    window_start = path(closes)[-500].date.isoformat()
+    assert result.resistance[0].last_touch < window_start
+
+
+def test_a_side_price_never_turned_on_is_empty_with_a_note() -> None:
+    result = levels(walk(150, 80) + zigzag(70, 80, 10, start=80)[1:] + walk(80, 95)[1:])
+
+    assert result.resistance == []
+    assert result.note is not None and "never turned above" in result.note
+
+
+def test_too_short_a_history_has_no_zones() -> None:
+    result = levels(zigzag(90, 110, 1)[:29])
+
+    assert (result.support, result.resistance, result.signs) == ([], [], [])
+    assert result.atr is None
+    assert result.note is not None and "30 sessions" in result.note
+
+
+def test_a_short_history_uses_all_of_it() -> None:
+    closes = walk(*zigzag(90, 110, 6), 100)
+
+    result = levels(closes)
+
+    bottom = next(z for z in result.support if z.low == pytest.approx(88.875))
+    assert bottom.touches == 6
+    # The first dip comes before the ATR is known, so it can't turn.
+    assert bottom.turns == 5
+
+
+def test_a_flat_price_has_no_zones() -> None:
+    flat_price = [
+        Candle(day, 100.0, 100.0, 100.0, 100.0, 1000.0) for day in sessions(60)
+    ]
+
+    result = calculate_levels(flat_price, "XAMS")
+
+    assert (result.support, result.resistance) == ([], [])
+    assert result.atr == 0
+    assert result.note is not None and "hasn't moved" in result.note
+
+
+def test_distance_is_measured_to_the_nearest_edge() -> None:
+    result = levels(walk(*zigzag(90, 110, 15), 100))
+    last, atr = result.last, result.atr
+    assert atr is not None
+
+    for z in result.support:
+        assert z.distance == round((z.high - last) / last, 4)
+        assert z.distance_atr == round((z.high - last) / atr, 4)
+    for z in result.resistance:
+        assert z.distance == round((z.low - last) / last, 4)
+        assert z.distance_atr == round((z.low - last) / atr, 4)
+
+
+def test_a_zone_reports_its_evidence() -> None:
+    closes = walk(*zigzag(90, 110, 15), 100)
+    result = levels(closes)
+    bottom = result.support[0]
+
+    assert result.based_on == FRIDAY.isoformat()
+    assert result.atr == pytest.approx(2.5)
+    assert "swing_low" in bottom.sources
+    assert bottom.touches >= bottom.turns >= 14
+    assert 0 < bottom.volume_share < 1
+    assert 0 <= bottom.strength <= 100
+    assert bottom.last_touch in {c.date.isoformat() for c in path(closes)}
