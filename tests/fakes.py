@@ -42,6 +42,7 @@ class FakeProvider:
         self.listings = listings
         self.now = now
         self.reachable = True
+        self.unreachable: set[str] = set()  # Tickers it can't answer for alone
         self.fail_on_full_history = False
         self.history_calls: list[tuple[str, date | None]] = []
 
@@ -74,7 +75,7 @@ class FakeProvider:
         return self.quotes[ticker]
 
     def _check(self, ticker: str) -> None:
-        if not self.reachable:
+        if not self.reachable or ticker in self.unreachable:
             raise ProviderUnavailable("Fake provider is unreachable")
         if ticker not in self.listings:
             raise UnknownTicker(f"Fake provider doesn't list '{ticker}'")

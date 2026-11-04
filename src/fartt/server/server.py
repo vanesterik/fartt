@@ -1164,7 +1164,7 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
                     )
                 except Unscorable as error:
                     reason = str(error)
-                    if unreachable.intersection(tickers):
+                    if error.ticker in unreachable:
                         reason += " (the provider is unreachable)"
                 else:
                     try:
