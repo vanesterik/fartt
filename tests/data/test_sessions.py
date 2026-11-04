@@ -16,6 +16,7 @@ from fartt.data import (
     missing_sessions,
     newest_closed_session,
     normalise_ticker,
+    session_after,
 )
 
 
@@ -153,6 +154,25 @@ def test_a_weekend_day_belongs_to_its_iso_week() -> None:
 
 def test_a_week_outside_the_calendar_is_unknown() -> None:
     assert last_session_of_week("XAMS", date(2056, 10, 28)) is None
+
+
+def test_session_after_skips_the_weekend() -> None:
+    assert session_after("XAMS", date(2026, 10, 30), 1) == date(2026, 11, 2)
+
+
+def test_session_after_skips_thanksgiving() -> None:
+    # Thanksgiving, 26 November 2026: NYSE is closed.
+    assert session_after("XNYS", date(2026, 11, 20), 5) == date(2026, 11, 30)
+
+
+def test_session_after_skips_easter() -> None:
+    # Euronext closes on Good Friday 26 March and Easter Monday 29 March 2027.
+    assert session_after("XAMS", date(2027, 3, 25), 1) == date(2027, 3, 30)
+
+
+def test_session_after_reaches_60_sessions() -> None:
+    expected = exchange_calendar("XNYS").session_offset("2026-11-04", 60).date()
+    assert session_after("XNYS", date(2026, 11, 4), 60) == expected
 
 
 def test_calendars_raise_no_pandas_deprecation_warning() -> None:
