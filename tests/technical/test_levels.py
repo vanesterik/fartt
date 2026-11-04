@@ -186,6 +186,19 @@ def test_a_zone_stops_growing_at_one_and_a_half_atr() -> None:
     ]
 
 
+def test_a_zone_split_at_the_width_cap_is_widened_away_from_its_neighbour() -> None:
+    # 114 and 115.5 split off at the cap; widened around their centre they'd
+    # start at 113, inside 100-114.
+    prices = [100.0, 104.0, 108.0, 112.0, 114.0, 115.5]
+
+    zones = group_zones([(p, "swing_high") for p in prices], atr=10.0)
+
+    assert [(low, high) for low, high, _ in zones] == [
+        (100.0, 114.0),
+        (114.0, 119.0),
+    ]
+
+
 def test_a_narrow_zone_is_widened_to_half_an_atr() -> None:
     zones = group_zones([(101.0, "swing_low")], atr=10.0)
 
