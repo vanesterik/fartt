@@ -966,6 +966,24 @@ async def test_get_candles_rounds_prices_to_4_decimals(tmp_path: Path) -> None:
     ]
 
 
+@pytest.mark.anyio
+async def test_get_candles_rounds_an_exchange_rate_to_6_decimals(
+    tmp_path: Path,
+) -> None:
+    # The score keeps a rate to 6 decimals; get_candles shows the same rate.
+    day = sessions("24/5", 1, last=date(2026, 10, 28))[0]
+    candle = Candle(day, 1.1561234, 1.1589876, 1.1549012, 1.157756111, 0.0)
+    fake = provider([])
+    fake.histories["EURUSD=X"] = History([candle], [], [])
+    fake.listings["EURUSD=X"] = Listing("EURUSD=X", "EUR/USD", "USD", "24/5")
+
+    result = await call(cache_for(fake, tmp_path), {"ticker": "EURUSD=X"})
+
+    assert result.structured_content["rows"] == [
+        [day.isoformat(), 1.156123, 1.158988, 1.154901, 1.157756, 0.0]
+    ]
+
+
 SIGNALS_SENT = [
     {"name": "trend", "stance": "for", "note": "up, aligned"},
     {"name": "rsi", "stance": "against", "note": None},

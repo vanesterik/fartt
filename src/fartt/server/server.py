@@ -38,7 +38,7 @@ from fartt.journal import (
     Score,
     Signal,
 )
-from fartt.scoring import Unscorable, score_call
+from fartt.scoring import RATE_DECIMALS, Unscorable, score_call
 from fartt.stock_cache import StockCache, UpdateResult
 from fartt.technical import (
     DECIMALS,
@@ -118,7 +118,8 @@ class CandlesResult(BaseModel):
         description=(
             "Closed daily sessions, oldest first: date (the session's date on "
             "the exchange, ISO 8601), open, high, low, close, volume. Prices "
-            "are split-adjusted. The last row is the newest."
+            "are split-adjusted, to 4 decimals; an exchange rate's (EURUSD=X) "
+            "to 6. The last row is the newest."
         )
     )
     new_candles: int = Field(
@@ -453,15 +454,15 @@ def _rounded(value: float | None, decimals: int = DECIMALS) -> float | None:
     return round(value, decimals) if value is not None else None
 
 
-def _row(candle: Candle) -> Row:
+def _row(candle: Candle, decimals: int) -> Row:
     # Rounded as get_indicators rounds: Yahoo's prices are 32-bit floats, so
     # 1666.2 would otherwise arrive as 1666.199951171875.
     return (
         candle.date.isoformat(),
-        round(candle.open, DECIMALS),
-        round(candle.high, DECIMALS),
-        round(candle.low, DECIMALS),
-        round(candle.close, DECIMALS),
+        round(candle.open, decimals),
+        round(candle.high, decimals),
+        round(candle.low, decimals),
+        round(candle.close, decimals),
         round(candle.volume, DECIMALS),
     )
 
@@ -638,6 +639,9 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
                 + "."
             )
 
+        # An exchange rate to the decimals a score keeps it to, so the rate a
+        # score used can be read back here.
+        decimals = RATE_DECIMALS if ticker.endswith(FX_SUFFIX) else DECIMALS
         new_candles = update.new_candles if update else 0
         rebuilt = update.rebuilt if update else None
         logger.info(
@@ -650,7 +654,7 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
             name=listing.name,
             currency=listing.currency,
             exchange=listing.exchange,
-            rows=[_row(c) for c in candles],
+            rows=[_row(c, decimals) for c in candles],
             new_candles=new_candles,
             rebuilt=rebuilt,
             gaps=[day.isoformat() for day in gaps],
