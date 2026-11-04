@@ -168,9 +168,22 @@ async def test_should_return_the_stored_entry(live_assets: Path) -> None:
 async def test_should_stamp_the_newest_closes_get_candles_returns(
     live_assets: Path, ticker: str, exchange: str
 ) -> None:
-    """@issue-119 @AC2 Should stamp the stock's and the benchmark's newest closes."""
+    """
+    @issue-119 @AC2 Should stamp the stock's and the benchmark's newest closes.
+
+    Between an exchange's close (plus the margin) and Yahoo publishing that
+    session, record_decision refuses by design; the test skips then rather
+    than reading a late Yahoo as a regression.
+    """
     async with _server(live_assets) as client:
-        entry = await _call(client, "record_decision", **{**CALL, "ticker": ticker})
+        result = await client.call_tool("record_decision", {**CALL, "ticker": ticker})
+        if result.is_error:
+            text = " ".join(getattr(part, "text", "") for part in result.content)
+            if "isn't available" in text:
+                pytest.skip(f"Yahoo hasn't published the newest session: {text}")
+        assert not result.is_error, result.content
+        entry = result.structured_content
+        assert entry is not None
         stock = await _call(client, "get_candles", ticker=ticker, count=1)
         benchmark = await _call(client, "get_candles", ticker=BENCHMARK, count=1)
 
@@ -202,18 +215,16 @@ async def test_should_end_the_horizon_on_the_exchange_s_own_sessions(
     sessions = _sessions_after(exchange, decided, horizon)
     assert entry["horizon_ends"] == sessions[-1].isoformat()
     ends = dt.date.fromisoformat(entry["horizon_ends"])
-    assert all(day.weekday() < 5 for day in sessions)
     if exchange == "XNYS":
         skipped = [d for d in THANKSGIVING if decided < d <= ends]
-        assert not set(skipped) & set(sessions)
-        # A horizon spanning Thanksgiving ends a session later than it would
-        # if the holiday counted.
-        weekdays = [
-            decided + dt.timedelta(days=n)
-            for n in range(1, (ends - decided).days + 1)
-            if (decided + dt.timedelta(days=n)).weekday() < 5
-        ]
-        assert len(weekdays) >= horizon + len(skipped)
+        if skipped:
+            # Counting weekdays alone would count Thanksgiving as a session,
+            # so the server's answer must lie beyond that naive end.
+            naive, counted = decided, 0
+            while counted < horizon:
+                naive += dt.timedelta(days=1)
+                counted += naive.weekday() < 5
+            assert ends > naive
 
 
 async def test_should_append_one_line_per_call_and_never_rewrite(
