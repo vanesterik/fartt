@@ -276,6 +276,7 @@ async def test_the_tools_are_listed(tmp_path: Path) -> None:
         "get_candles",
         "get_indicators",
         "get_quote",
+        "get_support_resistance",
         "get_trend",
     ]
 
@@ -677,6 +678,164 @@ async def test_get_trend_of_an_unsupported_exchange_is_a_tool_error(
 
 def test_the_instructions_say_indicators_are_evidence() -> None:
     assert "evidence, not signals" in server_module.INSTRUCTIONS
+    assert "aren't summed" in server_module.INSTRUCTIONS
+
+
+async def get_support_resistance(
+    fake: FakeProvider, tmp_path: Path, ticker: str = "ASML.AS"
+) -> Any:
+    return await call(
+        cache_for(fake, tmp_path), {"ticker": ticker}, "get_support_resistance"
+    )
+
+
+def oscillating(count: int = 600) -> list[float]:
+    """Closes turning at 90 and 110 in steps of 2, ending on 100 on the way up."""
+    cycle = [90.0 + 2 * i for i in range(10)] + [110.0 - 2 * i for i in range(10)]
+    closes = cycle * (count // len(cycle) + 2)
+    end = len(closes) - 14  # the last close is cycle[5]: 100 on the way up
+    return closes[end - count : end]
+
+
+def oscillating_provider(
+    count: int = 600,
+    now: datetime = AFTER_CLOSE,
+    dividends: list[Dividend] | None = None,
+) -> FakeProvider:
+    fake = provider([], now=now)
+    days = sessions("XAMS", count)
+    candles = [
+        stock_candle(day, close)
+        for day, close in zip(days, oscillating(count), strict=True)
+    ]
+    fake.histories["ASML.AS"] = History(candles, dividends or [], [])
+    return fake
+
+
+ZONE_FIELDS = {
+    "low",
+    "high",
+    "sources",
+    "touches",
+    "turns",
+    "last_touch",
+    "volume_share",
+    "strength",
+    "distance",
+    "distance_atr",
+}
+
+
+@pytest.mark.anyio
+async def test_get_support_resistance_returns_every_field(tmp_path: Path) -> None:
+    result = await get_support_resistance(oscillating_provider(), tmp_path)
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert set(content) == {
+        "ticker",
+        "currency",
+        "based_on",
+        "last",
+        "atr",
+        "support",
+        "resistance",
+        "signs",
+        "note",
+        "is_current",
+        "warning",
+    }
+    assert (content["ticker"], content["currency"]) == ("ASML.AS", "EUR")
+    assert content["based_on"] == "2026-10-29"
+    assert content["last"] == 100.0
+    assert content["support"] and content["resistance"]
+    for zone in content["support"] + content["resistance"]:
+        assert set(zone) == ZONE_FIELDS
+    assert content["is_current"] is True
+    assert content["warning"] is None
+
+
+@pytest.mark.anyio
+async def test_get_support_resistance_signs_agree_with_get_trend(
+    tmp_path: Path,
+) -> None:
+    fake = oscillating_provider()
+
+    levels = (await get_support_resistance(fake, tmp_path)).structured_content
+    trend = (await get_trend(fake, tmp_path)).structured_content
+
+    signs = {sign["sign"]: sign["points"] for sign in levels["signs"]}
+    expected = {"up": "holding", "down": "breaking", "sideways": None}
+    assert signs.get("daily_trend") == expected[trend["daily"]["direction"]]
+    assert signs.get("weekly_trend") == expected[trend["weekly"]["direction"]]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("count", [600, 120, 29])
+async def test_get_support_resistance_stays_within_its_size_budget(
+    tmp_path: Path, count: int
+) -> None:
+    result = await get_support_resistance(oscillating_provider(count), tmp_path)
+
+    assert not result.is_error, result.content
+    assert len(json.dumps(result.structured_content)) < 3500
+
+
+@pytest.mark.anyio
+async def test_get_support_resistance_leaves_ex_dividend_sessions_out(
+    tmp_path: Path,
+) -> None:
+    # The last dip, 5 sessions before the end, drops to 87 on its ex-dividend
+    # date: below the zone at the bottom of the range (about 88.25-89.75).
+    days = sessions("XAMS", 600)
+    fake = oscillating_provider(dividends=[Dividend(days[-6], 3.0)])
+    candles = fake.histories["ASML.AS"].candles
+    candles[-6] = stock_candle(days[-6], 87.0)
+
+    content = (await get_support_resistance(fake, tmp_path)).structured_content
+
+    assert content["support"][0]["low"] > 87.0
+    assert "recent_break" not in {sign["sign"] for sign in content["signs"]}
+
+
+@pytest.mark.anyio
+async def test_get_support_resistance_with_the_provider_down_serves_the_cache(
+    tmp_path: Path,
+) -> None:
+    fake = oscillating_provider(now=AFTER_CLOSE_27)
+    cache = cache_for(fake, tmp_path)
+    cache.update("ASML.AS")
+    fake.now = AFTER_CLOSE
+    fake.reachable = False
+
+    result = await call(cache, {"ticker": "ASML.AS"}, "get_support_resistance")
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert content["based_on"] == "2026-10-27"
+    assert content["support"] or content["resistance"]
+    assert content["is_current"] is False
+    assert "2 sessions behind" in content["warning"]
+
+
+@pytest.mark.anyio
+async def test_get_support_resistance_of_an_unknown_ticker_is_a_tool_error(
+    tmp_path: Path,
+) -> None:
+    result = await get_support_resistance(provider([]), tmp_path, ticker="NOSUCH")
+
+    assert result.is_error
+    assert "NOSUCH" in result.content[0].text
+
+
+@pytest.mark.anyio
+async def test_get_support_resistance_of_an_unsupported_exchange_is_a_tool_error(
+    tmp_path: Path,
+) -> None:
+    result = await get_support_resistance(provider([]), tmp_path, ticker="VOD.L")
+
+    assert result.is_error
+    assert ".AS" in result.content[0].text
 
 
 class FakeServer:

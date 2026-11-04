@@ -29,9 +29,12 @@ from fartt.technical import (
     Macd,
     MovingAverage,
     Rsi,
+    Sign,
     TimeframeTrend,
     Volume,
+    Zone,
     calculate_indicators,
+    calculate_levels,
     calculate_trend,
 )
 
@@ -61,7 +64,8 @@ INSTRUCTIONS = (
     "Returns, costs and rates are fractions: 0.004 means 0.4%. If is_current "
     "is false the data is stale: read the warning before relying on it. "
     "Indicators, trend and support/resistance zones are evidence, not "
-    "signals: weigh them together."
+    "signals: weigh them together. get_support_resistance's signs say which "
+    "way each points (holding or breaking); they aren't summed into a verdict."
 )
 
 Row = tuple[str, float, float, float, float, float]
@@ -219,6 +223,51 @@ class TrendResult(BaseModel):
         description=(
             "True when the daily based_on is the exchange's most recently closed "
             "session. False means the data is stale; see warning."
+        )
+    )
+    warning: str | None = Field(default=None, description="What's stale, if anything.")
+
+
+class LevelsResult(BaseModel):
+    ticker: str = Field(description="The ticker, in Yahoo's format.")
+    currency: str = Field(description="The currency prices are quoted in.")
+    based_on: str = Field(
+        description="The session the zones are as of, ISO 8601: the last cached."
+    )
+    last: float = Field(description="That session's close.")
+    atr: float | None = Field(
+        description="ATR 14 as of that session; null for too short a history."
+    )
+    support: list[Zone] = Field(
+        description=(
+            "Zones whose low is at or below the last close, nearest first: "
+            "at most 3, each turned at at least twice. A zone holding the "
+            "last close comes first, at distance 0."
+        )
+    )
+    resistance: list[Zone] = Field(
+        description=(
+            "Zones whose low is above the last close, nearest first: at most "
+            "3, each turned at at least twice."
+        )
+    )
+    signs: list[Sign] = Field(
+        description=(
+            "For the first support zone, what points to it holding or "
+            "breaking. Inconclusive signs are left out; they aren't summed."
+        )
+    )
+    note: str | None = Field(
+        default=None,
+        description=(
+            "An empty side and why, a zone beyond 5 ATR, or the last close "
+            "inside a zone, if any."
+        ),
+    )
+    is_current: bool = Field(
+        description=(
+            "True when based_on is the exchange's most recently closed session. "
+            "False means the data is stale; see warning."
         )
     )
     warning: str | None = Field(default=None, description="What's stale, if anything.")
@@ -579,6 +628,51 @@ def build_server(cache: StockCache) -> MCPServer:
             weekly=trend.weekly,
             aligned=trend.aligned,
             note=trend.note,
+            is_current=is_current,
+            warning=warning,
+        )
+
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+    def get_support_resistance(
+        ticker: Annotated[
+            str,
+            Field(description="One ticker in Yahoo's format: AAPL, ASML.AS."),
+        ],
+    ) -> LevelsResult:
+        """
+        Return a ticker's support and resistance zones around the last close:
+        where price turned before, each with its range, touches, turns, volume
+        and strength, nearest first. For the nearest support, signs list what
+        points to it holding or breaking. Zones are for entries, stops and
+        targets, not signals on their own.
+        """
+        listing, candles, _, is_current, warning = _snapshot(
+            "get_support_resistance", cache, ticker, sys.maxsize
+        )
+        ticker = listing.ticker
+        try:
+            dividends, _ = cache.events(ticker)
+        except CACHE_ERRORS as error:
+            raise _cache_error("get_support_resistance", ticker, error) from error
+        levels = calculate_levels(
+            candles,
+            listing.exchange,
+            frozenset(dividend.date for dividend in dividends),
+        )
+        logger.info(
+            f"get_support_resistance {ticker}: {len(candles)} sessions, "
+            f"current={is_current}"
+        )
+        return LevelsResult(
+            ticker=ticker,
+            currency=listing.currency,
+            based_on=levels.based_on,
+            last=levels.last,
+            atr=levels.atr,
+            support=levels.support,
+            resistance=levels.resistance,
+            signs=levels.signs,
+            note=levels.note,
             is_current=is_current,
             warning=warning,
         )
