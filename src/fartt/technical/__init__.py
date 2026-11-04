@@ -1,5 +1,6 @@
 from fartt.technical.indicators import (
     DECIMALS,
+    SLOPE_SESSIONS,
     Atr,
     Cross,
     Indicators,
@@ -8,10 +9,12 @@ from fartt.technical.indicators import (
     Rsi,
     Volume,
     calculate_indicators,
+    moving_average,
 )
 
 __all__ = [
     "DECIMALS",
+    "SLOPE_SESSIONS",
     "Atr",
     "Cross",
     "Indicators",
@@ -20,4 +23,5 @@ __all__ = [
     "Rsi",
     "Volume",
     "calculate_indicators",
+    "moving_average",
 ]

@@ -8,7 +8,7 @@ import pytest
 import talib
 
 from fartt.data import Candle
-from fartt.technical import calculate_indicators
+from fartt.technical import MovingAverage, calculate_indicators, moving_average
 from tests.fakes import stock_candle
 
 START = date(2020, 1, 1)
@@ -272,3 +272,17 @@ def test_a_zero_close_leaves_the_fraction_null() -> None:
 
     assert result.atr is not None
     assert result.atr.fraction is None
+
+
+def test_moving_average_is_public_and_counts_periods() -> None:
+    closes = np.arange(1.0, 31.0)
+
+    result = moving_average(closes, talib.SMA(closes, timeperiod=20))
+
+    assert result.value == 20.5
+    assert result.price_vs == "above"
+    assert result.slope == "rising"
+    assert result.days == 11
+    description = MovingAverage.model_fields["days"].description
+    assert description is not None
+    assert "periods" in description.lower()

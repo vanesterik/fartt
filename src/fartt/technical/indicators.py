@@ -39,10 +39,10 @@ class MovingAverage(BaseModel):
         description="(close - average) / average: -0.03 means 3% below."
     )
     slope: Direction = Field(
-        description=f"The average against its value {SLOPE_SESSIONS} sessions earlier."
+        description=f"The average against its value {SLOPE_SESSIONS} periods earlier."
     )
     days: int = Field(
-        description="Sessions in a row, the last included, the close has been on this side."
+        description="Periods in a row, the last included, the close has been on this side."
     )
 
 
@@ -146,7 +146,7 @@ def _streak(flags: list[bool]) -> int:
     return count
 
 
-def _moving_average(closes: Array, values: Array) -> MovingAverage:
+def moving_average(closes: Array, values: Array) -> MovingAverage:
     close, value = _round(closes[-1]), _round(values[-1])
     defined = ~np.isnan(values)
     # Rounded, so a close on its average counts as above despite float noise.
@@ -266,7 +266,7 @@ def calculate_indicators(
         ("ema_20", EMA, 20),
     ]:
         averages[name] = (
-            _moving_average(closes, average(closes, timeperiod=period))
+            moving_average(closes, average(closes, timeperiod=period))
             if enough(name, period + SLOPE_SESSIONS)
             else None
         )
