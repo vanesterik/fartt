@@ -28,6 +28,7 @@ from typing import Any
 import pytest
 from mcp import Client, StdioServerParameters
 
+from fartt.journal import Journal
 from fartt.server import build_server
 from fartt.stock_cache import StockCache
 from tests.fakes import FakeProvider
@@ -98,7 +99,8 @@ async def _levels_in_memory(assets_dir: Path, ticker: str) -> dict[str, Any]:
     """
     unreachable = FakeProvider({}, {}, now=datetime.now(UTC))
     unreachable.reachable = False
-    async with Client(build_server(StockCache(unreachable, assets_dir))) as client:
+    cache = StockCache(unreachable, assets_dir)
+    async with Client(build_server(cache, Journal(assets_dir / "journal"))) as client:
         return await _call(client, "get_support_resistance", ticker=ticker)
 
 
