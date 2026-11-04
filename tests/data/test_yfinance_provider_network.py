@@ -1,4 +1,4 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -30,3 +30,14 @@ def test_quote_returns_a_price_and_an_aware_time() -> None:
 
     assert quote.last > 0
     assert quote.time.tzinfo is not None
+
+
+@pytest.mark.network
+def test_dividends_are_split_adjusted_like_the_candles() -> None:
+    # NVDA split 10-for-1 on 2024-06-10; its 2023 dividends were 0.04 a share,
+    # 0.004 in today's shares, as its 2023 candles are.
+    history = YFinanceProvider().history("NVDA", date(2023, 1, 1))
+
+    in_2023 = [d.amount for d in history.dividends if d.date.year == 2023]
+    assert in_2023
+    assert all(amount == pytest.approx(0.004) for amount in in_2023)

@@ -20,6 +20,7 @@ from fartt.data.sessions import (
     newest_closed_session,
     normalise_ticker,
     session_after,
+    session_on_or_before,
 )
 from fartt.data.types import Candle, Dividend, History, Listing, Quote, Split
 from fartt.data.yfinance_provider import YFinanceProvider
@@ -51,4 +52,5 @@ __all__ = [
     "newest_closed_session",
     "normalise_ticker",
     "session_after",
+    "session_on_or_before",
 ]

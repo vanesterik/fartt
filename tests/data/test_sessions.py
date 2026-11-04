@@ -18,6 +18,7 @@ from fartt.data import (
     newest_closed_session,
     normalise_ticker,
     session_after,
+    session_on_or_before,
 )
 
 
@@ -207,3 +208,9 @@ def test_fx_pair() -> None:
 def test_the_24_5_calendar_closes_a_day_at_midnight_utc() -> None:
     assert newest_closed_session("24/5", utc(2026, 11, 4, 0, 29)) == date(2026, 11, 2)
     assert newest_closed_session("24/5", utc(2026, 11, 4, 0, 31)) == date(2026, 11, 3)
+
+
+def test_session_on_or_before() -> None:
+    assert session_on_or_before("XAMS", date(2027, 3, 26)) == date(2027, 3, 25)
+    assert session_on_or_before("XAMS", date(2026, 11, 3)) == date(2026, 11, 3)
+    assert session_on_or_before("XAMS", date(2026, 11, 8)) == date(2026, 11, 6)

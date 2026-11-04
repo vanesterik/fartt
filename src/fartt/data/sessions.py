@@ -169,6 +169,12 @@ def session_after(exchange: str, day: date, count: int) -> date:
     return exchange_calendar(exchange).session_offset(day, count).date()
 
 
+def session_on_or_before(exchange: str, day: date) -> date:
+    """The last session of `exchange` on or before `day`."""
+    calendar = exchange_calendar(exchange)
+    return calendar.date_to_session(day, direction="previous").date()
+
+
 def exchange_date(exchange: str, moment: datetime) -> date:
     """The date `moment` (timezone-aware) falls on in the exchange's time zone."""
     return moment.astimezone(exchange_calendar(exchange).tz).date()
