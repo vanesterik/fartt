@@ -15,6 +15,7 @@ from fartt.technical.levels import (
     Source,
     Zone,
     ZoneMeasure,
+    _side_zones,  # pyright: ignore[reportPrivateUsage]
     calculate_levels,
     candidate_levels,
     group_zones,
@@ -414,6 +415,24 @@ def zone(low: float, high: float, strength: int, turns: int = 4) -> MeasuredZone
         ZoneMeasure(turns + 1, turns, 0, 0.0),
         strength,
     )
+
+
+def test_a_zone_just_below_the_close_is_not_inside_it() -> None:
+    # 0.004 below the close: the distance rounds to zero, but the close isn't
+    # in the zone, and the rounded distance mustn't reach the agent as -0.0.
+    near = zone(99.0, 99.996, 50)
+    candles = [
+        Candle(date(2026, 10, 28), 100.0, 110.0, 90.0, 100.0, 1000.0),
+        Candle(date(2026, 10, 29), 100.0, 101.0, 99.0, 100.0, 1000.0),
+    ]
+    notes: list[str] = []
+
+    listed = _side_zones(
+        "support", candles, candles, [near], lambda: [near], 100.0, 4.0, notes
+    )
+
+    assert '"distance":0.0' in listed[0].model_dump_json()
+    assert not any("inside" in note for note in notes)
 
 
 def test_the_strongest_within_five_atr_are_listed() -> None:

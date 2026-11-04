@@ -447,7 +447,7 @@ def _zone(
     zone: MeasuredZone, candles: list[Candle], last: float, atr: float, side: Side
 ) -> Zone:
     gap = _gap(zone, last, side)
-    signed = -gap if side == "support" and gap else gap  # never -0.0
+    signed = -gap if side == "support" else gap
     last_touch = zone.measure.last_touch
     assert last_touch is not None  # a zone with turns was touched
     return Zone(
@@ -459,9 +459,14 @@ def _zone(
         last_touch=candles[last_touch].date.isoformat(),
         volume_share=round_value(zone.measure.volume_share),
         strength=zone.strength,
-        distance=round_value(signed / last) if last else 0.0,
-        distance_atr=round_value(signed / atr),
+        distance=_unsigned_zero(round_value(signed / last)) if last else 0.0,
+        distance_atr=_unsigned_zero(round_value(signed / atr)),
     )
+
+
+def _unsigned_zero(value: float) -> float:
+    # A support distance that rounds to zero would reach the agent as -0.0.
+    return value or 0.0
 
 
 def _side_zones(
@@ -497,7 +502,8 @@ def _side_zones(
             "the last close."
         )
     listed = [_zone(z, measured_over, last, atr, side) for z in chosen]
-    if not above and listed[0].distance == 0:
+    # On the exact gap: a close just outside can round to distance 0.
+    if not above and _gap(chosen[0], last, side) == 0:
         notes.append(
             f"The last close is inside the support zone {listed[0].low:g}-"
             f"{listed[0].high:g}."
