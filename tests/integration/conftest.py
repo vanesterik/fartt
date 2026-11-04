@@ -4,6 +4,12 @@ history from the data provider takes a second or two, and most tests need the
 same few tickers, so they're downloaded once per run and each test gets its
 own copy. A test that checks the download itself starts from an empty
 `tmp_path` instead.
+
+Under pytest-xdist (`task test:network` runs `-n auto`) every worker has its
+own session, so the download goes to a folder all of the run's workers share.
+StockCache takes an exclusive lock per ticker while it updates and doesn't
+call the provider for a cache that's current, so the first worker downloads
+each ticker and the others find it cached.
 """
 
 import shutil
@@ -19,9 +25,12 @@ LIVE_TICKERS = ("ASML.AS", "AAPL", "GOOG", "ARM")
 
 
 @pytest.fixture(scope="session")
-def _downloaded(tmp_path_factory: pytest.TempPathFactory) -> Path:
+def _downloaded(tmp_path_factory: pytest.TempPathFactory, worker_id: str) -> Path:
     """An assets folder holding LIVE_TICKERS, filled from the provider once."""
-    assets_dir = tmp_path_factory.mktemp("live-assets")
+    if worker_id == "master":  # not under xdist: this run's own folder
+        assets_dir = tmp_path_factory.mktemp("live-assets")
+    else:  # under xdist: the folder above each worker's is the run's
+        assets_dir = tmp_path_factory.getbasetemp().parent / "live-assets"
     cache = StockCache(YFinanceProvider(), assets_dir)
     for ticker in LIVE_TICKERS:
         cache.update(ticker)
