@@ -1,7 +1,7 @@
 import os
 import sys
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Annotated, Literal, NamedTuple
 
@@ -10,7 +10,7 @@ from loguru import logger
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from fartt.data import (
     FX_SUFFIX,
@@ -21,6 +21,7 @@ from fartt.data import (
     UnsupportedExchange,
     YFinanceProvider,
     exchange_date,
+    fx_pair,
     market_status,
     missing_sessions,
     newest_closed_session,
@@ -37,6 +38,7 @@ from fartt.journal import (
     Score,
     Signal,
 )
+from fartt.scoring import Unscorable, score_call
 from fartt.stock_cache import StockCache, UpdateResult
 from fartt.technical import (
     DECIMALS,
@@ -61,6 +63,9 @@ MAX_CANDLES = 200
 # a 200-character note) is about 4,500 characters of JSON and its score about
 # 500 more, so ten stay well under that limit. Narrowing by ticker or status reaches older calls.
 MAX_DECISIONS = 10
+# A scored call is about 200 characters and a call not scored about 150, so
+# 50 of each stay well under the limit. Every score is stored either way.
+MAX_SCORED = 50
 
 COLUMNS = ["date", "open", "high", "low", "close", "volume"]
 
@@ -87,7 +92,9 @@ INSTRUCTIONS = (
     "way each points (holding or breaking); they aren't summed into a verdict. "
     "Record every call, buy or pass, with record_decision when it's made; "
     "entries can't be changed afterwards. Before a daily check-in or a "
-    "re-analysis of a ticker, read the earlier calls with get_decisions."
+    "re-analysis of a ticker, read the earlier calls with get_decisions. "
+    "At the daily check-in, call score_decisions: it scores every call whose "
+    "horizon has passed against IWDA.AS, in EUR."
 )
 
 MIN_HORIZON = 5
@@ -334,6 +341,61 @@ class DecisionsResult(BaseModel):
     )
 
 
+class ScoredCall(BaseModel):
+    """A call this run scored, in brief; get_decisions has the whole score."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: int = Field(description="The call's id.")
+    ticker: str = Field(description="The stock the call is on.")
+    direction: Direction = Field(description="buy or pass.")
+    decision_session: date = Field(description="The session the call was made on.")
+    horizon_ends: date = Field(description="The session its horizon ended on.")
+    return_: float = Field(
+        validation_alias="return",
+        serialization_alias="return",
+        description="The stock's return with dividends, in EUR: 0.004 means 0.4%.",
+    )
+    benchmark_return: float = Field(
+        description="IWDA.AS's return over the same horizon, in EUR."
+    )
+    excess_return: float = Field(description="return minus benchmark_return.")
+    right: bool = Field(
+        description="buy: excess_return above 0; pass: excess_return 0 or below."
+    )
+
+
+class NotScoredCall(BaseModel):
+    """A call whose horizon has passed but that can't be scored yet."""
+
+    id: int = Field(description="The call's id.")
+    ticker: str = Field(description="The stock the call is on.")
+    horizon_ends: date = Field(description="The session its horizon ended on.")
+    reason: str = Field(description="What's missing; a later run scores it.")
+
+
+class ScoreResult(BaseModel):
+    scored: list[ScoredCall] = Field(
+        description=f"The calls this run scored, oldest first, at most {MAX_SCORED}."
+    )
+    not_scored: list[NotScoredCall] = Field(
+        description=(
+            "Calls whose horizon has passed that stay open, oldest first, "
+            f"at most {MAX_SCORED}, each with the reason."
+        )
+    )
+    running: int = Field(
+        description="How many open calls haven't reached their horizon."
+    )
+    already_scored: int = Field(
+        description="How many calls were scored before this run."
+    )
+    note: str | None = Field(
+        default=None,
+        description="Why nothing was scored, or what the lists leave out, if anything.",
+    )
+
+
 def _status(decision: Decision, scores: Mapping[int, Score]) -> Status:
     return "scored" if decision.id in scores else "open"
 
@@ -353,6 +415,38 @@ def _no_match_note(status: StatusFilter, ticker: str | None, any_scored: bool) -
     if status == "scored" and not any_scored:
         note += " No call has been scored yet."
     return note
+
+
+def _journal_unreadable(tool: str, path: Path, error: Exception) -> ToolError:
+    logger.error(f"{tool}: {error}")
+    return ToolError(
+        f"The journal at {path} can't be read: {error}. The operator must fix "
+        "the file; the server never rewrites it."
+    )
+
+
+def _score_note(
+    due: int, running: int, more_scored: int, more_not_scored: int
+) -> str | None:
+    notes: list[str] = []
+    if not due:
+        notes.append(
+            f"No open call's horizon has passed; {running} "
+            f"{'is' if running == 1 else 'are'} running."
+        )
+    if more_scored:
+        notes.append(
+            f"Showing the first {MAX_SCORED} calls scored; {more_scored} more "
+            f"{'was' if more_scored == 1 else 'were'} scored. Read them with "
+            'get_decisions(status="scored").'
+        )
+    if more_not_scored:
+        calls = "call wasn't" if more_not_scored == 1 else "calls weren't"
+        notes.append(
+            f"Showing the first {MAX_SCORED} calls not scored; {more_not_scored} "
+            f"more {calls} scored."
+        )
+    return " ".join(notes) or None
 
 
 def _rounded(value: float | None, decimals: int = DECIMALS) -> float | None:
@@ -949,11 +1043,7 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
             decisions = journal.decisions()
             scores = journal.scores()
         except CACHE_ERRORS as error:
-            logger.error(f"get_decisions: {error}")
-            raise ToolError(
-                f"The journal at {journal.path} can't be read: {error}. The "
-                "operator must fix the file; the server never rewrites it."
-            ) from error
+            raise _journal_unreadable("get_decisions", journal.path, error) from error
 
         now = cache.clock()
         matching = [
@@ -980,6 +1070,153 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
             )
         return DecisionsResult(
             decisions=matching[:limit], total=len(matching), note=note
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        )
+    )
+    def score_decisions() -> ScoreResult:
+        """
+        Score every open call whose horizon has passed, at the daily
+        check-in, and store the scores in the journal. A call is measured in
+        EUR against IWDA.AS: the stock's return from its decision session to
+        the horizon's end, with the dividends going ex in between, against
+        the benchmark's over the same span. A price in another currency is
+        converted at that day's EUR exchange-rate close (Yahoo's EURUSD=X),
+        which closes at midnight UTC, so a US call is scored the day after
+        its horizon ends. A score is stored once; calls that can't be scored
+        yet stay open with the reason, for a later run.
+        """
+        try:
+            decisions = journal.decisions()
+            scores = journal.scores()
+        except CACHE_ERRORS as error:
+            raise _journal_unreadable("score_decisions", journal.path, error) from error
+
+        now = cache.clock()
+        still_open = [d for d in decisions if d.id not in scores]
+        due = [d for d in still_open if _horizon_passed(d, now)]
+        running = len(still_open) - len(due)
+
+        # Each ticker the due calls need is brought up to date once per run.
+        needed = dict.fromkeys(
+            ticker
+            for decision in due
+            for ticker in (decision.ticker, BENCHMARK, fx_pair(decision.currency))
+            if ticker is not None
+        )
+        unreachable: set[str] = set()
+        unlisted: dict[str, str] = {}
+        for ticker in needed:
+            try:
+                cache.update(ticker)
+            except ProviderUnavailable as error:
+                logger.warning(f"score_decisions {ticker}: {error}")
+                unreachable.add(ticker)
+            except UnknownTicker:
+                unlisted[ticker] = f"Yahoo no longer lists {ticker}"
+            except UnsupportedExchange as error:
+                unlisted[ticker] = str(error)
+            except CACHE_ERRORS as error:
+                raise _cache_error("score_decisions", ticker, error) from error
+
+        read: dict[str, list[Candle]] = {}
+
+        def candles(ticker: str) -> list[Candle]:
+            if ticker not in read:
+                try:
+                    read[ticker] = cache.latest(ticker, sys.maxsize)
+                except CACHE_ERRORS as error:
+                    raise _cache_error("score_decisions", ticker, error) from error
+            return read[ticker]
+
+        scored: list[ScoredCall] = []
+        not_scored: list[NotScoredCall] = []
+        raced = 0
+        for decision in due:
+            pair = fx_pair(decision.currency)
+            tickers = [decision.ticker, BENCHMARK] + ([pair] if pair else [])
+            reason = next((unlisted[t] for t in tickers if t in unlisted), None)
+            if reason is None:
+                try:
+                    dividends, _ = cache.events(decision.ticker)
+                except CACHE_ERRORS as error:
+                    raise _cache_error(
+                        "score_decisions", decision.ticker, error
+                    ) from error
+                try:
+                    score = score_call(
+                        decision,
+                        candles(decision.ticker),
+                        dividends,
+                        candles(BENCHMARK),
+                        candles(pair) if pair else None,
+                        cache.clock().replace(microsecond=0),
+                    )
+                except Unscorable as error:
+                    reason = str(error)
+                    if unreachable.intersection(tickers):
+                        reason += " (the provider is unreachable)"
+                else:
+                    try:
+                        stored = journal.append_score(score)
+                    except CACHE_ERRORS as error:
+                        logger.error(f"score_decisions #{decision.id}: {error}")
+                        raise ToolError(
+                            f"The journal at {journal.path} can't be read or "
+                            f"written: {error}. Scores stored before this call "
+                            "stay stored. The operator must fix the file; the "
+                            "server never rewrites it."
+                        ) from error
+                    if stored is None:
+                        raced += 1  # Another run scored it in the meantime.
+                    else:
+                        scored.append(
+                            ScoredCall(
+                                id=decision.id,
+                                ticker=decision.ticker,
+                                direction=decision.direction,
+                                decision_session=decision.decision_session,
+                                horizon_ends=decision.horizon_ends,
+                                return_=stored.return_,
+                                benchmark_return=stored.benchmark.return_,
+                                excess_return=stored.excess_return,
+                                right=stored.right,
+                            )
+                        )
+                    continue
+            logger.warning(
+                f"score_decisions #{decision.id} {decision.ticker}: {reason}"
+            )
+            not_scored.append(
+                NotScoredCall(
+                    id=decision.id,
+                    ticker=decision.ticker,
+                    horizon_ends=decision.horizon_ends,
+                    reason=reason,
+                )
+            )
+
+        logger.info(
+            f"score_decisions: {len(scored)} scored, {len(not_scored)} not scored, "
+            f"{running} running, {len(scores) + raced} already scored"
+        )
+        return ScoreResult(
+            scored=scored[:MAX_SCORED],
+            not_scored=not_scored[:MAX_SCORED],
+            running=running,
+            already_scored=len(scores) + raced,
+            note=_score_note(
+                len(due),
+                running,
+                max(len(scored) - MAX_SCORED, 0),
+                max(len(not_scored) - MAX_SCORED, 0),
+            ),
         )
 
     return server
