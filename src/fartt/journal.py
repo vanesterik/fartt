@@ -20,7 +20,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal, cast, get_args
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -28,17 +28,7 @@ from pydantic import BaseModel, Field, ValidationError
 # (accumulating, EUR) on Euronext Amsterdam.
 BENCHMARK = "IWDA.AS"
 
-# The evidence the server measures today; later epics add theirs.
-SIGNALS: tuple[str, ...] = (
-    "trend",
-    "support_resistance",
-    "moving_averages",
-    "rsi",
-    "macd",
-    "volume",
-    "atr",
-    "spread",
-)
+# The evidence the server measures today; later epics add theirs here.
 SignalName = Literal[
     "trend",
     "support_resistance",
@@ -49,6 +39,8 @@ SignalName = Literal[
     "atr",
     "spread",
 ]
+# Derived, so the names the SDK validates against are the only list.
+SIGNALS: tuple[str, ...] = get_args(SignalName)
 Direction = Literal["buy", "pass"]
 Stance = Literal["for", "against"]
 

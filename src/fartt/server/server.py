@@ -787,6 +787,17 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
         stock = _current_close("record_decision", cache, ticker)
         benchmark = _current_close("record_decision", cache, BENCHMARK)
         candle = stock.candles[-1]
+        try:
+            horizon_ends = session_after(stock.listing.exchange, candle.date, horizon)
+        except ValueError as error:
+            # A cached candle on a day that isn't a session, or a calendar
+            # that ends too soon: neither happens with sound data.
+            logger.error(f"record_decision {stock.listing.ticker}: {error}")
+            raise ToolError(
+                f"The horizon's end can't be placed on {stock.listing.exchange}'s "
+                f"calendar: {error}. Nothing was recorded. The operator must "
+                f"check {stock.listing.ticker}'s cached candles."
+            ) from error
         draft = DecisionDraft(
             recorded_at=cache.clock().replace(microsecond=0),
             ticker=stock.listing.ticker,
@@ -798,7 +809,7 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
             signals=signals,
             decision_session=candle.date,
             close=round(candle.close, DECIMALS),
-            horizon_ends=session_after(stock.listing.exchange, candle.date, horizon),
+            horizon_ends=horizon_ends,
             benchmark=BenchmarkClose(
                 ticker=benchmark.listing.ticker,
                 currency=benchmark.listing.currency,
