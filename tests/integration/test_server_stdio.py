@@ -28,6 +28,7 @@ EXPECTED_TOOLS = [
     "get_indicators",
     "get_trend",
     "get_support_resistance",
+    "record_decision",
 ]
 # Per response; also the MCP client's read timeout, which defaults to none.
 RESPONSE_TIMEOUT_S = 120
@@ -99,7 +100,25 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
         assert zones["support"] or zones["resistance"]
         assert len(json.dumps(zones)) < 3500
 
+        # @issue-119 @AC9
+        decision = await client.call_tool(
+            "record_decision",
+            {
+                "ticker": "ASML.AS",
+                "direction": "buy",
+                "horizon": 20,
+                "reasoning": "End-to-end check over stdio.",
+                "signals": [{"name": "trend", "stance": "for"}],
+            },
+        )
+        assert not decision.is_error, decision.content
+        entry = decision.structured_content
+        assert entry["id"] == 1
+        assert entry["ticker"] == "ASML.AS"
+        assert entry["benchmark"]["ticker"] == "IWDA.AS"
+
     assert (tmp_path / "stocks" / "ASML.AS" / "candles.csv").exists()
+    assert (tmp_path / "journal" / "decisions.jsonl").exists()
 
 
 @pytest.mark.network
