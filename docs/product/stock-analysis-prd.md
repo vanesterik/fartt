@@ -67,7 +67,7 @@ The server places real orders through Saxo, each approved by the operator, for t
 
 ### Broker and data
 
-- **Broker: Saxo** (decided 2026-11-04). It has an OpenAPI with a free simulation environment, access to every exchange in the universe 🔶, and paid real-time market data per exchange (subscribe only to what's used). USD trades from a EUR account pay a currency conversion markup, counted in the costs below. **DEGIRO** is out because it has no official API.
+- **Broker: Saxo** (decided 2026-11-04). It has an OpenAPI with a free simulation environment, trades every exchange in the universe, and includes real-time quotes for European and US stocks for private clients. Trades in a currency other than EUR (the US, Oslo) pay a currency conversion fee, counted in the costs below. **DEGIRO** is out because it has no official API.
 - **Development data: yfinance** (free, delayed), behind a `DataProvider` interface. It switches to Saxo's OpenAPI feed once the tooling works.
 
 ## 5. Solution Overview
@@ -169,9 +169,11 @@ Tool names and outputs are settled in each epic's design; this table is the inte
 | Maximum open positions | 8 |
 | Minimum reward-to-risk | 2 |
 | Kill switch | blocks new plans at 16% below the portfolio's peak, until the operator resets it outside the agent |
-| Costs | Saxo's commission per exchange, its currency conversion markup on USD trades, plus 0.1% slippage per leg 🔶 |
+| Costs | Saxo's Bronze tariff (the level below €200,000): 0.08% per trade, with a minimum of €2 on Euronext Amsterdam, Paris, Brussels and Lisbon, $1 in the US, €3 in Milan and NOK 10 in Oslo, and 0.12% (minimum €5) in Dublin; 0.25% currency conversion on every trade not in EUR; the SEC fee of 0.00229% on US sales; plus 0.1% slippage per leg 🔶 |
 
-Only the operator can change these, in a config file outside the agent's reach. The kill switch matches the maximum open risk: 8 positions at 2% each put 16% at risk, so every stop being hit as planned brings the portfolio to the threshold but not past it. Only losing more than the plans allowed trips it (see risk 5).
+Only the operator can change these, in a config file outside the agent's reach. The commissions are Saxo's Dutch tariff of 13 July 2026; Silver (from €200,000) charges 0.05% and Gold (from €1,000,000) 0.03%, with the same minimums.
+
+At this portfolio size the minimums and the currency conversion weigh more than the rate. A €2,000 position (20% of €10,000) on Euronext pays the €2 minimum, 0.1% per leg, so a round trip costs about 0.4% with slippage. The same position in a US stock pays 0.08% per leg plus 0.25% currency conversion each way, about 0.86% a round trip. A US call needs roughly twice the edge of a Euronext call to clear the same gate. The kill switch matches the maximum open risk: 8 positions at 2% each put 16% at risk, so every stop being hit as planned brings the portfolio to the threshold but not past it. Only losing more than the plans allowed trips it (see risk 5).
 
 ## 7. User Stories & Requirements
 
@@ -243,6 +245,6 @@ Stories are written just in time, one epic at a time, as GitHub issues in the Us
 
 1. 🔵 **Benchmark:** VWCE or IWDA. Decided in epic C's design.
 2. 🔵 **Order of epics E–H.** Moving H (paper portfolio) before E–G starts the 3-month paper clock sooner. Decide at the walking-skeleton milestone.
-3. 🔵 **Costs per exchange:** Saxo's commissions for Euronext and the US, and its currency conversion markup, verified against the Saxo account once it's open.
+3. 🔵 **Costs per exchange:** Saxo's commissions and currency conversion fee are known (section 6). Still open: transaction taxes outside Saxo's tariff (France's and Italy's financial transaction taxes on purchases), and whether 0.1% slippage per leg matches real fills.
 4. 🔵 **Horizon of a call:** fixed per call (chosen by the agent), or the plan's stop/target with a maximum holding period. Decided in epic C's design.
 5. 🔵 **Macro events** for step 1: which source, given that yfinance doesn't provide an economic calendar. Decided in epic F's design.

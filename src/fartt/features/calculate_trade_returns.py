@@ -47,8 +47,8 @@ def calculate_trade_returns(
     - initial_capital (float): Starting capital used to compound `profits`
       across sequential trades.
     - cost_pct (float): Trading cost percentage charged on each leg (entry
-      and exit) of a trade. Defaults to 0.05%, a placeholder until Saxo's
-      commissions are verified (PRD open question 3).
+      and exit) of a trade. Defaults to 0.05%; Saxo's Bronze tariff is 0.08%
+      with a minimum per trade, which epic I settles.
     - slippage_pct (float): Additional one-way haircut applied on each leg,
       on top of `cost_pct`.
     - threshold (Optional[float]): Minimum absolute signal value required to
