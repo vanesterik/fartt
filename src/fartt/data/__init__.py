@@ -6,11 +6,14 @@ from fartt.data.provider import (
 )
 from fartt.data.sessions import (
     CLOSE_MARGIN,
+    FX_CALENDAR,
+    FX_SUFFIX,
     SUFFIX_CALENDARS,
     MarketStatus,
     calendar_for,
     exchange_calendar,
     exchange_date,
+    fx_pair,
     last_session_of_week,
     market_status,
     missing_sessions,
@@ -23,6 +26,8 @@ from fartt.data.yfinance_provider import YFinanceProvider
 
 __all__ = [
     "CLOSE_MARGIN",
+    "FX_CALENDAR",
+    "FX_SUFFIX",
     "SUFFIX_CALENDARS",
     "Candle",
     "DataProvider",
@@ -39,6 +44,7 @@ __all__ = [
     "calendar_for",
     "exchange_calendar",
     "exchange_date",
+    "fx_pair",
     "last_session_of_week",
     "market_status",
     "missing_sessions",
