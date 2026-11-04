@@ -1,0 +1,199 @@
+from datetime import date, timedelta
+
+import pytest
+
+from fartt.data import Candle
+from fartt.technical.levels import Source, candidate_levels, group_zones
+
+START = date(2024, 1, 1)
+
+
+def flat(count: int, high: float = 101.0, low: float = 99.0) -> list[Candle]:
+    """`count` daily candles with the same range, one day apart."""
+    return [
+        Candle(START + timedelta(days=i), 100.0, high, low, 100.0, 1000.0)
+        for i in range(count)
+    ]
+
+
+def replace(
+    candles: list[Candle],
+    index: int,
+    high: float | None = None,
+    low: float | None = None,
+) -> None:
+    candle = candles[index]
+    candles[index] = candle._replace(
+        high=candle.high if high is None else high,
+        low=candle.low if low is None else low,
+    )
+
+
+def of_kind(candidates: list[tuple[float, Source]], kind: Source) -> list[float]:
+    return sorted(price for price, source in candidates if source == kind)
+
+
+def candidates(
+    window: list[Candle],
+    atr: float = 2.0,
+    ex_dividend: frozenset[date] = frozenset(),
+    pivot_week: Candle | None = None,
+    sma_50: float | None = None,
+    sma_200: float | None = None,
+) -> list[tuple[float, Source]]:
+    return candidate_levels(window, atr, ex_dividend, pivot_week, sma_50, sma_200)
+
+
+def test_a_swing_high_and_low_are_candidates() -> None:
+    window = flat(15)
+    replace(window, 5, high=105.0)
+    replace(window, 8, low=95.0)
+
+    found = candidates(window)
+
+    assert of_kind(found, "swing_high") == [105.0]
+    assert of_kind(found, "swing_low") == [95.0]
+
+
+def test_a_high_equal_to_a_neighbour_is_not_a_swing() -> None:
+    window = flat(15)
+    replace(window, 6, high=105.0)
+    replace(window, 7, high=105.0)
+
+    assert of_kind(candidates(window), "swing_high") == []
+
+
+def test_a_swing_needs_five_sessions_on_each_side() -> None:
+    window = flat(15)
+    replace(window, 4, high=105.0)  # only four sessions before it
+    replace(window, 10, low=95.0)  # only four after it
+
+    found = candidates(window)
+
+    assert of_kind(found, "swing_high") == []
+    assert of_kind(found, "swing_low") == []
+
+
+def test_a_swing_low_on_an_ex_dividend_date_is_not_a_candidate() -> None:
+    window = flat(15)
+    replace(window, 7, low=95.0)
+
+    found = candidates(window, ex_dividend=frozenset({window[7].date}))
+
+    assert of_kind(found, "swing_low") == []
+
+
+def test_the_busiest_volume_bins_are_candidates() -> None:
+    # Bins of 2 (half the ATR of 4) from 100: the busy band 150.5-151.5 lies
+    # in the bin 150-152, whose centre is 151.
+    quiet = [
+        Candle(START + timedelta(days=i), 150.0, 200.0, 100.0, 150.0, 10.0)
+        for i in range(20)
+    ]
+    busy = [
+        Candle(START + timedelta(days=20 + i), 151.0, 151.5, 150.5, 151.0, 10_000.0)
+        for i in range(5)
+    ]
+
+    found = candidates(quiet + busy, atr=4.0)
+
+    assert of_kind(found, "volume") == [151.0]
+
+
+def test_a_session_without_a_range_puts_its_volume_in_its_bin() -> None:
+    quiet = [
+        Candle(START + timedelta(days=i), 150.0, 200.0, 100.0, 150.0, 10.0)
+        for i in range(20)
+    ]
+    halted = Candle(START + timedelta(days=20), 171.0, 171.0, 171.0, 171.0, 5000.0)
+
+    found = candidates([*quiet, halted], atr=4.0)
+
+    assert of_kind(found, "volume") == [171.0]
+
+
+def test_pivots_come_from_the_given_week() -> None:
+    week = Candle(START, 95.0, 110.0, 90.0, 100.0, 0.0)
+
+    with_week = candidates(flat(15), pivot_week=week)
+    without = candidates(flat(15))
+
+    assert of_kind(with_week, "pivot") == [90.0, 100.0, 110.0]
+    assert of_kind(without, "pivot") == []
+
+
+def test_the_averages_are_candidates_when_known() -> None:
+    known = candidates(flat(15), sma_50=98.0, sma_200=96.0)
+    unknown = candidates(flat(15), sma_50=None, sma_200=None)
+
+    assert of_kind(known, "sma_50") == [98.0]
+    assert of_kind(known, "sma_200") == [96.0]
+    assert of_kind(unknown, "sma_50") == []
+    assert of_kind(unknown, "sma_200") == []
+
+
+def test_round_numbers_are_never_candidates() -> None:
+    assert of_kind(candidates(flat(15)), "round") == []
+
+
+def test_candidates_within_half_an_atr_merge() -> None:
+    merged = group_zones(
+        [(100.0, "swing_low"), (104.0, "volume"), (108.0, "pivot")], atr=10.0
+    )
+    apart = group_zones([(100.0, "swing_low"), (106.0, "swing_low")], atr=10.0)
+
+    assert [(low, high) for low, high, _ in merged] == [(100.0, 108.0)]
+    assert merged[0][2] >= {"swing_low", "volume", "pivot"}
+    assert len(apart) == 2
+
+
+def test_candidates_are_merged_in_price_order() -> None:
+    zones = group_zones(
+        [(108.0, "pivot"), (100.0, "swing_low"), (104.0, "volume")], 10.0
+    )
+
+    assert [(low, high) for low, high, _ in zones] == [(100.0, 108.0)]
+
+
+def test_a_zone_stops_growing_at_one_and_a_half_atr() -> None:
+    prices = [100.0, 104.0, 108.0, 112.0, 116.0]
+
+    zones = group_zones([(p, "swing_high") for p in prices], atr=10.0)
+
+    assert [(low, high) for low, high, _ in zones] == [
+        (100.0, 112.0),
+        (113.5, 118.5),
+    ]
+
+
+def test_a_narrow_zone_is_widened_to_half_an_atr() -> None:
+    zones = group_zones([(101.0, "swing_low")], atr=10.0)
+
+    assert [(low, high) for low, high, _ in zones] == [(98.5, 103.5)]
+
+
+def test_a_round_number_marks_a_zone_but_never_makes_one() -> None:
+    zones = group_zones([(298.0, "swing_low"), (301.0, "swing_low")], atr=10.0)
+    off_round = group_zones([(312.0, "swing_low")], atr=4.0)
+
+    assert zones[0][2] == {"swing_low", "round"}
+    assert off_round[0][2] == {"swing_low"}
+    assert len(off_round) == 1
+
+
+@pytest.mark.parametrize(
+    ("price", "has_round"),
+    [
+        (13.0, True),  # a multiple of 1 below 20
+        (52.4, False),  # 50 is beyond the zone, 52 isn't a multiple of 5
+        (55.0, True),  # a multiple of 5 below 100
+        (243.0, False),  # 240 is beyond the zone at ATR 2
+        (250.2, True),  # a multiple of 10 below 500
+        (549.8, True),  # 550, a multiple of 50 above 500
+        (540.0, False),
+    ],
+)
+def test_the_round_step_grows_with_the_price(price: float, has_round: bool) -> None:
+    zones = group_zones([(price, "swing_low")], atr=2.0)
+
+    assert ("round" in zones[0][2]) is has_round
