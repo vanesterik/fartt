@@ -10,7 +10,9 @@ change with the market, so the live checks compare the output with itself,
 with the cached sessions and with the other tools, never with fixed prices.
 Scenarios that need a particular last session (a close at a new high, a close
 inside a zone) cut a cached history short at a past date and keep the
-provider unreachable, so the server serves that history as it stands.
+provider unreachable, so the server serves that history as it stands. The
+sweep over ten past sessions per ticker builds the same server in memory
+instead of starting one over stdio for each.
 """
 
 import csv
@@ -19,11 +21,16 @@ import os
 import shutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 from mcp import Client, StdioServerParameters
+
+from fartt.server import build_server
+from fartt.stock_cache import StockCache
+from tests.fakes import FakeProvider
 
 ROOT = Path(__file__).resolve().parents[2]
 RESPONSE_TIMEOUT_S = 180
@@ -81,6 +88,18 @@ async def _server(
     )
     async with Client(params, read_timeout_seconds=RESPONSE_TIMEOUT_S) as client:
         yield client
+
+
+async def _levels_in_memory(assets_dir: Path, ticker: str) -> dict[str, Any]:
+    """
+    `get_support_resistance` from the same server, built in this process on
+    `assets_dir` with the data provider unreachable: the tool and its output
+    are the stdio server's, without starting a process.
+    """
+    unreachable = FakeProvider({}, {}, now=datetime.now(UTC))
+    unreachable.reachable = False
+    async with Client(build_server(StockCache(unreachable, assets_dir))) as client:
+        return await _call(client, "get_support_resistance", ticker=ticker)
 
 
 async def _call(client: Client, tool: str, **arguments: Any) -> dict[str, Any]:
@@ -186,9 +205,9 @@ def _assert_zones_hold_the_criteria(
     assert not [key for key in levels if "score" in key or "verdict" in key]
 
 
-async def test_should_return_every_field(tmp_path: Path) -> None:
+async def test_should_return_every_field(live_assets: Path) -> None:
     """@issue-109 @AC1 @AC10 Should return every field, within its size budget."""
-    async with _server(tmp_path) as client:
+    async with _server(live_assets) as client:
         levels = await _call(client, "get_support_resistance", ticker="ASML.AS")
 
     assert set(levels) >= {
@@ -217,24 +236,24 @@ async def test_should_return_every_field(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("ticker", TEST_TICKERS)
 async def test_should_list_zones_that_hold_the_criteria(
-    tmp_path: Path, ticker: str
+    live_assets: Path, ticker: str
 ) -> None:
     """
     @issue-109 @AC2 @AC3 @AC4 @AC5 @AC7 @AC10 Should list a handful of zones
     per side, nearest first, each touched on a cached session.
     """
-    async with _server(tmp_path) as client:
+    async with _server(live_assets) as client:
         levels = await _call(client, "get_support_resistance", ticker=ticker)
 
-    _assert_zones_hold_the_criteria(levels, _cached(tmp_path, ticker))
+    _assert_zones_hold_the_criteria(levels, _cached(live_assets, ticker))
 
 
 @pytest.mark.parametrize("ticker", TEST_TICKERS)
 async def test_should_agree_with_get_trend_and_get_indicators(
-    tmp_path: Path, ticker: str
+    live_assets: Path, ticker: str
 ) -> None:
     """@issue-109 @AC7 Should give trend and volume signs that the other tools agree with."""
-    async with _server(tmp_path) as client:
+    async with _server(live_assets) as client:
         levels = await _call(client, "get_support_resistance", ticker=ticker)
         trend = await _call(client, "get_trend", ticker=ticker)
         indicators = await _call(client, "get_indicators", ticker=ticker)
@@ -258,14 +277,12 @@ async def test_should_agree_with_get_trend_and_get_indicators(
 
 @pytest.mark.parametrize(("ticker", "through"), INSIDE_A_ZONE)
 async def test_should_list_a_zone_holding_the_last_close_first(
-    tmp_path: Path, ticker: str, through: str
+    live_assets: Path, ticker: str, through: str
 ) -> None:
     """@issue-109 @AC5 @AC2 @AC3 @AC4 Should list a zone holding the close first, at 0."""
-    async with _server(tmp_path / "live") as client:
-        await _call(client, "get_candles", ticker=ticker, count=1)
-    _cut_history(tmp_path / "live", tmp_path / "cut", ticker, through)
+    _cut_history(live_assets, live_assets / "cut", ticker, through)
 
-    async with _server(tmp_path / "cut", PROVIDER_DOWN) as client:
+    async with _server(live_assets / "cut", PROVIDER_DOWN) as client:
         levels = await _call(client, "get_support_resistance", ticker=ticker)
 
     assert levels["based_on"] == through
@@ -283,22 +300,20 @@ async def test_should_list_a_zone_holding_the_last_close_first(
     assert first["low"] <= levels["last"] <= first["high"], first
     assert first["distance"] == 0
     assert "inside" in (levels["note"] or "")
-    _assert_zones_hold_the_criteria(levels, _cached(tmp_path / "cut", ticker))
+    _assert_zones_hold_the_criteria(levels, _cached(live_assets / "cut", ticker))
 
 
 @pytest.mark.parametrize(("ticker", "through"), AT_A_NEW_HIGH)
 async def test_should_have_no_resistance_at_a_new_high(
-    tmp_path: Path, ticker: str, through: str
+    live_assets: Path, ticker: str, through: str
 ) -> None:
     """@issue-109 @AC6 @AC3 Should list no resistance when the close is a new high."""
-    async with _server(tmp_path / "live") as client:
-        await _call(client, "get_candles", ticker=ticker, count=1)
-    _cut_history(tmp_path / "live", tmp_path / "cut", ticker, through)
-    cached = _cached(tmp_path / "cut", ticker)
+    _cut_history(live_assets, live_assets / "cut", ticker, through)
+    cached = _cached(live_assets / "cut", ticker)
     # Given the history ends with a close above every earlier high.
     assert cached[-1]["close"] > max(candle["high"] for candle in cached[:-1])
 
-    async with _server(tmp_path / "cut", PROVIDER_DOWN) as client:
+    async with _server(live_assets / "cut", PROVIDER_DOWN) as client:
         levels = await _call(client, "get_support_resistance", ticker=ticker)
 
     assert levels["resistance"] == []
@@ -313,52 +328,50 @@ SWEEP_STEP = 12
 
 @pytest.mark.parametrize("ticker", TEST_TICKERS)
 async def test_should_hold_the_criteria_on_past_sessions(
-    tmp_path: Path, ticker: str
+    live_assets: Path, ticker: str
 ) -> None:
     """
     @issue-109 @AC2 @AC3 @AC4 @AC5 @AC7 @AC10 Should hold the zone criteria
     with the history cut at each of ten past sessions, not only today's.
     """
     # Given a full history, cut at past sessions spread over the last 120.
-    async with _server(tmp_path / "live") as client:
-        await _call(client, "get_candles", ticker=ticker, count=1)
     dates = [
         candle["date"]
-        for candle in _cached(tmp_path / "live", ticker)[-SWEEP_SESSIONS::SWEEP_STEP]
+        for candle in _cached(live_assets, ticker)[-SWEEP_SESSIONS::SWEEP_STEP]
     ]
 
     for date in dates:
-        cut = tmp_path / f"cut-{date}"
-        _cut_history(tmp_path / "live", cut, ticker, date)
-        # When the agent asks with only that history cached.
-        async with _server(cut, PROVIDER_DOWN) as client:
-            levels = await _call(client, "get_support_resistance", ticker=ticker)
+        cut = live_assets / f"cut-{date}"
+        _cut_history(live_assets, cut, ticker, date)
+        # When the agent asks with only that history cached. In memory: ten
+        # stdio servers would cost seconds, and stdio is covered above.
+        levels = await _levels_in_memory(cut, ticker)
         # Then every listed zone holds the criteria against those sessions.
         _assert_zones_hold_the_criteria(levels, _cached(cut, ticker))
 
 
 async def test_should_serve_a_stale_cache_when_the_provider_is_unreachable(
-    tmp_path: Path,
+    live_assets: Path,
 ) -> None:
     """@issue-109 @AC8 Should serve zones from a stale cache when the provider is down."""
-    async with _server(tmp_path) as client:
+    async with _server(live_assets) as client:
         fresh = await _call(client, "get_support_resistance", ticker="ASML.AS")
     assert fresh["is_current"] is True
 
     # Given the cache is two sessions behind, and the provider unreachable.
-    path = tmp_path / "stocks" / "ASML.AS" / "candles.csv"
+    path = live_assets / "stocks" / "ASML.AS" / "candles.csv"
     lines = path.read_text().splitlines(keepends=True)
     path.write_text("".join(lines[:-2]))
     behind = lines[-3].split(",")[0]
 
-    async with _server(tmp_path, PROVIDER_DOWN) as client:
+    async with _server(live_assets, PROVIDER_DOWN) as client:
         stale = await _call(client, "get_support_resistance", ticker="ASML.AS")
 
     assert stale["is_current"] is False
     assert stale["based_on"] == behind
     assert "2 sessions behind" in (stale["warning"] or "")
     assert stale["support"] or stale["resistance"]
-    _assert_zones_hold_the_criteria(stale, _cached(tmp_path, "ASML.AS"))
+    _assert_zones_hold_the_criteria(stale, _cached(live_assets, "ASML.AS"))
 
 
 async def test_should_say_what_to_do_for_a_ticker_it_cannot_serve(
@@ -376,13 +389,11 @@ async def test_should_say_what_to_do_for_a_ticker_it_cannot_serve(
             )
 
 
-async def test_should_explain_a_history_too_short_for_zones(tmp_path: Path) -> None:
+async def test_should_explain_a_history_too_short_for_zones(live_assets: Path) -> None:
     """@issue-109 @X Should explain, not fail, when fewer than 30 sessions are cached."""
-    async with _server(tmp_path / "live") as client:
-        await _call(client, "get_candles", ticker="GOOG", count=1)
-    _cut_history(tmp_path / "live", tmp_path / "cut", "GOOG", "2004-09-29")
+    _cut_history(live_assets, live_assets / "cut", "GOOG", "2004-09-29")
 
-    async with _server(tmp_path / "cut", PROVIDER_DOWN) as client:
+    async with _server(live_assets / "cut", PROVIDER_DOWN) as client:
         levels = await _call(client, "get_support_resistance", ticker="GOOG")
 
     assert levels["support"] == levels["resistance"] == levels["signs"] == []

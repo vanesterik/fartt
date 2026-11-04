@@ -101,10 +101,10 @@ def _sma(closes: list[float], period: int) -> float:
 
 
 async def test_should_return_both_timeframes_with_their_evidence(
-    tmp_path: Path,
+    live_assets: Path,
 ) -> None:
     """@issue-108 @AC1 @AC8 Should return both timeframes with their evidence."""
-    async with _server(tmp_path) as client:
+    async with _server(live_assets) as client:
         trend = await _call(client, "get_trend", ticker="ASML.AS")
 
     assert set(trend) >= {
@@ -142,10 +142,10 @@ async def test_should_return_both_timeframes_with_their_evidence(
 
 @pytest.mark.parametrize("ticker", TEST_TICKERS)
 async def test_should_judge_the_direction_from_its_evidence(
-    tmp_path: Path, ticker: str
+    live_assets: Path, ticker: str
 ) -> None:
     """@issue-108 @AC2 Should judge each timeframe's direction from its evidence."""
-    async with _server(tmp_path) as client:
+    async with _server(live_assets) as client:
         trend = await _call(client, "get_trend", ticker=ticker)
 
     directions = []
@@ -161,13 +161,13 @@ async def test_should_judge_the_direction_from_its_evidence(
 
 
 async def test_should_report_averages_that_agree_with_the_cached_closes(
-    tmp_path: Path,
+    live_assets: Path,
 ) -> None:
     """@issue-108 @AC2 Should report averages that agree with the cached closes."""
-    async with _server(tmp_path) as client:
+    async with _server(live_assets) as client:
         trend = await _call(client, "get_trend", ticker="ASML.AS")
 
-    daily = _cached_closes(tmp_path, "ASML.AS")
+    daily = _cached_closes(live_assets, "ASML.AS")
     closes = [close for _, close in daily]
     assert trend["daily"]["based_on"] == daily[-1][0].isoformat()
     assert trend["daily"]["sma_50"]["value"] == pytest.approx(_sma(closes, 50))
@@ -184,10 +184,10 @@ async def test_should_report_averages_that_agree_with_the_cached_closes(
 
 @pytest.mark.parametrize("ticker", TEST_TICKERS)
 async def test_should_match_get_indicators_daily_averages(
-    tmp_path: Path, ticker: str
+    live_assets: Path, ticker: str
 ) -> None:
     """@issue-108 @AC3 Should match get_indicators' daily SMA 50 and SMA 200."""
-    async with _server(tmp_path) as client:
+    async with _server(live_assets) as client:
         trend = await _call(client, "get_trend", ticker=ticker)
         indicators = await _call(client, "get_indicators", ticker=ticker)
 
@@ -197,7 +197,7 @@ async def test_should_match_get_indicators_daily_averages(
 
 
 async def test_should_base_the_weekly_timeframe_on_closed_weeks_only(
-    tmp_path: Path,
+    live_assets: Path,
 ) -> None:
     """
     @issue-108 @AC4 Should base the weekly timeframe on closed weeks only.
@@ -210,7 +210,7 @@ async def test_should_base_the_weekly_timeframe_on_closed_weeks_only(
     """
     from fartt.data import exchange_calendar
 
-    async with _server(tmp_path) as client:
+    async with _server(live_assets) as client:
         trend = await _call(client, "get_trend", ticker="ASML.AS")
         candles = await _call(client, "get_candles", ticker="ASML.AS", count=15)
 
@@ -235,10 +235,10 @@ async def test_should_base_the_weekly_timeframe_on_closed_weeks_only(
 
 
 async def test_should_rest_a_short_listing_on_the_weekly_sma_50(
-    tmp_path: Path,
+    live_assets: Path,
 ) -> None:
     """@issue-108 @AC5 Should rest a short listing's weekly trend on the SMA 50."""
-    async with _server(tmp_path) as client:
+    async with _server(live_assets) as client:
         trend = await _call(client, "get_trend", ticker="ARM")
 
     weekly = trend["weekly"]
@@ -248,7 +248,7 @@ async def test_should_rest_a_short_listing_on_the_weekly_sma_50(
     assert weekly["sma_50"] is not None
 
     closed_weeks = _weekly_closes(
-        _cached_closes(tmp_path, "ARM"), dt.date.fromisoformat(weekly["based_on"])
+        _cached_closes(live_assets, "ARM"), dt.date.fromisoformat(weekly["based_on"])
     )
     assert len(closed_weeks) < 205
     note = trend["note"] or ""
@@ -258,21 +258,21 @@ async def test_should_rest_a_short_listing_on_the_weekly_sma_50(
 
 
 async def test_should_serve_a_stale_cache_when_the_provider_is_unreachable(
-    tmp_path: Path,
+    live_assets: Path,
 ) -> None:
     """@issue-108 @AC6 Should serve a stale cache when the provider is down."""
-    async with _server(tmp_path) as client:
+    async with _server(live_assets) as client:
         fresh = await _call(client, "get_trend", ticker="ASML.AS")
     assert fresh["is_current"] is True
 
     # Given the cache is two sessions behind, and the provider unreachable.
-    path = tmp_path / "stocks" / "ASML.AS" / "candles.csv"
+    path = live_assets / "stocks" / "ASML.AS" / "candles.csv"
     lines = path.read_text().splitlines(keepends=True)
     path.write_text("".join(lines[:-2]))
     behind = dt.date.fromisoformat(lines[-3].split(",")[0])
     proxy = {name: UNREACHABLE for name in ("HTTPS_PROXY", "https_proxy")}
 
-    async with _server(tmp_path, proxy) as client:
+    async with _server(live_assets, proxy) as client:
         stale = await _call(client, "get_trend", ticker="ASML.AS")
 
     assert stale["is_current"] is False
