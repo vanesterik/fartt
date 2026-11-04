@@ -279,3 +279,16 @@ def test_an_unclosed_week_is_in_the_note() -> None:
     assert result.daily.based_on == "2026-11-04"
     assert result.note is not None
     assert "week ending 2026-10-30" in result.note
+
+
+def test_a_stale_cache_mid_week_is_not_called_the_current_week() -> None:
+    # Cached through Tuesday 27 October: that week has closed, it just isn't
+    # all in the cache, so the note mustn't call it the current week.
+    result = calculate_trend(series(rise(), last=date(2026, 10, 27)), "XNYS")
+
+    assert result.note is not None
+    assert "current week" not in result.note
+    assert (
+        "The newest cached week (through 2026-10-27) isn't complete: the weekly "
+        "figures are as of the week ending 2026-10-23."
+    ) in result.note

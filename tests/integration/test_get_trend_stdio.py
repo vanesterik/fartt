@@ -199,7 +199,15 @@ async def test_should_match_get_indicators_daily_averages(
 async def test_should_base_the_weekly_timeframe_on_closed_weeks_only(
     tmp_path: Path,
 ) -> None:
-    """@issue-108 @AC4 Should base the weekly timeframe on closed weeks only."""
+    """
+    @issue-108 @AC4 Should base the weekly timeframe on closed weeks only.
+
+    Against live data the note is checked only when this runs before the
+    week's last session has closed; after Friday's close or over a weekend
+    the week is complete and there's no note to check. The unit tests
+    `test_an_unclosed_week_is_in_the_note` and
+    `test_get_trend_returns_both_timeframes` check the note either way.
+    """
     import exchange_calendars
 
     async with _server(tmp_path) as client:
@@ -220,7 +228,7 @@ async def test_should_base_the_weekly_timeframe_on_closed_weeks_only(
         expected_day = newest
     else:
         expected_day = max(day for day, _ in rows if day < monday)
-        assert "isn't closed" in (trend["note"] or "")
+        assert "isn't complete" in (trend["note"] or "")
         assert expected_day.isoformat() in trend["note"]
     assert weekly["based_on"] == expected_day.isoformat()
     assert weekly["close"] == dict(rows)[expected_day]
