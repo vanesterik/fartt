@@ -1,11 +1,10 @@
 from datetime import date, timedelta
 
-import exchange_calendars as xcals
 import numpy as np
 import pytest
 import talib
 
-from fartt.data import Candle
+from fartt.data import Candle, exchange_calendar
 from fartt.technical import Indicators, Trend, calculate_indicators, calculate_trend
 from fartt.technical.levels import (
     DETAIL_MAX,
@@ -373,7 +372,7 @@ STEP = 2.0
 
 
 def sessions(count: int, last: date = FRIDAY) -> list[date]:
-    window = xcals.get_calendar("XAMS").sessions_window(last.isoformat(), -count)
+    window = exchange_calendar("XAMS").sessions_window(last.isoformat(), -count)
     return [session.date() for session in window]
 
 

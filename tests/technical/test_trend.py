@@ -1,12 +1,11 @@
 import random
 from datetime import date
 
-import exchange_calendars as xcals
 import numpy as np
 import pytest
 import talib
 
-from fartt.data import Candle
+from fartt.data import Candle, exchange_calendar
 from fartt.technical import trend
 from fartt.technical.trend import TimeframeTrend, calculate_trend, weekly_candles
 from tests.fakes import stock_candle
@@ -95,7 +94,7 @@ def test_a_week_the_calendar_cannot_place_counts_as_closed(
 
 def sessions(count: int, last: date = FRIDAY) -> list[date]:
     """The `count` XNYS sessions up to and including `last`."""
-    window = xcals.get_calendar("XNYS").sessions_window(last.isoformat(), -count)
+    window = exchange_calendar("XNYS").sessions_window(last.isoformat(), -count)
     return [session.date() for session in window]
 
 

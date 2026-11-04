@@ -3,11 +3,10 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
-import exchange_calendars as xcals
 import pytest
 from mcp import Client
 
-from fartt.data import Candle, Dividend, History, Listing, Quote
+from fartt.data import Candle, Dividend, History, Listing, Quote, exchange_calendar
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
@@ -28,7 +27,7 @@ def anyio_backend() -> str:
 
 def sessions(exchange: str, count: int, last: date = date(2026, 10, 29)) -> list[date]:
     """The `count` sessions of `exchange` up to and including `last`."""
-    window = xcals.get_calendar(exchange).sessions_window(last.isoformat(), -count)
+    window = exchange_calendar(exchange).sessions_window(last.isoformat(), -count)
     return [session.date() for session in window]
 
 

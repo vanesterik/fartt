@@ -1,12 +1,15 @@
+import warnings
 from datetime import UTC, date, datetime
 
 import pytest
+from pandas.errors import Pandas4Warning
 
 from fartt.data import (
     MarketStatus,
     UnknownTicker,
     UnsupportedExchange,
     calendar_for,
+    exchange_calendar,
     exchange_date,
     last_session_of_week,
     market_status,
@@ -150,3 +153,14 @@ def test_a_weekend_day_belongs_to_its_iso_week() -> None:
 
 def test_a_week_outside_the_calendar_is_unknown() -> None:
     assert last_session_of_week("XAMS", date(2056, 10, 28)) is None
+
+
+def test_calendars_raise_no_pandas_deprecation_warning() -> None:
+    # exchange_calendars 4.13.2 reads .values on time-zone-aware data, which
+    # pandas 3.1 deprecates, building a calendar and its first minute lookup;
+    # the warning is theirs, not fartt's.
+    exchange_calendar.cache_clear()
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Pandas4Warning)
+        newest_closed_session("XAMS", utc(2026, 10, 29, 21, 0))
+        market_status("XAMS", utc(2026, 10, 29, 10, 0))

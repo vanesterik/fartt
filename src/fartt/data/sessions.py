@@ -1,10 +1,13 @@
 import re
-from collections.abc import Sequence
+import warnings
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from functools import cache
 from typing import NamedTuple
 
 import exchange_calendars as xcals
+from pandas.errors import Pandas4Warning
 
 from fartt.data.provider import UnknownTicker, UnsupportedExchange
 
@@ -63,10 +66,25 @@ def calendar_for(ticker: str) -> str:
         ) from None
 
 
+@contextmanager
+def _without_pandas_deprecations() -> Generator[None]:
+    # exchange_calendars (4.13.2, the latest) reads Series.values and
+    # DatetimeIndex.values on time-zone-aware data, which pandas 3.1
+    # deprecates, when it builds a calendar and when it first builds its
+    # table of trading minutes. The warning is theirs and says nothing about
+    # fartt, so it's silenced around those two calls only; drop this once a
+    # release reads the values another way.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", Pandas4Warning)
+        yield
+
+
 @cache
-def _calendar(exchange: str) -> xcals.ExchangeCalendar:
+def exchange_calendar(exchange: str) -> xcals.ExchangeCalendar:
+    """The exchange_calendars calendar for an exchange code, built once."""
     # get_calendar builds the whole session table, which is slow.
-    return xcals.get_calendar(exchange)
+    with _without_pandas_deprecations():
+        return xcals.get_calendar(exchange)
 
 
 def newest_closed_session(exchange: str, now: datetime) -> date:
@@ -76,7 +94,7 @@ def newest_closed_session(exchange: str, now: datetime) -> date:
     exchange's holidays are never sessions; early closes count.
 
     """
-    calendar = _calendar(exchange)
+    calendar = exchange_calendar(exchange)
     local_date = now.astimezone(calendar.tz).date()
     session = calendar.date_to_session(local_date, direction="previous")
     while calendar.session_close(session) + CLOSE_MARGIN > now:
@@ -94,7 +112,7 @@ def missing_sessions(exchange: str, dates: Sequence[date]) -> list[date]:
     """
     if len(dates) < 2:
         return []
-    calendar = _calendar(exchange)
+    calendar = exchange_calendar(exchange)
     start = max(min(dates), calendar.first_session.date())
     end = max(dates)
     if start > end:
@@ -116,7 +134,7 @@ def last_session_of_week(exchange: str, day: date) -> date | None:
     """
     monday = day - timedelta(days=day.weekday())
     try:
-        sessions = _calendar(exchange).sessions_in_range(
+        sessions = exchange_calendar(exchange).sessions_in_range(
             monday, monday + timedelta(days=6)
         )
     except ValueError:  # exchange_calendars' DateOutOfBounds
@@ -126,7 +144,7 @@ def last_session_of_week(exchange: str, day: date) -> date | None:
 
 def exchange_date(exchange: str, moment: datetime) -> date:
     """The date `moment` (timezone-aware) falls on in the exchange's time zone."""
-    return moment.astimezone(_calendar(exchange).tz).date()
+    return moment.astimezone(exchange_calendar(exchange).tz).date()
 
 
 class MarketStatus(NamedTuple):
@@ -141,8 +159,10 @@ def market_status(exchange: str, now: datetime) -> MarketStatus:
     from the exchange calendar.
 
     """
-    calendar = _calendar(exchange)
+    calendar = exchange_calendar(exchange)
     minute = now.replace(second=0, microsecond=0)
-    if calendar.is_open_on_minute(minute):
+    with _without_pandas_deprecations():
+        is_open = calendar.is_open_on_minute(minute)
+    if is_open:
         return MarketStatus(True, None)
     return MarketStatus(False, calendar.next_open(minute).astimezone(UTC))
