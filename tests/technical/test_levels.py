@@ -474,6 +474,9 @@ def test_a_close_inside_a_zone_is_support_at_distance_zero() -> None:
     first = result.support[0]
     assert first.low <= result.last <= first.high
     assert (first.distance, first.distance_atr) == (0, 0)
+    # Not -0.0, which JSON would carry to the agent as "-0.0".
+    assert '"distance":0.0' in first.model_dump_json()
+    assert '"distance_atr":0.0' in first.model_dump_json()
     assert result.note is not None and "inside" in result.note
 
 
