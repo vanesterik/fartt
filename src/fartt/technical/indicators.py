@@ -121,14 +121,14 @@ class Indicators(BaseModel):
     )
 
 
-def _round(value: float) -> float:
+def round_value(value: float) -> float:
     return round(float(value), DECIMALS)
 
 
 def _direction(now: float, before: float) -> Direction:
     # On rounded values: TA-Lib's running sums leave noise in the last digits,
     # which would turn a flat stretch into rising or falling.
-    now, before = _round(now), _round(before)
+    now, before = round_value(now), round_value(before)
     if now > before:
         return "rising"
     if now < before:
@@ -147,17 +147,17 @@ def _streak(flags: list[bool]) -> int:
 
 
 def moving_average(closes: Array, values: Array) -> MovingAverage:
-    close, value = _round(closes[-1]), _round(values[-1])
+    close, value = round_value(closes[-1]), round_value(values[-1])
     defined = ~np.isnan(values)
     # Rounded, so a close on its average counts as above despite float noise.
     above = [
-        _round(c) >= _round(v)
+        round_value(c) >= round_value(v)
         for c, v in zip(closes[defined], values[defined], strict=True)
     ]
     return MovingAverage(
         value=value,
         price_vs="above" if above[-1] else "below",
-        distance=_round((close - value) / value),
+        distance=round_value((close - value) / value),
         slope=_direction(value, float(values[-1 - SLOPE_SESSIONS])),
         days=_streak(above),
     )
@@ -180,7 +180,7 @@ def _rsi(values: Array, config: TechnicalIndicatorsConfig) -> Rsi:
         else None
     )
     return Rsi(
-        value=_round(defined[-1]),
+        value=round_value(defined[-1]),
         zone=zones[-1],
         days=_streak([zone == zones[-1] for zone in zones]),
         direction=_direction(defined[-1], earlier) if earlier is not None else None,
@@ -199,9 +199,9 @@ def _macd(line: Array, signal: Array, histogram: Array) -> Macd:
             )
             break
     return Macd(
-        line=_round(line[-1]),
-        signal=_round(signal[-1]),
-        histogram=_round(histogram[-1]),
+        line=round_value(line[-1]),
+        signal=round_value(signal[-1]),
+        histogram=round_value(histogram[-1]),
         histogram_direction=(
             _direction(float(histogram[-1]), float(histogram[-2]))
             if len(above) > 1
@@ -226,10 +226,12 @@ def _volume(candles: list[Candle], ex_dividend: frozenset[date]) -> Volume:
             up.append(candle.volume)
     up_mean = mean(up) if up else 0.0
     return Volume(
-        last=_round(last),
-        average_20d=_round(average),
-        ratio=_round(last / average) if average > 0 else None,
-        down_day_ratio=_round(mean(down) / up_mean) if down and up_mean > 0 else None,
+        last=round_value(last),
+        average_20d=round_value(average),
+        ratio=round_value(last / average) if average > 0 else None,
+        down_day_ratio=round_value(mean(down) / up_mean)
+        if down and up_mean > 0
+        else None,
     )
 
 
@@ -302,10 +304,10 @@ def calculate_indicators(
         sma_20 = float(SMA(closes, timeperiod=20)[-1])
         close = float(closes[-1])
         atr = Atr(
-            value=_round(value),
-            fraction=_round(value / close) if close > 0 else None,
+            value=round_value(value),
+            fraction=round_value(value / close) if close > 0 else None,
             stretch=(
-                _round((close - sma_20) / value)
+                round_value((close - sma_20) / value)
                 if not np.isnan(sma_20) and value > 0
                 else None
             ),
@@ -318,7 +320,7 @@ def calculate_indicators(
     )
 
     return Indicators(
-        close=_round(closes[-1]),
+        close=round_value(closes[-1]),
         **averages,
         rsi=rsi,
         macd=macd,
