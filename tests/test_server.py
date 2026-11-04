@@ -6,7 +6,16 @@ from typing import Any
 import pytest
 from mcp import Client
 
-from fartt.data import Candle, Dividend, History, Listing, Quote, exchange_calendar
+from fartt.data import (
+    Candle,
+    Dividend,
+    History,
+    Listing,
+    Quote,
+    exchange_calendar,
+    session_after,
+)
+from fartt.journal import Journal
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
@@ -15,6 +24,7 @@ from tests.fakes import FakeProvider, stock_candle
 ROOT = Path(__file__).resolve().parents[1]
 ASML = Listing("ASML.AS", "ASML Holding N.V.", "EUR", "XAMS")
 AAPL = Listing("AAPL", "Apple Inc.", "USD", "XNYS")
+IWDA = Listing("IWDA.AS", "iShares Core MSCI World UCITS ETF USD (Acc)", "EUR", "XAMS")
 # Euronext Amsterdam and NYSE have both closed (plus margin) for 2026-10-29.
 AFTER_CLOSE = datetime(2026, 10, 29, 21, 0, tzinfo=UTC)
 AFTER_CLOSE_27 = datetime(2026, 10, 27, 21, 0, tzinfo=UTC)
@@ -31,8 +41,8 @@ def sessions(exchange: str, count: int, last: date = date(2026, 10, 29)) -> list
     return [session.date() for session in window]
 
 
-def history(days: list[date]) -> History:
-    return History([stock_candle(day, 100.0 + i) for i, day in enumerate(days)], [], [])
+def history(days: list[date], first: float = 100.0) -> History:
+    return History([stock_candle(day, first + i) for i, day in enumerate(days)], [], [])
 
 
 def provider(asml_days: list[date], now: datetime = AFTER_CLOSE) -> FakeProvider:
@@ -40,8 +50,9 @@ def provider(asml_days: list[date], now: datetime = AFTER_CLOSE) -> FakeProvider
         histories={
             "ASML.AS": history(asml_days),
             "AAPL": history(sessions("XNYS", 3)),
+            "IWDA.AS": history(sessions("XAMS", 3), first=50.0),
         },
-        listings={"ASML.AS": ASML, "AAPL": AAPL},
+        listings={"ASML.AS": ASML, "AAPL": AAPL, "IWDA.AS": IWDA},
         now=now,
     )
 
@@ -50,10 +61,15 @@ def cache_for(fake: FakeProvider, assets_dir: Path) -> StockCache:
     return StockCache(fake, assets_dir, clock=lambda: fake.now)
 
 
+def journal_of(cache: StockCache) -> Journal:
+    """The journal beside the cache's stocks/ folder, where main() keeps it."""
+    return Journal(cache.directory("AAPL").parents[1] / "journal")
+
+
 async def call(
     cache: StockCache, arguments: dict[str, Any], tool: str = "get_candles"
 ) -> Any:
-    async with Client(build_server(cache)) as client:
+    async with Client(build_server(cache, journal_of(cache))) as client:
         return await client.call_tool(tool, arguments)
 
 
@@ -268,7 +284,8 @@ async def test_an_unwritable_cache_is_a_tool_error_for_the_operator(
 
 @pytest.mark.anyio
 async def test_the_tools_are_listed(tmp_path: Path) -> None:
-    async with Client(build_server(cache_for(provider([]), tmp_path))) as client:
+    cache = cache_for(provider([]), tmp_path)
+    async with Client(build_server(cache, journal_of(cache))) as client:
         tools = (await client.list_tools()).tools
 
     assert sorted(tool.name for tool in tools) == [
@@ -277,6 +294,7 @@ async def test_the_tools_are_listed(tmp_path: Path) -> None:
         "get_quote",
         "get_support_resistance",
         "get_trend",
+        "record_decision",
     ]
 
 
@@ -461,7 +479,8 @@ async def test_get_quote_of_an_unknown_ticker_is_a_tool_error(tmp_path: Path) ->
 
 @pytest.mark.anyio
 async def test_the_volume_ratio_says_it_is_not_normalised(tmp_path: Path) -> None:
-    async with Client(build_server(cache_for(provider([]), tmp_path))) as client:
+    cache = cache_for(provider([]), tmp_path)
+    async with Client(build_server(cache, journal_of(cache))) as client:
         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
 
     schema = tools["get_quote"].output_schema
@@ -838,8 +857,9 @@ async def test_get_support_resistance_of_an_unsupported_exchange_is_a_tool_error
 
 
 class FakeServer:
-    def __init__(self, cache: StockCache) -> None:
+    def __init__(self, cache: StockCache, journal: Journal) -> None:
         self.cache = cache
+        self.journal = journal
         self.ran = False
 
     def run(self) -> None:
@@ -851,8 +871,8 @@ def run_main(
 ) -> FakeServer:
     built: list[FakeServer] = []
 
-    def fake_build_server(cache: StockCache) -> FakeServer:
-        built.append(FakeServer(cache))
+    def fake_build_server(cache: StockCache, journal: Journal) -> FakeServer:
+        built.append(FakeServer(cache, journal))
         return built[-1]
 
     monkeypatch.setattr(server_module, "build_server", fake_build_server)
@@ -888,6 +908,16 @@ def test_main_reads_the_assets_dir_from_the_env_file(
     server = run_main(monkeypatch, env_file)
 
     assert server.cache.directory("AAPL") == tmp_path / "cache" / "stocks" / "AAPL"
+
+
+def test_main_keeps_the_journal_in_the_assets_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv(server_module.ASSETS_DIR_ENV, str(tmp_path / "assets"))
+
+    server = run_main(monkeypatch)
+
+    assert server.journal.path == tmp_path / "assets" / "journal" / "decisions.jsonl"
 
 
 def test_a_relative_assets_dir_is_relative_to_the_repository(
@@ -932,3 +962,284 @@ async def test_get_candles_rounds_prices_to_4_decimals(tmp_path: Path) -> None:
     assert result.structured_content["rows"] == [
         [day.isoformat(), 1660.0, 1666.2, 1639.0, 1656.2, 1.0]
     ]
+
+
+SIGNALS_SENT = [
+    {"name": "trend", "stance": "for", "note": "up, aligned"},
+    {"name": "rsi", "stance": "against", "note": None},
+]
+
+
+def decision(**changes: Any) -> dict[str, Any]:
+    arguments: dict[str, Any] = {
+        "ticker": "ASML.AS",
+        "direction": "buy",
+        "horizon": 20,
+        "reasoning": "Trend up, support holding.",
+        "signals": SIGNALS_SENT,
+    }
+    return arguments | changes
+
+
+async def record(cache: StockCache, **changes: Any) -> Any:
+    return await call(cache, decision(**changes), "record_decision")
+
+
+def journal_path(cache: StockCache) -> Path:
+    return journal_of(cache).path
+
+
+@pytest.mark.anyio
+async def test_record_decision_returns_the_stored_entry(tmp_path: Path) -> None:
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    result = await record(cache)
+
+    assert not result.is_error, result.content
+    assert result.structured_content == {
+        "id": 1,
+        "recorded_at": "2026-10-29T21:00:00Z",
+        "ticker": "ASML.AS",
+        "currency": "EUR",
+        "exchange": "XAMS",
+        "direction": "buy",
+        "horizon": 20,
+        "reasoning": "Trend up, support holding.",
+        "signals": SIGNALS_SENT,
+        "decision_session": "2026-10-29",
+        "close": 102.0,
+        "horizon_ends": session_after("XAMS", date(2026, 10, 29), 20).isoformat(),
+        "benchmark": {
+            "ticker": "IWDA.AS",
+            "currency": "EUR",
+            "session": "2026-10-29",
+            "close": 52.0,
+        },
+    }
+
+
+@pytest.mark.anyio
+async def test_the_entry_is_appended_to_the_journal(tmp_path: Path) -> None:
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    first = await record(cache)
+    second = await record(cache)
+
+    assert [first.structured_content["id"], second.structured_content["id"]] == [1, 2]
+    stored = [d.model_dump(mode="json") for d in journal_of(cache).decisions()]
+    assert stored == [first.structured_content, second.structured_content]
+
+
+@pytest.mark.anyio
+async def test_the_reasoning_is_stored_stripped(tmp_path: Path) -> None:
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    result = await record(cache, reasoning="  Trend up.\n")
+
+    assert result.structured_content["reasoning"] == "Trend up."
+
+
+@pytest.mark.anyio
+async def test_the_benchmark_session_follows_its_own_exchange(tmp_path: Path) -> None:
+    # Boxing Day 2025: NYSE trades, Euronext is closed (and was on the 25th).
+    boxing_day = datetime(2025, 12, 26, 23, 0, tzinfo=UTC)
+    fake = provider([], now=boxing_day)
+    fake.histories["AAPL"] = history(sessions("XNYS", 3, last=date(2025, 12, 26)))
+    fake.histories["IWDA.AS"] = history(sessions("XAMS", 3, last=date(2025, 12, 24)))
+
+    result = await record(cache_for(fake, tmp_path), ticker="AAPL")
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert content["decision_session"] == "2025-12-26"
+    assert content["benchmark"]["session"] == "2025-12-24"
+
+
+@pytest.mark.anyio
+async def test_a_ticker_is_normalised(tmp_path: Path) -> None:
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    result = await record(cache, ticker=" asml.as ")
+
+    assert result.structured_content["ticker"] == "ASML.AS"
+    assert journal_of(cache).decisions()[0].ticker == "ASML.AS"
+
+
+@pytest.mark.anyio
+async def test_a_call_on_the_benchmark_itself(tmp_path: Path) -> None:
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    result = await record(cache, ticker="IWDA.AS")
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert content["close"] == content["benchmark"]["close"] == 52.0
+
+
+@pytest.mark.anyio
+async def test_a_call_during_the_session_uses_the_previous_close(
+    tmp_path: Path,
+) -> None:
+    during = datetime(2026, 10, 30, 10, 0, tzinfo=UTC)
+    fake = provider(sessions("XAMS", 3, last=date(2026, 10, 30)), now=during)
+    fake.histories["IWDA.AS"] = history(sessions("XAMS", 3, last=date(2026, 10, 30)))
+
+    result = await record(cache_for(fake, tmp_path))
+
+    assert not result.is_error, result.content
+    assert result.structured_content["decision_session"] == "2026-10-29"
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("changes", "named"),
+    [
+        ({"direction": "sell"}, "direction"),
+        ({"horizon": 4}, "horizon"),
+        ({"horizon": 61}, "horizon"),
+        ({"signals": []}, "signals"),
+        ({"signals": [{"name": "vibes", "stance": "for"}]}, "name"),
+        ({"signals": [{"name": "trend", "stance": "neutral"}]}, "stance"),
+        (
+            {"signals": [{"name": "trend", "stance": "for"}] * 2},
+            "trend",
+        ),
+        ({"signals": [{"name": "trend", "stance": "for", "note": "x" * 201}]}, "note"),
+        ({"reasoning": "   "}, "reasoning"),
+        ({"reasoning": "x" * 2001}, "reasoning"),
+        ({"ticker": "NOPE"}, "NOPE"),
+        ({"ticker": "BMW.DE"}, ".AS"),
+    ],
+)
+async def test_invalid_arguments_are_tool_errors_and_record_nothing(
+    tmp_path: Path, changes: dict[str, Any], named: str
+) -> None:
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    result = await record(cache, **changes)
+
+    assert result.is_error
+    assert named in result.content[0].text
+    assert not journal_path(cache).exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("changes", "allowed"),
+    [
+        ({"direction": "sell"}, ["buy", "pass"]),
+        ({"signals": [{"name": "vibes", "stance": "for"}]}, ["trend", "spread"]),
+        ({"signals": [{"name": "trend", "stance": "neutral"}]}, ["for", "against"]),
+        ({"horizon": 61}, ["60"]),
+        ({"reasoning": "x" * 2001}, ["2,000"]),
+    ],
+)
+async def test_an_invalid_value_error_says_what_is_allowed(
+    tmp_path: Path, changes: dict[str, Any], allowed: list[str]
+) -> None:
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    text = (await record(cache, **changes)).content[0].text
+
+    for value in allowed:
+        assert value in text
+
+
+@pytest.mark.anyio
+async def test_the_valid_names_are_in_the_input_schema(tmp_path: Path) -> None:
+    cache = cache_for(provider([]), tmp_path)
+    async with Client(build_server(cache, journal_of(cache))) as client:
+        tools = (await client.list_tools()).tools
+
+    schema = json.dumps(
+        next(t for t in tools if t.name == "record_decision").input_schema
+    )
+    for value in [
+        "trend",
+        "support_resistance",
+        "moving_averages",
+        "rsi",
+        "macd",
+        "volume",
+        "atr",
+        "spread",
+        "for",
+        "against",
+        "buy",
+        "pass",
+    ]:
+        assert f'"{value}"' in schema
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("behind", ["ASML.AS", "IWDA.AS"])
+async def test_a_newest_close_that_is_not_cached_records_nothing(
+    tmp_path: Path, behind: str
+) -> None:
+    fake = provider(sessions("XAMS", 3))
+    cache = cache_for(fake, tmp_path)
+    fake.now = AFTER_CLOSE_27
+    cache.update(behind)
+    fake.now = AFTER_CLOSE
+    cache.update("IWDA.AS" if behind == "ASML.AS" else "ASML.AS")
+    fake.reachable = False
+
+    result = await record(cache)
+
+    assert result.is_error
+    text = result.content[0].text
+    assert f"{behind}'s newest close (2026-10-29)" in text
+    assert "Try again later" in text
+    assert not journal_path(cache).exists()
+
+
+@pytest.mark.anyio
+async def test_an_unpublished_newest_close_records_nothing(tmp_path: Path) -> None:
+    fake = provider(sessions("XAMS", 3))
+    fake.histories["IWDA.AS"] = history(sessions("XAMS", 3, last=date(2026, 10, 28)))
+
+    result = await record(cache_for(fake, tmp_path))
+
+    assert result.is_error
+    assert "IWDA.AS's newest close (2026-10-29)" in result.content[0].text
+    assert not (tmp_path / "journal" / "decisions.jsonl").exists()
+
+
+@pytest.mark.anyio
+async def test_cached_newest_closes_record_with_the_provider_down(
+    tmp_path: Path,
+) -> None:
+    fake = provider(sessions("XAMS", 3))
+    cache = cache_for(fake, tmp_path)
+    cache.update("ASML.AS")
+    cache.update("IWDA.AS")
+    fake.reachable = False
+
+    result = await record(cache)
+
+    assert not result.is_error, result.content
+    assert len(journal_of(cache).decisions()) == 1
+
+
+@pytest.mark.anyio
+async def test_a_damaged_journal_is_a_tool_error_for_the_operator(
+    tmp_path: Path,
+) -> None:
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    await record(cache)
+    with journal_path(cache).open("ab") as file:
+        file.write(b"not json\n")
+    before = journal_path(cache).read_bytes()
+
+    result = await record(cache)
+
+    assert result.is_error
+    text = result.content[0].text
+    assert "journal" in text
+    assert "line 2" in text
+    assert "operator" in text
+    assert journal_path(cache).read_bytes() == before
+
+
+def test_the_instructions_say_to_record_every_call() -> None:
+    assert "record_decision" in server_module.INSTRUCTIONS

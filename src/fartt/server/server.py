@@ -21,6 +21,16 @@ from fartt.data import (
     market_status,
     missing_sessions,
     normalise_ticker,
+    session_after,
+)
+from fartt.journal import (
+    BENCHMARK,
+    BenchmarkClose,
+    Decision,
+    DecisionDraft,
+    Direction,
+    Journal,
+    Signal,
 )
 from fartt.stock_cache import StockCache, UpdateResult
 from fartt.technical import (
@@ -65,8 +75,14 @@ INSTRUCTIONS = (
     "is false the data is stale: read the warning before relying on it. "
     "Indicators, trend and support/resistance zones are evidence, not "
     "signals: weigh them together. get_support_resistance's signs say which "
-    "way each points (holding or breaking); they aren't summed into a verdict."
+    "way each points (holding or breaking); they aren't summed into a verdict. "
+    "Record every call, buy or pass, with record_decision when it's made; "
+    "entries can't be changed afterwards."
 )
+
+MIN_HORIZON = 5
+MAX_HORIZON = 60
+MAX_REASONING = 2000
 
 Row = tuple[str, float, float, float, float, float]
 
@@ -398,10 +414,30 @@ def _unreachable(ticker: str) -> ToolError:
     )
 
 
-def build_server(cache: StockCache) -> MCPServer:
+def _current_close(tool: str, cache: StockCache, ticker: str) -> Snapshot:
+    """
+    The ticker's last candle after bringing its cache up to date. A ToolError
+    unless it's the exchange's newest closed session: a call stamped with an
+    older close could be scored on a move that was already known.
+
+    """
+    snapshot = _snapshot(tool, cache, ticker, 1)
+    if not snapshot.is_current:
+        ticker = snapshot.listing.ticker
+        newest = cache.newest_closed_session(ticker)
+        raise ToolError(
+            f"{ticker}'s newest close ({newest.isoformat()}) isn't available "
+            "yet, so the call can't be stamped with the price of the moment. "
+            "Try again later."
+        )
+    return snapshot
+
+
+def build_server(cache: StockCache, journal: Journal) -> MCPServer:
     """
     Build the MCP server on `cache`, which also supplies the provider (for
-    quotes) and the clock (for market hours).
+    quotes) and the clock (for market hours and the time a call is
+    recorded), and `journal`, where calls are recorded.
 
     A factory rather than a module-level server, so tests can pass a cache
     over an in-memory provider and connect with the SDK's in-memory client.
@@ -677,6 +713,114 @@ def build_server(cache: StockCache) -> MCPServer:
             warning=warning,
         )
 
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=True,
+        )
+    )
+    def record_decision(
+        ticker: Annotated[
+            str,
+            Field(description="One ticker in Yahoo's format: AAPL, ASML.AS."),
+        ],
+        direction: Annotated[
+            Direction,
+            Field(
+                description=(
+                    "buy: the stock will beat the benchmark (IWDA.AS) over the "
+                    "horizon; pass: it won't."
+                )
+            ),
+        ],
+        horizon: Annotated[
+            int,
+            Field(
+                ge=MIN_HORIZON,
+                le=MAX_HORIZON,
+                description="How many sessions of the stock's exchange the call runs.",
+            ),
+        ],
+        reasoning: Annotated[
+            str,
+            Field(
+                description=(
+                    f"Why, in up to {MAX_REASONING:,} characters: the summary of "
+                    "the analysis."
+                )
+            ),
+        ],
+        signals: Annotated[
+            list[Signal],
+            Field(
+                min_length=1,
+                description=(
+                    "The evidence the call rests on, each name at most once, "
+                    "and which way it pointed."
+                ),
+            ),
+        ],
+    ) -> Decision:
+        """
+        Record a call (buy or pass) in the journal at the moment it's made,
+        stamped with the stock's and the benchmark's last closes, so it can
+        be scored later against what the market did. Record every call.
+        Entries can't be changed or removed afterwards: a correction is a
+        new call.
+        """
+        reasoning = reasoning.strip()
+        if not 1 <= len(reasoning) <= MAX_REASONING:
+            raise ToolError(
+                f"reasoning must be 1 to {MAX_REASONING:,} characters after "
+                f"stripping whitespace; it is {len(reasoning):,}."
+            )
+        names = [signal.name for signal in signals]
+        twice = sorted({name for name in names if names.count(name) > 1})
+        if twice:
+            raise ToolError(
+                f"signals name {', '.join(twice)} more than once; give each "
+                "signal once, with the stance it took."
+            )
+
+        stock = _current_close("record_decision", cache, ticker)
+        benchmark = _current_close("record_decision", cache, BENCHMARK)
+        candle = stock.candles[-1]
+        draft = DecisionDraft(
+            recorded_at=cache.clock().replace(microsecond=0),
+            ticker=stock.listing.ticker,
+            currency=stock.listing.currency,
+            exchange=stock.listing.exchange,
+            direction=direction,
+            horizon=horizon,
+            reasoning=reasoning,
+            signals=signals,
+            decision_session=candle.date,
+            close=round(candle.close, DECIMALS),
+            horizon_ends=session_after(stock.listing.exchange, candle.date, horizon),
+            benchmark=BenchmarkClose(
+                ticker=benchmark.listing.ticker,
+                currency=benchmark.listing.currency,
+                session=benchmark.candles[-1].date,
+                close=round(benchmark.candles[-1].close, DECIMALS),
+            ),
+        )
+        try:
+            recorded = journal.append(draft)
+        except CACHE_ERRORS as error:
+            logger.error(f"record_decision {draft.ticker}: {error}")
+            raise ToolError(
+                f"The journal at {journal.path} can't be read or written: "
+                f"{error}. Nothing was recorded. The operator must fix the "
+                "file; the server never rewrites it."
+            ) from error
+        logger.info(
+            f"record_decision {recorded.ticker}: #{recorded.id} {recorded.direction}, "
+            f"{recorded.horizon} sessions"
+        )
+        return recorded
+
     return server
 
 
@@ -693,4 +837,6 @@ def main() -> None:
     )
     assets_dir = ROOT / setting if setting else DEFAULT_ASSETS_DIR
     logger.info(f"Serving stocks cached in {assets_dir} over stdio")
-    build_server(StockCache(YFinanceProvider(), assets_dir)).run()
+    build_server(
+        StockCache(YFinanceProvider(), assets_dir), Journal(assets_dir / "journal")
+    ).run()
