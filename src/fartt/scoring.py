@@ -23,14 +23,12 @@ from datetime import date, datetime, timedelta
 
 from fartt.data import Candle, Dividend, calendar_for, session_on_or_before
 from fartt.journal import BENCHMARK, BenchmarkScore, Decision, Leg, Score
-from fartt.technical import DECIMALS
 
 # How far back a rate may come from when Yahoo has no FX candle on the day.
 RATE_LOOKBACK_DAYS = 5
 
-# Closes and rates as get_candles shows them, so a score can be recomputed
-# from its output.
-PRICE_DECIMALS = DECIMALS
+PRICE_DECIMALS = 4
+RATE_DECIMALS = 6
 RETURN_DECIMALS = 6
 
 
@@ -118,4 +116,4 @@ def _rate(currency: str, rates: Sequence[Candle], day: date) -> float:
             f"there's no EUR/{currency} rate within {RATE_LOOKBACK_DAYS} days "
             f"before {day.isoformat()}"
         )
-    return round(max(within, key=lambda c: c.date).close, PRICE_DECIMALS)
+    return round(max(within, key=lambda c: c.date).close, RATE_DECIMALS)
