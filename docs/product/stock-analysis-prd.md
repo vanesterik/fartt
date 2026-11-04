@@ -67,7 +67,7 @@ The server places real orders through Saxo, each approved by the operator, for t
 
 ### Broker and data
 
-- **Broker: Saxo** (decided 2026-11-04). It has an OpenAPI with a free simulation environment, access to every exchange in the universe 🔶, and paid real-time market data per exchange (subscribe only to what's used). Its fees are higher than Interactive Brokers', and USD trades from a EUR account pay a currency conversion markup, both counted in the costs below. **Interactive Brokers** was the first choice and is the fallback. **DEGIRO** is out because it has no official API.
+- **Broker: Saxo** (decided 2026-11-04). It has an OpenAPI with a free simulation environment, access to every exchange in the universe 🔶, and paid real-time market data per exchange (subscribe only to what's used). USD trades from a EUR account pay a currency conversion markup, counted in the costs below. **DEGIRO** is out because it has no official API.
 - **Development data: yfinance** (free, delayed), behind a `DataProvider` interface. It switches to Saxo's OpenAPI feed once the tooling works.
 
 ## 5. Solution Overview
