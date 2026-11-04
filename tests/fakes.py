@@ -11,7 +11,14 @@ from fartt.data import (
     newest_closed_session,
     normalise_ticker,
 )
-from fartt.journal import BenchmarkClose, DecisionDraft, Signal
+from fartt.journal import (
+    BenchmarkClose,
+    BenchmarkScore,
+    DecisionDraft,
+    Leg,
+    Score,
+    Signal,
+)
 
 
 class FakeProvider:
@@ -100,3 +107,24 @@ def decision_draft(**changes: Any) -> DecisionDraft:
         ),
     }
     return DecisionDraft(**(fields | changes))
+
+
+def decision_score(decision_id: int, **changes: Any) -> Score:
+    """A score for call `decision_id` (ASML.AS 612.4 -> 640, IWDA 101.25 -> 104)."""
+    fields: dict[str, Any] = {
+        "decision_id": decision_id,
+        "scored_at": datetime(2026, 11, 27, 9, 0, tzinfo=UTC),
+        "start": Leg(session=date(2026, 10, 29), close=612.4),
+        "end": Leg(session=date(2026, 11, 26), close=640.0),
+        "dividends": 0.0,
+        "return_": 0.045069,
+        "benchmark": BenchmarkScore(
+            ticker="IWDA.AS",
+            start=Leg(session=date(2026, 10, 29), close=101.25),
+            end=Leg(session=date(2026, 11, 26), close=104.0),
+            return_=0.02716,
+        ),
+        "excess_return": 0.017909,
+        "right": True,
+    }
+    return Score(**(fields | changes))

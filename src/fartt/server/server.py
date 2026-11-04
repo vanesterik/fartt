@@ -1,5 +1,7 @@
 import os
 import sys
+from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal, NamedTuple
 
@@ -32,6 +34,7 @@ from fartt.journal import (
     DecisionDraft,
     Direction,
     Journal,
+    Score,
     Signal,
 )
 from fartt.stock_cache import StockCache, UpdateResult
@@ -55,8 +58,8 @@ from fartt.technical import (
 # well under that, and the agent needs recent context, not years of history.
 MAX_CANDLES = 200
 # A worst-case journal entry (2,000 characters of reasoning, every signal with
-# a 200-character note) is about 4,500 characters of JSON, so ten stay well
-# under that limit. Narrowing by ticker or status reaches older calls.
+# a 200-character note) is about 4,500 characters of JSON and its score about
+# 500 more, so ten stay well under that limit. Narrowing by ticker or status reaches older calls.
 MAX_DECISIONS = 10
 
 COLUMNS = ["date", "open", "high", "low", "close", "volume"]
@@ -304,13 +307,17 @@ class JournalEntry(Decision):
     """A call as record_decision stored it, read back with its state now."""
 
     status: Status = Field(
-        description="open until the call has been scored, then scored."
+        description="open until score_decisions has scored the call, then scored."
     )
     horizon_passed: bool = Field(
         description=(
             "True once the session the horizon ends on has closed on the "
             "stock's exchange. An open call with it true is due for scoring."
         )
+    )
+    score: Score | None = Field(
+        default=None,
+        description="How the call turned out, in EUR against IWDA.AS; null while open.",
     )
 
 
@@ -327,19 +334,23 @@ class DecisionsResult(BaseModel):
     )
 
 
-def _status(decision: Decision) -> Status:
-    # Nothing is scored until score_decisions (#121) lands; it changes this.
-    return "open"
+def _status(decision: Decision, scores: Mapping[int, Score]) -> Status:
+    return "scored" if decision.id in scores else "open"
 
 
-def _no_match_note(status: StatusFilter, ticker: str | None) -> str:
+def _horizon_passed(decision: Decision, now: datetime) -> bool:
+    """Whether the session the call's horizon ends on has closed: due for scoring."""
+    return newest_closed_session(decision.exchange, now) >= decision.horizon_ends
+
+
+def _no_match_note(status: StatusFilter, ticker: str | None, any_scored: bool) -> str:
     filters = [f"status={status}"] if status != "all" else []
     if ticker is not None:
         filters.append(f"ticker={ticker}")
     if not filters:
         return "No calls are recorded yet."
     note = f"No calls match {', '.join(filters)}."
-    if status == "scored":
+    if status == "scored" and not any_scored:
         note += " No call has been scored yet."
     return note
 
@@ -925,8 +936,9 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
     ) -> DecisionsResult:
         """
         Read the journal back: the calls record_decision recorded, newest
-        first, filtered by status and ticker. A call is open until it's
-        scored; horizon_passed says whether it's due for scoring.
+        first, filtered by status and ticker. A call is open until
+        score_decisions scores it; horizon_passed says whether it's due. A
+        scored call carries its score.
         """
         if ticker is not None:
             try:
@@ -935,6 +947,7 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
                 raise ToolError(str(error)) from error
         try:
             decisions = journal.decisions()
+            scores = journal.scores()
         except CACHE_ERRORS as error:
             logger.error(f"get_decisions: {error}")
             raise ToolError(
@@ -946,22 +959,20 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
         matching = [
             JournalEntry(
                 **decision.model_dump(),
-                status=_status(decision),
-                horizon_passed=(
-                    newest_closed_session(decision.exchange, now)
-                    >= decision.horizon_ends
-                ),
+                status=_status(decision, scores),
+                horizon_passed=_horizon_passed(decision, now),
+                score=scores.get(decision.id),
             )
             for decision in reversed(decisions)
             if (ticker is None or decision.ticker == ticker)
-            and (status == "all" or _status(decision) == status)
+            and (status == "all" or _status(decision, scores) == status)
         ]
         logger.info(
             f"get_decisions status={status} ticker={ticker}: {len(matching)} match"
         )
         note = None
         if not matching:
-            note = _no_match_note(status, ticker)
+            note = _no_match_note(status, ticker, bool(scores))
         elif len(matching) > limit:
             note = (
                 f"Showing the newest {limit} of {len(matching)} matching calls. "
