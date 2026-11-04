@@ -69,6 +69,19 @@ def test_a_usd_stock_is_measured_in_euros() -> None:
     assert score.benchmark.start.rate is None
 
 
+def test_a_rate_is_the_close_get_candles_shows() -> None:
+    # get_candles rounds every close to 4 decimals, so the operator can
+    # recompute a score from what it shows.
+    stock = candles({START: 100.0, END: 105.0})
+    rates = candles({START: 1.157756, END: 1.150951})
+
+    score = score_call(apple(), stock, [], IWDA, rates, SCORED_AT)
+
+    assert score.start.rate == 1.1578
+    assert score.end.rate == 1.151
+    assert score.return_ == round(105 / 1.151 / (100 / 1.1578) - 1, 6)
+
+
 def test_dividends_inside_the_horizon_count() -> None:
     dividends = [
         Dividend(START, 1.0),
