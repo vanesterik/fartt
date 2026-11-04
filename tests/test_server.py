@@ -296,6 +296,7 @@ async def test_the_tools_are_listed(tmp_path: Path) -> None:
         "get_support_resistance",
         "get_trend",
         "record_decision",
+        "score_decisions",
     ]
 
 
