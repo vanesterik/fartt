@@ -129,8 +129,10 @@ def _ids(content: dict[str, Any]) -> list[int]:
 
 
 def _stored(entry: dict[str, Any]) -> dict[str, Any]:
-    """An entry as get_decisions returns it, without the two fields it adds."""
-    return {k: v for k, v in entry.items() if k not in ("status", "horizon_passed")}
+    """An entry as get_decisions returns it, without the fields it adds."""
+    return {
+        k: v for k, v in entry.items() if k not in ("status", "horizon_passed", "score")
+    }
 
 
 def _journal(assets_dir: Path) -> Path:

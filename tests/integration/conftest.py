@@ -21,7 +21,7 @@ from fartt.data import YFinanceProvider
 from fartt.stock_cache import StockCache
 
 # Every ticker an integration test reads from a filled cache.
-LIVE_TICKERS = ("ASML.AS", "AAPL", "GOOG", "ARM", "IWDA.AS")
+LIVE_TICKERS = ("ASML.AS", "AAPL", "GOOG", "ARM", "IWDA.AS", "EURUSD=X")
 
 
 @pytest.fixture(scope="session")

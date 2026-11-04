@@ -388,6 +388,7 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
     @issue-119 @AC8 Should offer the read tools plus record_decision only.
 
     get_decisions (#120) reads the journal back; it joins as a read-only tool.
+    score_decisions (#121) appends score lines and never edits or removes one.
     """
     async with _server(live_assets) as client:
         tools = (await client.list_tools()).tools
@@ -401,6 +402,7 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
             "get_support_resistance",
             "record_decision",
             "get_decisions",
+            "score_decisions",
         ]
     )
     record = next(tool for tool in tools if tool.name == "record_decision")
@@ -409,6 +411,9 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
     reader = next(tool for tool in tools if tool.name == "get_decisions")
     assert reader.annotations is not None
     assert reader.annotations.read_only_hint is True
+    scorer = next(tool for tool in tools if tool.name == "score_decisions")
+    assert scorer.annotations is not None
+    assert scorer.annotations.destructive_hint is False
 
 
 async def test_should_normalise_the_ticker_and_keep_the_reasoning_as_sent(
