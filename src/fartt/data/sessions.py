@@ -107,6 +107,23 @@ def missing_sessions(exchange: str, dates: Sequence[date]) -> list[date]:
     ]
 
 
+def last_session_of_week(exchange: str, day: date) -> date | None:
+    """
+    The last scheduled session of `exchange` in the ISO week (Monday to
+    Sunday) that holds `day`. `None` when that week has no session, or when
+    it lies outside the calendar's range (about 20 years back, a year ahead).
+
+    """
+    monday = day - timedelta(days=day.weekday())
+    try:
+        sessions = _calendar(exchange).sessions_in_range(
+            monday, monday + timedelta(days=6)
+        )
+    except ValueError:  # exchange_calendars' DateOutOfBounds
+        return None
+    return sessions[-1].date() if len(sessions) else None
+
+
 def exchange_date(exchange: str, moment: datetime) -> date:
     """The date `moment` (timezone-aware) falls on in the exchange's time zone."""
     return moment.astimezone(_calendar(exchange).tz).date()
