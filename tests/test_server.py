@@ -19,7 +19,7 @@ from fartt.journal import SIGNALS, Decision, DecisionDraft, Journal, Signal
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
-from tests.fakes import FakeProvider, decision_draft, stock_candle
+from tests.fakes import FakeProvider, decision_draft, decision_score, stock_candle
 
 ROOT = Path(__file__).resolve().parents[1]
 ASML = Listing("ASML.AS", "ASML Holding N.V.", "EUR", "XAMS")
@@ -1290,7 +1290,9 @@ async def get_decisions(cache: StockCache, **arguments: Any) -> Any:
 
 def without_read_fields(entry: dict[str, Any]) -> dict[str, Any]:
     """An entry as get_decisions returns it, less what it adds to the stored call."""
-    return {k: v for k, v in entry.items() if k not in ("status", "horizon_passed")}
+    return {
+        k: v for k, v in entry.items() if k not in ("status", "horizon_passed", "score")
+    }
 
 
 def three_calls(cache: StockCache) -> list[Decision]:
@@ -1571,8 +1573,62 @@ async def test_ten_of_the_largest_calls_fit_under_60000_characters(
         signals=[Signal(name=name, stance="for", note="n" * 200) for name in SIGNALS],
     )
     seed(cache, *(largest for _ in range(12)))
+    for decision_id in range(1, 13):
+        journal_of(cache).append_score(decision_score(decision_id))
 
     result = await get_decisions(cache)
 
+    assert all(entry["score"] for entry in result.structured_content["decisions"])
+
     assert len(result.structured_content["decisions"]) == 10
     assert len(json.dumps(result.structured_content)) < 60_000
+
+
+@pytest.mark.anyio
+async def test_a_scored_call_shows_its_score(tmp_path: Path) -> None:
+    # @AC9
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    three_calls(cache)
+    journal_of(cache).append_score(decision_score(2))
+
+    result = await get_decisions(cache)
+
+    entries = {entry["id"]: entry for entry in result.structured_content["decisions"]}
+    assert entries[2]["status"] == "scored"
+    assert entries[2]["score"] == decision_score(2).model_dump(
+        mode="json", by_alias=True
+    )
+    assert entries[2]["score"]["return"] == 0.045069
+    for open_id in (1, 3):
+        assert entries[open_id]["status"] == "open"
+        assert entries[open_id]["score"] is None
+
+
+@pytest.mark.anyio
+async def test_status_filters_by_score(tmp_path: Path) -> None:
+    # @AC9
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    three_calls(cache)
+    journal_of(cache).append_score(decision_score(2))
+
+    scored = await get_decisions(cache, status="scored")
+    still_open = await get_decisions(cache, status="open")
+
+    assert [e["id"] for e in scored.structured_content["decisions"]] == [2]
+    assert scored.structured_content["total"] == 1
+    assert [e["id"] for e in still_open.structured_content["decisions"]] == [3, 1]
+
+
+@pytest.mark.anyio
+async def test_no_scored_match_for_a_ticker_says_nothing_of_other_scores(
+    tmp_path: Path,
+) -> None:
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    three_calls(cache)
+    journal_of(cache).append_score(decision_score(1))
+
+    result = await get_decisions(cache, status="scored", ticker="AAPL")
+
+    assert result.structured_content["note"] == (
+        "No calls match status=scored, ticker=AAPL."
+    )

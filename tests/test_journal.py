@@ -1,12 +1,11 @@
 import json
-from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from fartt.journal import BenchmarkScore, Journal, Leg, Score
+from fartt.journal import Journal
 from tests.fakes import decision_draft
+from tests.fakes import decision_score as score
 
 
 def journal_file(directory: Path) -> Path:
@@ -128,27 +127,6 @@ def test_the_directory_is_created_on_the_first_write(tmp_path: Path) -> None:
     journal.append(decision_draft())
 
     assert journal_file(directory).exists()
-
-
-def score(decision_id: int, **changes: Any) -> Score:
-    """A score for call `decision_id` (ASML.AS 612.4 -> 640, IWDA 101.25 -> 104)."""
-    fields: dict[str, Any] = {
-        "decision_id": decision_id,
-        "scored_at": datetime(2026, 11, 27, 9, 0, tzinfo=UTC),
-        "start": Leg(session=date(2026, 10, 29), close=612.4),
-        "end": Leg(session=date(2026, 11, 26), close=640.0),
-        "dividends": 0.0,
-        "return_": 0.045069,
-        "benchmark": BenchmarkScore(
-            ticker="IWDA.AS",
-            start=Leg(session=date(2026, 10, 29), close=101.25),
-            end=Leg(session=date(2026, 11, 26), close=104.0),
-            return_=0.02716,
-        ),
-        "excess_return": 0.017909,
-        "right": True,
-    }
-    return Score(**(fields | changes))
 
 
 def test_a_score_round_trips(tmp_path: Path) -> None:
