@@ -15,7 +15,7 @@ from fartt.data import (
     exchange_calendar,
     session_after,
 )
-from fartt.journal import Decision, DecisionDraft, Journal
+from fartt.journal import SIGNALS, Decision, DecisionDraft, Journal, Signal
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
@@ -1491,3 +1491,56 @@ async def test_get_decisions_never_calls_the_provider(tmp_path: Path) -> None:
     assert not result.is_error, result.content
     assert len(result.structured_content["decisions"]) == 1
     assert fake.history_calls == []
+
+
+@pytest.mark.anyio
+async def test_get_decisions_returns_the_newest_up_to_the_limit(
+    tmp_path: Path,
+) -> None:
+    # @AC4
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    seed(cache, *(decision_draft() for _ in range(12)))
+
+    default = (await get_decisions(cache)).structured_content
+    three = (await get_decisions(cache, limit=3)).structured_content
+
+    assert [entry["id"] for entry in default["decisions"]] == list(range(12, 2, -1))
+    assert default["total"] == 12
+    for word in ("10", "12", "ticker", "status"):
+        assert word in default["note"]
+    assert [entry["id"] for entry in three["decisions"]] == [12, 11, 10]
+    assert three["total"] == 12
+    assert "3" in three["note"]
+    assert "12" in three["note"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("limit", [0, 11])
+async def test_get_decisions_rejects_a_limit_outside_1_to_10(
+    tmp_path: Path, limit: int
+) -> None:
+    # @AC4
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    result = await get_decisions(cache, limit=limit)
+
+    assert result.is_error
+    assert "limit" in result.content[0].text
+
+
+@pytest.mark.anyio
+async def test_ten_of_the_largest_calls_fit_under_60000_characters(
+    tmp_path: Path,
+) -> None:
+    # @AC9
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    largest = decision_draft(
+        reasoning="x" * 2000,
+        signals=[Signal(name=name, stance="for", note="n" * 200) for name in SIGNALS],
+    )
+    seed(cache, *(largest for _ in range(12)))
+
+    result = await get_decisions(cache)
+
+    assert len(result.structured_content["decisions"]) == 10
+    assert len(json.dumps(result.structured_content)) < 60_000

@@ -53,6 +53,10 @@ from fartt.technical import (
 # numbers cost roughly one token per three characters. 200 compact rows stay
 # well under that, and the agent needs recent context, not years of history.
 MAX_CANDLES = 200
+# A worst-case journal entry (2,000 characters of reasoning, every signal with
+# a 200-character note) is about 4,500 characters of JSON, so ten stay well
+# under that limit. Narrowing by ticker or status reaches older calls.
+MAX_DECISIONS = 10
 
 COLUMNS = ["date", "open", "high", "low", "close", "volume"]
 
@@ -310,11 +314,14 @@ class JournalEntry(Decision):
 
 class DecisionsResult(BaseModel):
     decisions: list[JournalEntry] = Field(
-        description="The matching calls, newest first."
+        description="The newest matching calls, newest first, up to the limit."
     )
-    total: int = Field(description="How many calls matched the filters.")
+    total: int = Field(
+        description="How many calls matched the filters, before the limit."
+    )
     note: str | None = Field(
-        default=None, description="Why the list is empty, if it is."
+        default=None,
+        description="Why the list is empty or cut short, if it is.",
     )
 
 
@@ -902,8 +909,12 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
         ] = None,
         limit: Annotated[
             int,
-            Field(description="How many of the newest matching calls to return."),
-        ] = 10,
+            Field(
+                ge=1,
+                le=MAX_DECISIONS,
+                description="How many of the newest matching calls to return.",
+            ),
+        ] = MAX_DECISIONS,
     ) -> DecisionsResult:
         """
         Read the journal back: the calls record_decision recorded, newest
@@ -941,10 +952,16 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
         logger.info(
             f"get_decisions status={status} ticker={ticker}: {len(matching)} match"
         )
+        note = None
+        if not matching:
+            note = _no_match_note(status, ticker)
+        elif len(matching) > limit:
+            note = (
+                f"Showing the newest {limit} of {len(matching)} matching calls. "
+                "Narrow the list with ticker or status."
+            )
         return DecisionsResult(
-            decisions=matching,
-            total=len(matching),
-            note=None if matching else _no_match_note(status, ticker),
+            decisions=matching[:limit], total=len(matching), note=note
         )
 
     return server
