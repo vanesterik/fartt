@@ -35,7 +35,7 @@ task lint                        # ruff format --check + ruff check, without wri
 task format                      # ruff format + ruff check --fix
 task typecheck                   # pyright (strict mode, src/ only — tests/ excluded)
 task test                        # pytest, offline
-task test:network                # live Yahoo tests + the end-to-end check of the server over stdio (deselected by default)
+task test:network                # live Yahoo tests + the end-to-end check of the server over stdio, in parallel (deselected by default)
 task pre-commit                  # the pre-commit hook's checks over staged files
 task outdated                    # direct dependencies with a newer release
 ```
@@ -49,7 +49,7 @@ uv sync                          # install dependencies
 uv run fartt                     # run the MCP server over stdio (Claude Code does this from .mcp.json)
 uv run pytest                    # run test suite
 uv run pytest tests/test_server.py::test_count_beyond_the_history_returns_what_is_cached  # single test
-uv run pytest -m network         # run the live tests (deselected by default)
+uv run pytest -m network -n auto # run the live tests, in parallel (deselected by default)
 uv run ruff format .             # format
 uv run ruff check . --fix        # lint
 uv run pyright                   # type check (strict mode, src/ only — tests/ excluded)

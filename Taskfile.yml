@@ -55,12 +55,15 @@ tasks:
   # The tests marked `network`, which the default suite deselects: the live
   # Yahoo Finance tests and the end-to-end check of the server over stdio
   # (tests/integration). They call Yahoo, so `check` leaves them out: a gate must not
-  # fail because Yahoo is down.
+  # fail because Yahoo is down. They run in parallel (pytest-xdist): most of
+  # their time is starting a server per test, and the workers share one
+  # download (tests/integration/conftest.py). The unit tests stay serial;
+  # they take about two seconds, less than starting the workers costs.
   test:network:
     desc: Run the tests that call Yahoo Finance, including the end-to-end server check
     prefix: test:network
     cmds:
-      - uv run pytest -m network
+      - uv run pytest -m network -n auto
 
   # On-demand counterpart to Dependabot's weekly pull requests
   # (.github/dependabot.yml): direct dependencies with a newer release.
