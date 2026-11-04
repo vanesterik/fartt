@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from fartt.data import (
     FX_SUFFIX,
     Candle,
+    Dividend,
     Listing,
     ProviderUnavailable,
     UnknownTicker,
@@ -1129,7 +1130,9 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
             except CACHE_ERRORS as error:
                 raise _cache_error("score_decisions", ticker, error) from error
 
+        # Each ticker's candles and dividends are read once per run too.
         read: dict[str, list[Candle]] = {}
+        paid: dict[str, list[Dividend]] = {}
 
         def candles(ticker: str) -> list[Candle]:
             if ticker not in read:
@@ -1138,6 +1141,14 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
                 except CACHE_ERRORS as error:
                     raise _cache_error("score_decisions", ticker, error) from error
             return read[ticker]
+
+        def dividends(ticker: str) -> list[Dividend]:
+            if ticker not in paid:
+                try:
+                    paid[ticker], _ = cache.events(ticker)
+                except CACHE_ERRORS as error:
+                    raise _cache_error("score_decisions", ticker, error) from error
+            return paid[ticker]
 
         scored: list[ScoredCall] = []
         not_scored: list[NotScoredCall] = []
@@ -1148,16 +1159,10 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
             reason = next((unlisted[t] for t in tickers if t in unlisted), None)
             if reason is None:
                 try:
-                    dividends, _ = cache.events(decision.ticker)
-                except CACHE_ERRORS as error:
-                    raise _cache_error(
-                        "score_decisions", decision.ticker, error
-                    ) from error
-                try:
                     score = score_call(
                         decision,
                         candles(decision.ticker),
-                        dividends,
+                        dividends(decision.ticker),
                         candles(BENCHMARK),
                         candles(pair) if pair else None,
                         cache.clock().replace(microsecond=0),
