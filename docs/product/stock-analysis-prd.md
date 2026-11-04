@@ -59,16 +59,16 @@ The operator picks stocks today, with their own money, and the five problems abo
 
 ### End state
 
-The server places real orders through Interactive Brokers, each approved by the operator, for trade plans the agent proposed and the server checked against the risk limits. It gets there in three stages, each opened by a gate in section 6:
+The server places real orders through Saxo, each approved by the operator, for trade plans the agent proposed and the server checked against the risk limits. It gets there in three stages, each opened by a gate in section 6:
 
 1. **Paper:** every trade plan is paper traded, and the journal scores it.
-2. **Small real positions, placed by hand:** the operator places the agent's plans in IBKR personally, in small amounts. The server never touches the real account.
-3. **Server-placed orders, approved by hand:** epic J places the orders through the IBKR API after the operator approves each one.
+2. **Small real positions, placed by hand:** the operator places the agent's plans in Saxo personally, in small amounts. The server never touches the real account.
+3. **Server-placed orders, approved by hand:** epic J places the orders through Saxo's OpenAPI after the operator approves each one.
 
 ### Broker and data
 
-- **Broker: Interactive Brokers** (IBKR Ireland for Dutch residents). It has mature Web and TWS APIs, access to Euronext and US markets, a free paper trading account, and paid market data per exchange (subscribe only to what's used). **Saxo** is the fallback: it has an OpenAPI with a free simulation environment, but higher fees. **DEGIRO** is out because it has no official API.
-- **Development data: yfinance** (free, delayed), behind a `DataProvider` interface. It switches to IBKR's feed once the tooling works.
+- **Broker: Saxo** (decided 2026-11-04). It has an OpenAPI with a free simulation environment, access to every exchange in the universe 🔶, and paid real-time market data per exchange (subscribe only to what's used). Its fees are higher than Interactive Brokers', and USD trades from a EUR account pay a currency conversion markup, both counted in the costs below. **Interactive Brokers** was the first choice and is the fallback. **DEGIRO** is out because it has no official API.
+- **Development data: yfinance** (free, delayed), behind a `DataProvider` interface. It switches to Saxo's OpenAPI feed once the tooling works.
 
 ## 5. Solution Overview
 
@@ -127,7 +127,7 @@ All of Euronext and the US exchanges. The screen's liquidity and market-cap filt
 | H | `plan_trade(...)` | Entry, stop, target, size, reward-to-risk; rejects plans that break a limit |
 | H | `get_portfolio()` | Paper positions against their plans, P&L after costs |
 | I | `backtest_rule(rule)` | Return, hit rate, drawdown and trades after costs, with a walk-forward split |
-| J | `place_order(plan)` | Places an approved plan's limit order and its stop through IBKR |
+| J | `place_order(plan)` | Places an approved plan's limit order and its stop through Saxo's OpenAPI |
 
 Tool names and outputs are settled in each epic's design; this table is the intent.
 
@@ -135,7 +135,7 @@ Tool names and outputs are settled in each epic's design; this table is the inte
 
 **Daily check-in (after the US close).** The server has already settled paper positions whose stop or target was hit in the day's candles. The operator asks for a check-in, and the agent calls `get_portfolio`, `score_decisions` and `get_market_regime`. It then reports positions against their plans, calls whose horizon passed and how they scored, and any change in the market regime.
 
-**Analysis.** The operator invokes `analyze_ticker` with a ticker, or with none to start from the screen. The agent works through the eight steps. A step without a tool yet is named as skipped. The analysis ends in a trade plan (`plan_trade`) or a decision not to trade, and both go into the journal (`record_decision`). In stage 1 an accepted plan opens a paper position. In stage 2 the operator places it in IBKR by hand. In stage 3 `place_order` places it after the operator approves.
+**Analysis.** The operator invokes `analyze_ticker` with a ticker, or with none to start from the screen. The agent works through the eight steps. A step without a tool yet is named as skipped. The analysis ends in a trade plan (`plan_trade`) or a decision not to trade, and both go into the journal (`record_decision`). In stage 1 an accepted plan opens a paper position. In stage 2 the operator places it in Saxo by hand. In stage 3 `place_order` places it after the operator approves.
 
 ## 6. Success Metrics
 
@@ -169,7 +169,7 @@ Tool names and outputs are settled in each epic's design; this table is the inte
 | Maximum open positions | 8 |
 | Minimum reward-to-risk | 2 |
 | Kill switch | blocks new plans at 16% below the portfolio's peak, until the operator resets it outside the agent |
-| Costs | IBKR's tiered commission per exchange, plus 0.1% slippage per leg 🔶 |
+| Costs | Saxo's commission per exchange, its currency conversion markup on USD trades, plus 0.1% slippage per leg 🔶 |
 
 Only the operator can change these, in a config file outside the agent's reach. The kill switch matches the maximum open risk: 8 positions at 2% each put 16% at risk, so every stop being hit as planned brings the portfolio to the threshold but not past it. Only losing more than the plans allowed trips it (see risk 5).
 
@@ -195,7 +195,7 @@ Built in this order. Each epic is a GitHub issue on the [project board](https://
 | G. Fundamentals & Screening | #94 | `get_fundamentals`, `compare_peers`, `screen`, `get_events`, `estimate_value` |
 | H. Trade Plan & Risk | #95 | Risk config, `plan_trade`, paper portfolio, kill switch |
 | I. Validation | #96 | `backtest_rule`, walk-forward checks |
-| J. Live Orders | #101 | IBKR order placement with approval, behind the stage 2 → 3 gate |
+| J. Live Orders | #101 | Saxo order placement with approval, behind the stage 2 → 3 gate |
 
 🔵 Paper trading starts once epic H lands, so the 3-month clock for the first gate starts after H, not after the walking skeleton. Before then, decisions are journalled and scored, but not as sized plans. Moving H before E–G would start that clock sooner (see section 10).
 
@@ -226,7 +226,7 @@ Stories are written just in time, one epic at a time, as GitHub issues in the Us
 ### Dependencies
 
 - **yfinance** for development data. It's unofficial and can break or be rate-limited without notice.
-- **An IBKR account and its paper trading account**, and later market data subscriptions for Euronext and the US. Open them while developing on yfinance.
+- **A Saxo account and access to its OpenAPI simulation environment**, and later market data subscriptions for Euronext and the US. Open them while developing on yfinance.
 - **The MCP SDK** and Claude Code's MCP support.
 
 ### Risks and mitigations
@@ -243,6 +243,6 @@ Stories are written just in time, one epic at a time, as GitHub issues in the Us
 
 1. 🔵 **Benchmark:** VWCE or IWDA. Decided in epic C's design.
 2. 🔵 **Order of epics E–H.** Moving H (paper portfolio) before E–G starts the 3-month paper clock sooner. Decide at the walking-skeleton milestone.
-3. 🔵 **Costs per exchange:** IBKR's tiered commissions for Euronext and the US, and FX costs, verified against the IBKR account once it's open.
+3. 🔵 **Costs per exchange:** Saxo's commissions for Euronext and the US, and its currency conversion markup, verified against the Saxo account once it's open.
 4. 🔵 **Horizon of a call:** fixed per call (chosen by the agent), or the plan's stop/target with a maximum holding period. Decided in epic C's design.
 5. 🔵 **Macro events** for step 1: which source, given that yfinance doesn't provide an economic calendar. Decided in epic F's design.

@@ -36,7 +36,7 @@ class YFinanceProvider:
     """
     `DataProvider` implementation backed by yfinance -- the only module in
     the project that imports yfinance, so the provider stays swappable for
-    IBKR's feed.
+    Saxo's feed.
 
     Prices come from `Ticker.history(auto_adjust=False, actions=True)`:
     split-adjusted OHLC, with dividends and splits as separate columns.
