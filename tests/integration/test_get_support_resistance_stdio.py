@@ -307,6 +307,36 @@ async def test_should_have_no_resistance_at_a_new_high(
     _assert_zones_hold_the_criteria(levels, cached)
 
 
+SWEEP_SESSIONS = 120
+SWEEP_STEP = 12
+
+
+@pytest.mark.parametrize("ticker", TEST_TICKERS)
+async def test_should_hold_the_criteria_on_past_sessions(
+    tmp_path: Path, ticker: str
+) -> None:
+    """
+    @issue-109 @AC2 @AC3 @AC4 @AC5 @AC7 @AC10 Should hold the zone criteria
+    with the history cut at each of ten past sessions, not only today's.
+    """
+    # Given a full history, cut at past sessions spread over the last 120.
+    async with _server(tmp_path / "live") as client:
+        await _call(client, "get_candles", ticker=ticker, count=1)
+    dates = [
+        candle["date"]
+        for candle in _cached(tmp_path / "live", ticker)[-SWEEP_SESSIONS::SWEEP_STEP]
+    ]
+
+    for date in dates:
+        cut = tmp_path / f"cut-{date}"
+        _cut_history(tmp_path / "live", cut, ticker, date)
+        # When the agent asks with only that history cached.
+        async with _server(cut, PROVIDER_DOWN) as client:
+            levels = await _call(client, "get_support_resistance", ticker=ticker)
+        # Then every listed zone holds the criteria against those sessions.
+        _assert_zones_hold_the_criteria(levels, _cached(cut, ticker))
+
+
 async def test_should_serve_a_stale_cache_when_the_provider_is_unreachable(
     tmp_path: Path,
 ) -> None:
