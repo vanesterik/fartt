@@ -138,7 +138,7 @@ class BenchmarkScore(BaseModel):
         description="Its last session on or before the call's horizon_ends."
     )
     return_: float = Field(
-        alias="return",
+        validation_alias="return",
         serialization_alias="return",
         description="Its return over the horizon, in EUR: 0.004 means 0.4%.",
     )
@@ -160,7 +160,7 @@ class Score(BaseModel):
         )
     )
     return_: float = Field(
-        alias="return",
+        validation_alias="return",
         serialization_alias="return",
         description="The stock's return with dividends, in EUR: 0.004 means 0.4%.",
     )
