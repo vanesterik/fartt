@@ -21,7 +21,7 @@ dependencies = [
     "pydantic>=2.12.5",
     "python-dotenv>=1.2.4",
     "ta-lib>=0.7.1",
-    "yfinance>=1.7.0",
+    "yfinance>=1.8.0",
 ]
 
 [dependency-groups]
