@@ -193,8 +193,12 @@ def test_an_fx_pair_is_a_ticker() -> None:
     assert calendar_for("EURUSD=X") == "24/5"
 
 
-@pytest.mark.parametrize("ticker", ["A/B", "..\\X", "../x"])
-def test_paths_are_still_rejected(ticker: str) -> None:
+@pytest.mark.parametrize(
+    "ticker", ["A/B", "..\\X", "../x", "GC=F", "==", "=X", "EUR=USD=X", "A=XB"]
+)
+def test_paths_and_other_equals_signs_are_rejected(ticker: str) -> None:
+    # `=` is only the ending of an exchange rate, so a future (GC=F) can't
+    # pass for an NYSE stock.
     with pytest.raises(UnknownTicker):
         normalise_ticker(ticker)
 
