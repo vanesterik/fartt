@@ -27,7 +27,7 @@ class DataProvider(Protocol):
 
     `YFinanceProvider` (`yfinance_provider.py`) is the implementation; tests
     use a fake. Tickers use Yahoo's format: `AAPL` for a US listing,
-    `ASML.AS` for Euronext Amsterdam. A future IBKR provider translates its
+    `ASML.AS` for Euronext Amsterdam. A future Saxo provider translates its
     own symbols to it.
 
     Every method raises `UnsupportedExchange` for a suffix outside the
