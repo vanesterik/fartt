@@ -259,6 +259,25 @@ async def test_unreachable_with_the_data_cached_scores(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_another_tickers_outage_isnt_blamed(tmp_path: Path) -> None:
+    # @AC7: AAPL's candle isn't published; IWDA.AS, stale but holding the
+    # sessions the score needs, is the one the provider can't answer for.
+    aapl = [day for day in sessions("XNYS", 70) if day != END]
+    iwda = [day for day in sessions("XAMS", 70) if day <= date(2026, 10, 1)]
+    provider = fake(**{"AAPL": history(aapl), "IWDA.AS": history(iwda, first=50.0)})
+    cache = cache_for(provider, tmp_path)
+    cache.update("IWDA.AS")
+    provider.unreachable.add("IWDA.AS")
+    seed(cache, apple_call())
+
+    result = await score_decisions(cache)
+
+    assert result.structured_content["not_scored"][0]["reason"] == (
+        "AAPL's close for 2026-09-29 isn't available yet"
+    )
+
+
+@pytest.mark.anyio
 async def test_an_unpublished_candle_stays_open(tmp_path: Path) -> None:
     # @AC7
     days = [day for day in sessions("XAMS", 70) if day != END]

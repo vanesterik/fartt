@@ -21,7 +21,13 @@ below. Pure functions, no I/O.
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 
-from fartt.data import Candle, Dividend, calendar_for, session_on_or_before
+from fartt.data import (
+    FX_SUFFIX,
+    Candle,
+    Dividend,
+    calendar_for,
+    session_on_or_before,
+)
 from fartt.journal import BENCHMARK, BenchmarkScore, Decision, Leg, Score
 
 # How far back a rate may come from when Yahoo has no FX candle on the day.
@@ -33,7 +39,15 @@ RETURN_DECIMALS = 6
 
 
 class Unscorable(Exception):
-    """A call that can't be scored yet; `str()` is the reason."""
+    """
+    A call that can't be scored yet: `str()` is the reason, and `ticker`
+    the stock, benchmark or exchange rate whose close is missing.
+
+    """
+
+    def __init__(self, ticker: str, reason: str) -> None:
+        super().__init__(reason)
+        self.ticker = ticker
 
 
 def score_call(
@@ -95,7 +109,9 @@ def _close(ticker: str, candles: Sequence[Candle], day: date) -> float:
     for candle in candles:
         if candle.date == day:
             return round(candle.close, PRICE_DECIMALS)
-    raise Unscorable(f"{ticker}'s close for {day.isoformat()} isn't available yet")
+    raise Unscorable(
+        ticker, f"{ticker}'s close for {day.isoformat()} isn't available yet"
+    )
 
 
 def _rate(currency: str, rates: Sequence[Candle], day: date) -> float:
@@ -107,13 +123,15 @@ def _rate(currency: str, rates: Sequence[Candle], day: date) -> float:
     """
     if not rates or max(c.date for c in rates) < day:
         raise Unscorable(
-            f"the EUR/{currency} rate for {day.isoformat()} isn't available yet"
+            f"EUR{currency}{FX_SUFFIX}",
+            f"the EUR/{currency} rate for {day.isoformat()} isn't available yet",
         )
     earliest = day - timedelta(days=RATE_LOOKBACK_DAYS)
     within = [c for c in rates if earliest <= c.date <= day]
     if not within:
         raise Unscorable(
+            f"EUR{currency}{FX_SUFFIX}",
             f"there's no EUR/{currency} rate within {RATE_LOOKBACK_DAYS} days "
-            f"before {day.isoformat()}"
+            f"before {day.isoformat()}",
         )
     return round(max(within, key=lambda c: c.date).close, RATE_DECIMALS)
