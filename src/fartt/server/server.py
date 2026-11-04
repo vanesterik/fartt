@@ -1,7 +1,7 @@
 import os
 import sys
 from pathlib import Path
-from typing import Annotated, NamedTuple
+from typing import Annotated, Literal, NamedTuple
 
 from dotenv import dotenv_values
 from loguru import logger
@@ -20,6 +20,7 @@ from fartt.data import (
     exchange_date,
     market_status,
     missing_sessions,
+    newest_closed_session,
     normalise_ticker,
     session_after,
 )
@@ -77,7 +78,8 @@ INSTRUCTIONS = (
     "signals: weigh them together. get_support_resistance's signs say which "
     "way each points (holding or breaking); they aren't summed into a verdict. "
     "Record every call, buy or pass, with record_decision when it's made; "
-    "entries can't be changed afterwards."
+    "entries can't be changed afterwards. Before a daily check-in or a "
+    "re-analysis of a ticker, read the earlier calls with get_decisions."
 )
 
 MIN_HORIZON = 5
@@ -287,6 +289,50 @@ class LevelsResult(BaseModel):
         )
     )
     warning: str | None = Field(default=None, description="What's stale, if anything.")
+
+
+Status = Literal["open", "scored"]
+
+
+class JournalEntry(Decision):
+    """A call as record_decision stored it, read back with its state now."""
+
+    status: Status = Field(
+        description="open until the call has been scored, then scored."
+    )
+    horizon_passed: bool = Field(
+        description=(
+            "True once the session the horizon ends on has closed on the "
+            "stock's exchange. An open call with it true is due for scoring."
+        )
+    )
+
+
+class DecisionsResult(BaseModel):
+    decisions: list[JournalEntry] = Field(
+        description="The matching calls, newest first."
+    )
+    total: int = Field(description="How many calls matched the filters.")
+    note: str | None = Field(
+        default=None, description="Why the list is empty, if it is."
+    )
+
+
+def _status(decision: Decision) -> Status:
+    # Nothing is scored until score_decisions (#121) lands; it changes this.
+    return "open"
+
+
+def _no_match_note(status: str, ticker: str | None) -> str:
+    filters = [f"status={status}"] if status != "all" else []
+    if ticker is not None:
+        filters.append(f"ticker={ticker}")
+    if not filters:
+        return "No calls are recorded yet."
+    note = f"No calls match {', '.join(filters)}."
+    if status == "scored":
+        note += " No call has been scored yet."
+    return note
 
 
 def _rounded(value: float | None, decimals: int = DECIMALS) -> float | None:
@@ -831,6 +877,75 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
             f"{recorded.horizon} sessions"
         )
         return recorded
+
+    @server.tool(
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False)
+    )
+    def get_decisions(
+        status: Annotated[
+            Literal["open", "scored", "all"],
+            Field(
+                description=(
+                    "open: calls not scored yet, including those whose horizon "
+                    "has passed; scored: calls with a score; all: both."
+                )
+            ),
+        ] = "all",
+        ticker: Annotated[
+            str | None,
+            Field(
+                description=(
+                    "Only the calls on this ticker, in Yahoo's format: AAPL, "
+                    "ASML.AS. Leave out for every ticker."
+                )
+            ),
+        ] = None,
+        limit: Annotated[
+            int,
+            Field(description="How many of the newest matching calls to return."),
+        ] = 10,
+    ) -> DecisionsResult:
+        """
+        Read the journal back: the calls record_decision recorded, newest
+        first, filtered by status and ticker. A call is open until it's
+        scored; horizon_passed says whether it's due for scoring.
+        """
+        if ticker is not None:
+            try:
+                ticker = normalise_ticker(ticker)
+            except UnknownTicker as error:
+                raise ToolError(str(error)) from error
+        try:
+            decisions = journal.decisions()
+        except CACHE_ERRORS as error:
+            logger.error(f"get_decisions: {error}")
+            raise ToolError(
+                f"The journal at {journal.path} can't be read: {error}. The "
+                "operator must fix the file; the server never rewrites it."
+            ) from error
+
+        now = cache.clock()
+        matching = [
+            JournalEntry(
+                **decision.model_dump(),
+                status=_status(decision),
+                horizon_passed=(
+                    newest_closed_session(decision.exchange, now)
+                    >= decision.horizon_ends
+                ),
+            )
+            for decision in reversed(decisions)
+            if (ticker is None or decision.ticker == ticker)
+            and (status == "all" or _status(decision) == status)
+        ]
+        logger.info(
+            f"get_decisions status={status} ticker={ticker}: {len(matching)} match"
+        )
+        return DecisionsResult(
+            decisions=matching,
+            total=len(matching),
+            note=None if matching else _no_match_note(status, ticker),
+        )
 
     return server
 

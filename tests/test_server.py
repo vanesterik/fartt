@@ -15,11 +15,11 @@ from fartt.data import (
     exchange_calendar,
     session_after,
 )
-from fartt.journal import Journal
+from fartt.journal import Decision, DecisionDraft, Journal
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
-from tests.fakes import FakeProvider, stock_candle
+from tests.fakes import FakeProvider, decision_draft, stock_candle
 
 ROOT = Path(__file__).resolve().parents[1]
 ASML = Listing("ASML.AS", "ASML Holding N.V.", "EUR", "XAMS")
@@ -290,6 +290,7 @@ async def test_the_tools_are_listed(tmp_path: Path) -> None:
 
     assert sorted(tool.name for tool in tools) == [
         "get_candles",
+        "get_decisions",
         "get_indicators",
         "get_quote",
         "get_support_resistance",
@@ -1265,3 +1266,228 @@ async def test_a_horizon_the_calendar_cannot_place_is_a_tool_error(
 
 def test_the_instructions_say_to_record_every_call() -> None:
     assert "record_decision" in server_module.INSTRUCTIONS
+
+
+def seed(cache: StockCache, *drafts: DecisionDraft) -> list[Decision]:
+    journal = journal_of(cache)
+    return [journal.append(draft) for draft in drafts]
+
+
+async def get_decisions(cache: StockCache, **arguments: Any) -> Any:
+    return await call(cache, arguments, "get_decisions")
+
+
+def without_read_fields(entry: dict[str, Any]) -> dict[str, Any]:
+    """An entry as get_decisions returns it, less what it adds to the stored call."""
+    return {k: v for k, v in entry.items() if k not in ("status", "horizon_passed")}
+
+
+def three_calls(cache: StockCache) -> list[Decision]:
+    return seed(
+        cache,
+        decision_draft(),
+        decision_draft(ticker="AAPL", currency="USD", exchange="XNYS"),
+        decision_draft(direction="pass"),
+    )
+
+
+@pytest.mark.anyio
+async def test_get_decisions_returns_open_calls_newest_first(tmp_path: Path) -> None:
+    # @AC1
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    seeded = three_calls(cache)
+
+    result = await get_decisions(cache, status="open")
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert [entry["id"] for entry in content["decisions"]] == [3, 2, 1]
+    assert content["total"] == 3
+    assert content["note"] is None
+    assert [without_read_fields(entry) for entry in content["decisions"]] == [
+        decision.model_dump(mode="json") for decision in reversed(seeded)
+    ]
+    assert all(entry["status"] == "open" for entry in content["decisions"])
+
+
+@pytest.mark.anyio
+async def test_get_decisions_filters_by_ticker(tmp_path: Path) -> None:
+    # @AC2
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    three_calls(cache)
+
+    by_ticker = await get_decisions(cache, ticker=" asml.as ")
+    with_status = await get_decisions(cache, ticker="ASML.AS", status="open")
+
+    for result in (by_ticker, with_status):
+        content = result.structured_content
+        assert [entry["id"] for entry in content["decisions"]] == [3, 1]
+        assert content["total"] == 2
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ticker", ["AS ML", "../x"])
+async def test_get_decisions_rejects_what_cant_be_a_ticker(
+    tmp_path: Path, ticker: str
+) -> None:
+    # @AC2
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    three_calls(cache)
+
+    result = await get_decisions(cache, ticker=ticker)
+
+    assert result.is_error
+    assert "isn't a ticker" in result.content[0].text
+
+
+@pytest.mark.anyio
+async def test_get_decisions_reads_calls_recorded_before_a_restart(
+    tmp_path: Path,
+) -> None:
+    # @AC3
+    recorded = await record(cache_for(provider(sessions("XAMS", 3)), tmp_path))
+    restarted = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    result = await get_decisions(restarted)
+
+    entries = result.structured_content["decisions"]
+    assert [without_read_fields(entry) for entry in entries] == [
+        recorded.structured_content
+    ]
+
+
+@pytest.mark.anyio
+async def test_get_decisions_on_an_empty_journal_is_an_empty_list(
+    tmp_path: Path,
+) -> None:
+    # @AC5
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    result = await get_decisions(cache)
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert content["decisions"] == []
+    assert content["total"] == 0
+    assert "No calls" in content["note"]
+    assert not journal_path(cache).parent.exists()
+
+
+@pytest.mark.anyio
+async def test_get_decisions_with_no_match_says_which_filters(
+    tmp_path: Path,
+) -> None:
+    # @AC5
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    seed(cache, decision_draft())
+
+    result = await get_decisions(cache, ticker="aapl", status="open")
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert content["decisions"] == []
+    assert content["total"] == 0
+    assert "AAPL" in content["note"]
+    assert "open" in content["note"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("now", "passed"),
+    [
+        # Euronext Amsterdam closes at 16:30 UTC in winter time; the session
+        # counts as closed 30 minutes later.
+        (datetime(2026, 10, 29, 16, 59, tzinfo=UTC), False),
+        (datetime(2026, 10, 29, 17, 0, tzinfo=UTC), True),
+    ],
+)
+async def test_horizon_passed_turns_true_at_the_close_of_the_last_session(
+    tmp_path: Path, now: datetime, passed: bool
+) -> None:
+    # @AC6
+    cache = cache_for(provider(sessions("XAMS", 3), now=now), tmp_path)
+    seed(cache, decision_draft(horizon_ends=date(2026, 10, 29)))
+
+    result = await get_decisions(cache)
+
+    assert result.structured_content["decisions"][0]["horizon_passed"] is passed
+
+
+@pytest.mark.anyio
+async def test_horizon_passed_follows_the_stocks_own_exchange(
+    tmp_path: Path,
+) -> None:
+    # @AC6: at 17:00 UTC Amsterdam has closed 2026-10-29, New York hasn't.
+    now = datetime(2026, 10, 29, 17, 0, tzinfo=UTC)
+    cache = cache_for(provider(sessions("XAMS", 3), now=now), tmp_path)
+    seed(
+        cache,
+        decision_draft(horizon_ends=date(2026, 10, 29)),
+        decision_draft(
+            ticker="AAPL",
+            currency="USD",
+            exchange="XNYS",
+            horizon_ends=date(2026, 10, 29),
+        ),
+    )
+
+    result = await get_decisions(cache)
+
+    passed = {
+        entry["ticker"]: entry["horizon_passed"]
+        for entry in result.structured_content["decisions"]
+    }
+    assert passed == {"ASML.AS": True, "AAPL": False}
+
+
+@pytest.mark.anyio
+async def test_get_decisions_defaults_to_all_and_nothing_is_scored_yet(
+    tmp_path: Path,
+) -> None:
+    # @AC7
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    seed(cache, decision_draft(), decision_draft())
+
+    every = await get_decisions(cache)
+    scored = await get_decisions(cache, status="scored")
+
+    assert [entry["id"] for entry in every.structured_content["decisions"]] == [2, 1]
+    assert every.structured_content["total"] == 2
+    assert scored.structured_content["decisions"] == []
+    assert scored.structured_content["total"] == 0
+    assert "scored" in scored.structured_content["note"]
+
+
+@pytest.mark.anyio
+async def test_a_damaged_journal_is_a_tool_error_for_get_decisions(
+    tmp_path: Path,
+) -> None:
+    # @AC8
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    seed(cache, decision_draft())
+    with journal_path(cache).open("ab") as file:
+        file.write(b"not json\n")
+    before = journal_path(cache).read_bytes()
+
+    result = await get_decisions(cache)
+
+    assert result.is_error
+    text = result.content[0].text
+    assert str(journal_path(cache)) in text
+    assert "line 2" in text
+    assert "operator" in text
+    assert journal_path(cache).read_bytes() == before
+
+
+@pytest.mark.anyio
+async def test_get_decisions_never_calls_the_provider(tmp_path: Path) -> None:
+    fake = provider(sessions("XAMS", 3))
+    fake.reachable = False
+    cache = cache_for(fake, tmp_path)
+    seed(cache, decision_draft())
+
+    result = await get_decisions(cache)
+
+    assert not result.is_error, result.content
+    assert len(result.structured_content["decisions"]) == 1
+    assert fake.history_calls == []
