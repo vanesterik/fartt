@@ -54,7 +54,7 @@ tasks:
 
   # The tests marked `network`, which the default suite deselects: the live
   # Yahoo Finance tests and the end-to-end check of the server over stdio
-  # (tests/e2e). They call Yahoo, so `check` leaves them out: a gate must not
+  # (tests/integration). They call Yahoo, so `check` leaves them out: a gate must not
   # fail because Yahoo is down.
   test:network:
     desc: Run the tests that call Yahoo Finance, including the end-to-end server check

@@ -6,9 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Fartt (Financial Analysis Real Time Trading) is an MCP server that gives an agent the tools to analyse stocks on Euronext and US exchanges, with Claude Code as the analyst and the operator's interface. It's decision support for personal use: the agent combines many signals (market data, technical indicators, support/resistance, fundamentals, market context, charts) into a view, and a journal scores every call afterwards against a world index ETF. The server owns data, risk limits and state; the agent can read the limits but never change them. It's a solo research project, not production infra.
 
-The plan is the PRD, `docs/product/stock-analysis-prd.md` (problem, users including the agent, the eight-step analysis procedure, tool surface, the three stages from paper trading to server-placed orders and their gates, the risk config, risks and open questions). It's delivered in epics on the board, in this order: **A** Data Foundation (#88), **B** Technical Analysis (#89), **C** Journal & Evaluation (#90), **D** Analysis Pipeline (#91; A–D are the walking skeleton, a full analysis on one ticker), then **E** Visualization (#92), **F** Market Context (#93), **G** Fundamentals & Screening (#94), **H** Trade Plan & Risk (#95), **I** Validation (#96), **J** Live Orders (#101). Stories are written just in time, one epic at a time. Epic designs live in `docs/specs/`, implementation plans in `docs/plans/`.
+The plan is the PRD, `docs/product/stock-analysis-prd.md` (problem, users including the agent, the eight-step analysis procedure, tool surface, the three stages from paper trading to server-placed orders and their gates, the risk config, risks and open questions). It's delivered in epics on the board, in this order: **A** Data Foundation (#88), **B** Technical Analysis (#89), **C** Journal & Evaluation (#90), **D** Analysis Pipeline (#91; A–D are the walking skeleton, a full analysis on one ticker), then **E** Visualization (#92), **F** Market Context (#93), **G** Fundamentals & Screening (#94), **H** Trade Plan & Risk (#95), **I** Validation (#96), **J** Live Orders (#101). Stories are written just in time, one epic at a time. A story's design and implementation plan live in its issue, in the latest `role:design` comment (see Team workflow below). `docs/specs/` and `docs/plans/` hold the designs and plans of epics A and B, written before this workflow; they're history, and new ones aren't added there.
 
-The project follows the [cookiecutter data science](https://drivendata.github.io/cookiecutter-data-science/) layout: `docs/` for the PRD, designs and plans, `src/fartt` for library code, `tests/` for unit tests.
+The project follows the [cookiecutter data science](https://drivendata.github.io/cookiecutter-data-science/) layout: `docs/` for the PRD (and the early designs and plans), `src/fartt` for library code, `tests/` for unit tests and `tests/integration/` for the integration tests.
 
 ## Current state of the codebase (important)
 
@@ -57,13 +57,13 @@ uv run pyright                   # type check (strict mode, src/ only — tests/
 
 There is no CLI: the agent calls the server's tools, and a ticker's cache fills on its first call. The server reads `FARTT_ASSETS_DIR` for the cache's folder from the environment or else the repository's `.env` (copy `.env.example`), defaulting to `assets/` in the repository wherever it was started from; a relative path is relative to the repository. It logs to stderr only, since stdout carries the protocol.
 
-`tests/e2e/test_server_stdio.py` checks the server end to end: it starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder, calls the tools, and asserts stdout carries only JSON-RPC, including anything written at shutdown. Each new tool joins it: add its name to `EXPECTED_TOOLS` and its call to `test_tools_over_stdio`.
+`tests/integration/test_server_stdio.py` checks the server end to end: it starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder, calls the tools, and asserts stdout carries only JSON-RPC, including anything written at shutdown. Each new tool joins it: the test role adds its name to `EXPECTED_TOOLS` and its call to `test_tools_over_stdio` (integration tests are the test role's, not the builder's).
 
 Hooks are managed by `lefthook` (`.lefthook.yml`) and stand in for CI, which this project doesn't have. On every commit, staged Python files get `ruff format` + `ruff check --fix`, then `pyright` and `pytest` run. On every push, `task check` runs the full suite on the whole repository (`ruff format --check .`, `ruff check .`, `pyright`, `pytest`), because pre-commit only sees staged files and a commit touching only `pyproject.toml`, `uv.lock` or `.mcp.json` would otherwise skip tests and type checks. `git push --no-verify` skips the gate for one push; use it deliberately, never by default. Tests marked `network` call Yahoo and are deselected by default; run them with `task test:network`.
 
 ## Development workflow and pull requests
 
-The general workflow and pull request flow come from the global `~/.claude/CLAUDE.md` (the `vanesterik/claude-config` repository). What's specific to this repository:
+The general workflow and pull request flow come from the global `~/.claude/CLAUDE.md` (the `vanesterik/claude-config` repository); how a story moves from design to merge (roles, the design gate, who writes which tests, branch names) is the unity flow in Team workflow below. What's specific to this repository:
 
 - There's no CI. Lefthook is the gate: pre-commit checks staged files and runs the tests, and pre-push runs the full suite on the whole repository (see Commands).
 - The repository allows rebase merging only and has `deleteBranchOnMerge` set, so only the local branch needs deleting after a merge.
@@ -86,3 +86,60 @@ gh project item-add 3 --owner vanesterik --url <issue-url>
 - **`fartt/features/`** — calculations over Polars DataFrames and return series: `calculate_technical_indicators.py` computes Bollinger Bands / EMA / MACD / RSI via `talib` for the chart, configured through `technical_indicators_config.py`; `calculate_candle_returns.py` computes the signed percent change per candle; `calculate_trade_returns.py` is a functional long-only backtest over a candle-return series (cost, default 0.05% per leg; slippage, threshold, maximum holding period and stop loss; an optional `predicted_candle_returns` argument backtests a signal known one tick ahead against realised prices).
 - **`fartt/visualization/`** — `candlestick_chart.py` (Bollinger/EMA/MACD/RSI overlays via `mplfinance`) and `plot_styles.py::apply_plot_styles` (shared tradingview-style `rcParams`).
 - **`fartt/constants.py`** — centralized string labels (column names, indicator labels) and a small colour palette, shared by the features and visualization code to avoid stringly-typed column name drift.
+
+<!-- unity:workflow:start -->
+## Team workflow (unity)
+
+This project is built by one developer and Claude in four roles: design -> build -> test -> review. Design is a conversation with the developer (`/unity:design`). Build, test and review each run as their own agent with a **fresh context** (`unity:builder`, `unity:tester`, `unity:reviewer`), started one after the other by `/unity:ship`, or one at a time by `/unity:build`, `/unity:test` and `/unity:review`. Each role is named after the board column it works in. GitHub is the only handoff between roles.
+
+### Board
+
+GitHub Project columns are the workflow state. IDs live in `.claude/pipeline.json` (written by `/unity:init`). Picking an issue with `/unity:design` sets the flow in motion; from then on each role moves the issue to the next column, and `/unity:ship` starts the next agent only when the issue moved on. `/unity:status` shows every issue per column with the next command to run.
+
+| Column | Meaning | Moved there by |
+| --- | --- | --- |
+| Backlog | Not picked up yet | the developer |
+| Design | Design and plan in progress, with the developer | `/unity:design` at start |
+| Build | Design approved; implementation and unit tests (TDD), also rework | `/unity:design` once the developer approves the design in conversation; the tester and the reviewer on rejection |
+| Test | PR ready, integration/E2E testing | the builder when every task is done |
+| Review | Tests passed, final code review | the tester on PASS |
+| Done | Merged | the board's "Item closed" workflow, when the merge closes the issue |
+
+The developer's approval of the design is the one human gate: `/unity:design` moves an issue to Build only after it, and the builder works only on issues in Build.
+
+### Conventions
+
+- **Branch:** `feature/<issue>-<slug>` (e.g. `feature/42-guest-checkout`).
+- **PR body** contains `Closes #<issue>`.
+- **Design and plan live in the issue, not in the repository.** The latest `role:design` comment holds both. This overrides any convention that commits specs or plans as files (such as `docs/specs/` and `docs/plans/`), and the file-saving steps of planning skills: post the content as the comment instead.
+- **Role comments** start with a hidden marker so the next role can find them: `<!-- role:design v1 -->`, `<!-- role:build -->`, `<!-- role:test -->`, `<!-- role:review -->`. A revised design is a new comment with a higher version; the latest one counts. The design is posted on the issue; build, test and review post on the PR, and each also leaves a one-line pointer on the issue (no marker), so the issue shows the whole flow.
+- **Acceptance criteria** are part of the design comment, numbered and testable from the outside:
+
+  ```markdown
+  <!-- role:design v1 -->
+  ## Design
+  ...
+  ## Acceptance criteria
+  - AC1: A guest can complete checkout without creating an account
+  - AC2: An invalid email address shows an inline error and blocks submission
+  ```
+
+  Every role refers to criteria by ID: tests are tagged `@AC2`, the test role reports coverage per criterion, review checks that each one is met.
+
+### Testing responsibilities
+
+- **Build** owns unit tests, written test-first.
+- **Test** owns integration and end-to-end tests, and never changes application code or unit tests.
+
+### E2E testing
+
+<!-- Filled in by /unity:init; adjust as needed. write-e2e-test reads this section. -->
+
+- No browser UI and no Playwright: the server speaks MCP over stdio, so integration tests carry the test role.
+- Integration directory: `tests/integration/` (pytest; `test_server_stdio.py` starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder). Run with `uv run pytest tests/integration -m network`; the tests are marked `network` (they call Yahoo), so `task test` skips them.
+- Translations: none
+- UI components: none
+- API layer: the MCP tools in `src/fartt/server/`
+- Start the app for testing: nothing to start; the tests launch the server themselves, in the PR checkout
+- Test users and data: none; tickers are fetched live from Yahoo into the temporary assets folder
+<!-- unity:workflow:end -->
