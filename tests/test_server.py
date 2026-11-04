@@ -276,6 +276,7 @@ async def test_the_tools_are_listed(tmp_path: Path) -> None:
         "get_candles",
         "get_indicators",
         "get_quote",
+        "get_trend",
     ]
 
 
@@ -553,6 +554,125 @@ async def test_get_indicators_of_an_unknown_ticker_is_a_tool_error(
 
     assert result.is_error
     assert "NOSUCH" in result.content[0].text
+
+
+async def get_trend(fake: FakeProvider, tmp_path: Path, ticker: str = "ASML.AS") -> Any:
+    return await call(cache_for(fake, tmp_path), {"ticker": ticker}, "get_trend")
+
+
+TIMEFRAME_FIELDS = {
+    "direction",
+    "basis",
+    "based_on",
+    "close",
+    "sma_50",
+    "sma_200",
+    "last_cross",
+}
+
+
+@pytest.mark.anyio
+async def test_get_trend_returns_both_timeframes(tmp_path: Path) -> None:
+    result = await get_trend(provider(sessions("XAMS", 1100)), tmp_path)
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert set(content) == {
+        "ticker",
+        "currency",
+        "daily",
+        "weekly",
+        "aligned",
+        "note",
+        "is_current",
+        "warning",
+    }
+    assert (content["ticker"], content["currency"]) == ("ASML.AS", "EUR")
+    assert set(content["daily"]) == TIMEFRAME_FIELDS
+    assert set(content["weekly"]) == TIMEFRAME_FIELDS
+    assert content["daily"]["based_on"] == "2026-10-29"
+    # The week of Thursday the 29th hasn't closed: Friday the 30th is to come.
+    assert content["weekly"]["based_on"] == "2026-10-23"
+    for timeframe in ("daily", "weekly"):
+        assert content[timeframe]["direction"] == "up"
+        assert content[timeframe]["basis"] == "sma_50_and_200"
+        assert content[timeframe]["sma_200"] is not None
+    assert content["aligned"] is True
+    assert "week ending 2026-10-23" in content["note"]
+    assert content["is_current"] is True
+    assert content["warning"] is None
+
+
+@pytest.mark.anyio
+async def test_get_trend_daily_averages_match_get_indicators(tmp_path: Path) -> None:
+    fake = provider(sessions("XAMS", 1100))
+
+    trend = (await get_trend(fake, tmp_path)).structured_content
+    indicators = (await get_indicators(fake, tmp_path)).structured_content
+
+    assert trend["daily"]["sma_50"] == indicators["sma_50"]
+    assert trend["daily"]["sma_200"] == indicators["sma_200"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("count", [1100, 300, 40])
+async def test_get_trend_stays_within_its_size_budget(
+    tmp_path: Path, count: int
+) -> None:
+    result = await get_trend(provider(sessions("XAMS", count)), tmp_path)
+
+    assert not result.is_error, result.content
+    assert len(json.dumps(result.structured_content)) < 2000
+
+
+@pytest.mark.anyio
+async def test_get_trend_on_a_short_history_says_what_is_missing(
+    tmp_path: Path,
+) -> None:
+    result = await get_trend(provider(sessions("XAMS", 300)), tmp_path)
+
+    weekly = result.structured_content["weekly"]
+    assert weekly["sma_200"] is None
+    assert weekly["last_cross"] is None
+    assert weekly["basis"] == "sma_50_only"
+    assert "weekly sma_200 needs 205 weeks" in result.structured_content["note"]
+
+
+@pytest.mark.anyio
+async def test_get_trend_with_the_provider_down_serves_the_cache(
+    tmp_path: Path,
+) -> None:
+    fake = provider(sessions("XAMS", 300), now=AFTER_CLOSE_27)
+    cache = cache_for(fake, tmp_path)
+    cache.update("ASML.AS")
+    fake.now = AFTER_CLOSE
+    fake.reachable = False
+
+    result = await call(cache, {"ticker": "ASML.AS"}, "get_trend")
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert content["daily"]["based_on"] == "2026-10-27"
+    assert content["is_current"] is False
+    assert "2 sessions behind" in content["warning"]
+
+
+@pytest.mark.anyio
+async def test_get_trend_of_an_unknown_ticker_is_a_tool_error(tmp_path: Path) -> None:
+    result = await get_trend(provider([]), tmp_path, ticker="NOSUCH")
+
+    assert result.is_error
+    assert "NOSUCH" in result.content[0].text
+
+
+@pytest.mark.anyio
+async def test_get_trend_of_an_unsupported_exchange_is_a_tool_error(
+    tmp_path: Path,
+) -> None:
+    result = await get_trend(provider([]), tmp_path, ticker="VOD.L")
+
+    assert result.is_error
+    assert ".AS" in result.content[0].text
 
 
 def test_the_instructions_say_indicators_are_evidence() -> None:

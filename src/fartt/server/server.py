@@ -29,8 +29,10 @@ from fartt.technical import (
     Macd,
     MovingAverage,
     Rsi,
+    TimeframeTrend,
     Volume,
     calculate_indicators,
+    calculate_trend,
 )
 
 # Claude Code caps MCP tool output at about 25k tokens by default, and
@@ -186,6 +188,37 @@ class IndicatorsResult(BaseModel):
         description=(
             "True when based_on is the exchange's most recently closed session. "
             "False means the data is stale; see warning."
+        )
+    )
+    warning: str | None = Field(default=None, description="What's stale, if anything.")
+
+
+class TrendResult(BaseModel):
+    ticker: str = Field(description="The ticker, in Yahoo's format.")
+    currency: str = Field(description="The currency prices are quoted in.")
+    daily: TimeframeTrend = Field(
+        description="The trend on daily sessions, as of the last cached session."
+    )
+    weekly: TimeframeTrend | None = Field(
+        description=(
+            "The trend on closed weeks, as of the last closed week's last "
+            "session; null when no week has closed yet."
+        )
+    )
+    aligned: bool = Field(
+        description="True only when both timeframes are up, or both are down."
+    )
+    note: str | None = Field(
+        default=None,
+        description=(
+            "What's null and why, what a direction rests on, and whether the "
+            "current week is left out, if any."
+        ),
+    )
+    is_current: bool = Field(
+        description=(
+            "True when the daily based_on is the exchange's most recently closed "
+            "session. False means the data is stale; see warning."
         )
     )
     warning: str | None = Field(default=None, description="What's stale, if anything.")
@@ -515,6 +548,37 @@ def build_server(cache: StockCache) -> MCPServer:
             atr=indicators.atr,
             volume=indicators.volume,
             note=indicators.note,
+            is_current=is_current,
+            warning=warning,
+        )
+
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+    def get_trend(
+        ticker: Annotated[
+            str,
+            Field(description="One ticker in Yahoo's format: AAPL, ASML.AS."),
+        ],
+    ) -> TrendResult:
+        """
+        Return a ticker's trend direction on the daily and weekly timeframes,
+        with the evidence (close against the SMA 50 and 200, their slopes, the
+        last cross) and whether the timeframes agree. Use it to judge whether a
+        dip is in an uptrend or the start of a fall.
+        """
+        listing, candles, _, is_current, warning = _snapshot(
+            "get_trend", cache, ticker, sys.maxsize
+        )
+        trend = calculate_trend(candles, listing.exchange)
+        logger.info(
+            f"get_trend {listing.ticker}: {len(candles)} sessions, current={is_current}"
+        )
+        return TrendResult(
+            ticker=listing.ticker,
+            currency=listing.currency,
+            daily=trend.daily,
+            weekly=trend.weekly,
+            aligned=trend.aligned,
+            note=trend.note,
             is_current=is_current,
             warning=warning,
         )
