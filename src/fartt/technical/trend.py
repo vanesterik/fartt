@@ -8,11 +8,11 @@ from talib import SMA
 
 from fartt.data import Candle, last_session_of_week
 from fartt.technical.indicators import (
-    DECIMALS,
     SLOPE_SESSIONS,
     Array,
     MovingAverage,
     moving_average,
+    round_value,
 )
 
 TrendDirection = Literal["up", "down", "sideways"]
@@ -112,10 +112,6 @@ def weekly_candles(
     return [_aggregate(week) for week in weeks], unclosed
 
 
-def _round(value: float) -> float:
-    return round(float(value), DECIMALS)
-
-
 def _last_cross(
     candles: list[Candle], sma_50: Array, sma_200: Array
 ) -> TrendCross | None:
@@ -126,7 +122,7 @@ def _last_cross(
     for candle, fast, slow in zip(candles, sma_50, sma_200, strict=True):
         if np.isnan(fast) or np.isnan(slow):
             continue
-        diff = _round(fast) - _round(slow)
+        diff = round_value(fast) - round_value(slow)
         sign = (diff > 0) - (diff < 0)
         if sign == 0:
             continue
@@ -173,7 +169,7 @@ def _timeframe(
                 f"{name} sma_{period} needs {needs} {unit}, {count} are cached."
             )
     sma_50, sma_200 = averages[50], averages[200]
-    close = _round(closes[-1])
+    close = round_value(closes[-1])
 
     direction: TrendDirection | None = None
     basis: Basis | None = None
