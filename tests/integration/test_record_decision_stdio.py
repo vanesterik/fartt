@@ -384,7 +384,11 @@ async def test_should_record_with_the_provider_down_when_both_closes_are_cached(
 async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
     live_assets: Path,
 ) -> None:
-    """@issue-119 @AC8 Should offer the five read tools plus record_decision only."""
+    """
+    @issue-119 @AC8 Should offer the read tools plus record_decision only.
+
+    get_decisions (#120) reads the journal back; it joins as a read-only tool.
+    """
     async with _server(live_assets) as client:
         tools = (await client.list_tools()).tools
 
@@ -396,11 +400,15 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
             "get_trend",
             "get_support_resistance",
             "record_decision",
+            "get_decisions",
         ]
     )
     record = next(tool for tool in tools if tool.name == "record_decision")
     assert record.annotations is not None
     assert record.annotations.destructive_hint is False
+    reader = next(tool for tool in tools if tool.name == "get_decisions")
+    assert reader.annotations is not None
+    assert reader.annotations.read_only_hint is True
 
 
 async def test_should_normalise_the_ticker_and_keep_the_reasoning_as_sent(
