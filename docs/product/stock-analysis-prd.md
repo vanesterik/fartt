@@ -210,7 +210,7 @@ Stories are written just in time, one epic at a time, as GitHub issues in the Us
 - Daily candles only. Holding periods are days to weeks.
 - The cache must handle trading sessions, exchange holidays, and split and dividend adjustments, which change every earlier candle's adjusted price.
 - yfinance data is delayed and unofficial. Each tool reports where its data came from and how old it is.
-- Positions in USD stocks are held from a EUR account. 🔶 Paper P&L is reported in EUR at the day's rate, and FX costs are part of the trading costs.
+- Positions in USD stocks are held from a EUR account, and Saxo's 0.25% currency conversion fee on each buy and sale is part of the trading costs (section 6). 🔶 Paper P&L is reported in EUR at the day's rate.
 
 ## 8. Out of Scope
 
@@ -228,7 +228,7 @@ Stories are written just in time, one epic at a time, as GitHub issues in the Us
 ### Dependencies
 
 - **yfinance** for development data. It's unofficial and can break or be rate-limited without notice.
-- **A Saxo account and access to its OpenAPI simulation environment**, and later market data subscriptions for Euronext and the US. Open them while developing on yfinance.
+- **A Saxo account and access to its OpenAPI simulation environment.** Real-time quotes for European and US stocks are included once activated; 🔶 that this holds for the OpenAPI feed too, so the universe needs no market data subscription. Open them while developing on yfinance.
 - **The MCP SDK** and Claude Code's MCP support.
 
 ### Risks and mitigations
