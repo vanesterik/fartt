@@ -8,6 +8,7 @@ from fartt.data import (
     UnsupportedExchange,
     calendar_for,
     exchange_date,
+    last_session_of_week,
     market_status,
     missing_sessions,
     newest_closed_session,
@@ -131,3 +132,21 @@ def test_exchange_date_is_the_date_on_the_exchange() -> None:
     # 01:00 UTC on the 30th is still the 29th in New York.
     assert exchange_date("XNYS", utc(2026, 10, 30, 1, 0)) == date(2026, 10, 29)
     assert exchange_date("XAMS", utc(2026, 10, 29, 23, 30)) == date(2026, 10, 30)
+
+
+def test_last_session_of_a_normal_week() -> None:
+    assert last_session_of_week("XAMS", date(2026, 10, 28)) == date(2026, 10, 30)
+
+
+def test_last_session_of_a_week_ending_on_a_holiday() -> None:
+    # Good Friday 2026 is 3 April: Euronext is closed.
+    assert last_session_of_week("XAMS", date(2026, 3, 31)) == date(2026, 4, 2)
+
+
+def test_a_weekend_day_belongs_to_its_iso_week() -> None:
+    # Sunday 1 November is in the ISO week of Monday 26 October.
+    assert last_session_of_week("XNYS", date(2026, 11, 1)) == date(2026, 10, 30)
+
+
+def test_a_week_outside_the_calendar_is_unknown() -> None:
+    assert last_session_of_week("XAMS", date(2056, 10, 28)) is None
