@@ -28,17 +28,24 @@ SUFFIX_CALENDARS = {
     ".OL": "XOSL",
 }
 
+# Exchange rates in Yahoo's format (EURUSD=X) are tickers too, so scores can
+# convert to euros from cached closes. They trade around the clock on
+# weekdays: exchange_calendars' 24/5 calendar closes each day at midnight UTC.
+# Not in SUFFIX_CALENDARS: an exchange rate isn't a stock to make calls on.
+FX_SUFFIX = "=X"
+FX_CALENDAR = "24/5"
 
-# Letters, digits, dots and dashes: every ticker in the universe, and
-# nothing that could step outside a cache directory.
-_TICKER = re.compile(r"[A-Z0-9.\-]+")
+# Letters, digits, dots, dashes and the `=` of an exchange rate: every ticker
+# in the universe, and nothing that could step outside a cache directory
+# (`=` is harmless in a folder name).
+_TICKER = re.compile(r"[A-Z0-9.\-=]+")
 
 
 def normalise_ticker(ticker: str) -> str:
     """
     A ticker stripped and upper-cased, in Yahoo's format. Raises
     `UnknownTicker` for anything that can't be one (empty, or holding a
-    character other than a letter, digit, `.` or `-`), before it reaches a
+    character other than a letter, digit, `.`, `-` or `=`), before it reaches a
     request or a file path.
 
     """
@@ -54,6 +61,8 @@ def normalise_ticker(ticker: str) -> str:
 def calendar_for(ticker: str) -> str:
     """The exchange_calendars code for a ticker, from its suffix."""
     ticker = normalise_ticker(ticker)
+    if ticker.endswith(FX_SUFFIX):
+        return FX_CALENDAR
     dot = ticker.rfind(".")
     suffix = ticker[dot:] if dot != -1 else ""
     try:
@@ -64,6 +73,15 @@ def calendar_for(ticker: str) -> str:
             f"'{ticker}' is on an exchange outside the universe. Supported: US "
             f"tickers without a suffix (AAPL), and Euronext suffixes {supported}."
         ) from None
+
+
+def fx_pair(currency: str) -> str | None:
+    """
+    The exchange rate's ticker that converts `currency` to euros
+    (`EURUSD=X`: units of `currency` per euro), or `None` for the euro itself.
+
+    """
+    return None if currency == "EUR" else f"EUR{currency}{FX_SUFFIX}"
 
 
 @contextmanager

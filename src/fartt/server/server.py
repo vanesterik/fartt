@@ -11,6 +11,7 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from fartt.data import (
+    FX_SUFFIX,
     Candle,
     Listing,
     ProviderUnavailable,
@@ -829,6 +830,11 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
             raise ToolError(
                 f"reasoning must be 1 to {MAX_REASONING:,} characters after "
                 f"stripping whitespace; it is {len(reasoning):,}."
+            )
+        if ticker.strip().upper().endswith(FX_SUFFIX):
+            raise ToolError(
+                f"{ticker.strip().upper()} is an exchange rate, not a stock. "
+                "Record calls on stocks only."
             )
         names = [signal.name for signal in signals]
         twice = sorted({name for name in names if names.count(name) > 1})

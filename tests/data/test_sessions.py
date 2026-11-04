@@ -11,6 +11,7 @@ from fartt.data import (
     calendar_for,
     exchange_calendar,
     exchange_date,
+    fx_pair,
     last_session_of_week,
     market_status,
     missing_sessions,
@@ -184,3 +185,25 @@ def test_calendars_raise_no_pandas_deprecation_warning() -> None:
         warnings.simplefilter("error", Pandas4Warning)
         newest_closed_session("XAMS", utc(2026, 10, 29, 21, 0))
         market_status("XAMS", utc(2026, 10, 29, 10, 0))
+
+
+def test_an_fx_pair_is_a_ticker() -> None:
+    assert normalise_ticker(" eurusd=x ") == "EURUSD=X"
+    assert calendar_for("EURUSD=X") == "24/5"
+
+
+@pytest.mark.parametrize("ticker", ["A/B", "..\\X", "../x"])
+def test_paths_are_still_rejected(ticker: str) -> None:
+    with pytest.raises(UnknownTicker):
+        normalise_ticker(ticker)
+
+
+def test_fx_pair() -> None:
+    assert fx_pair("EUR") is None
+    assert fx_pair("USD") == "EURUSD=X"
+    assert fx_pair("NOK") == "EURNOK=X"
+
+
+def test_the_24_5_calendar_closes_a_day_at_midnight_utc() -> None:
+    assert newest_closed_session("24/5", utc(2026, 11, 4, 0, 29)) == date(2026, 11, 2)
+    assert newest_closed_session("24/5", utc(2026, 11, 4, 0, 31)) == date(2026, 11, 3)

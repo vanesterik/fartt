@@ -1264,6 +1264,17 @@ async def test_a_horizon_the_calendar_cannot_place_is_a_tool_error(
     assert not journal_path(cache).exists()
 
 
+@pytest.mark.anyio
+async def test_record_decision_refuses_an_fx_pair(tmp_path: Path) -> None:
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    result = await record(cache, ticker="eurusd=x")
+
+    assert result.is_error
+    assert "exchange rate, not a stock" in result.content[0].text
+    assert not journal_path(cache).exists()
+
+
 def test_the_instructions_say_to_record_every_call() -> None:
     assert "record_decision" in server_module.INSTRUCTIONS
 
