@@ -1241,5 +1241,27 @@ async def test_a_damaged_journal_is_a_tool_error_for_the_operator(
     assert journal_path(cache).read_bytes() == before
 
 
+@pytest.mark.anyio
+async def test_a_horizon_the_calendar_cannot_place_is_a_tool_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # exchange_calendars raises ValueError for a day that isn't a session or
+    # an offset past the calendar's end; neither happens with cached candles.
+    def unplaceable(exchange: str, day: date, count: int) -> date:
+        raise ValueError(f"{day} is not a session")
+
+    monkeypatch.setattr(server_module, "session_after", unplaceable)
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    result = await record(cache)
+
+    assert result.is_error
+    text = result.content[0].text
+    assert "horizon" in text
+    assert "is not a session" in text
+    assert "operator" in text
+    assert not journal_path(cache).exists()
+
+
 def test_the_instructions_say_to_record_every_call() -> None:
     assert "record_decision" in server_module.INSTRUCTIONS
