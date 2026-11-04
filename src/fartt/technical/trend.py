@@ -218,9 +218,11 @@ def calculate_trend(candles: list[Candle], exchange: str) -> Trend:
     if weekly is None:
         notes.append("No week has closed yet, so there is no weekly trend.")
     elif unclosed is not None:
+        # Not "the current week": a stale cache stops in a week that closed.
         notes.append(
-            "The current week isn't closed yet: the weekly figures are as of "
-            f"the week ending {weekly.based_on}."
+            f"The newest cached week (through {unclosed.isoformat()}) isn't "
+            "complete: the weekly figures are as of the week ending "
+            f"{weekly.based_on}."
         )
     aligned = (
         weekly is not None
