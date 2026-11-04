@@ -142,6 +142,15 @@ def last_session_of_week(exchange: str, day: date) -> date | None:
     return sessions[-1].date() if len(sessions) else None
 
 
+def session_after(exchange: str, day: date, count: int) -> date:
+    """
+    The `count`-th session of `exchange` after `day` (a session itself),
+    skipping weekends and the exchange's holidays.
+
+    """
+    return exchange_calendar(exchange).session_offset(day, count).date()
+
+
 def exchange_date(exchange: str, moment: datetime) -> date:
     """The date `moment` (timezone-aware) falls on in the exchange's time zone."""
     return moment.astimezone(exchange_calendar(exchange).tz).date()
