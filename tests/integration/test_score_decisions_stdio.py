@@ -483,3 +483,43 @@ async def test_should_be_a_tool_error_on_a_damaged_journal_and_write_nothing(
     assert str(_journal(live_assets)) in message or "decisions.jsonl" in message
     assert "line 2" in message
     assert _journal(live_assets).read_bytes() == before
+
+
+async def test_should_refuse_a_call_on_any_fx_pair_and_reject_path_like_ones(
+    tmp_path: Path,
+) -> None:
+    """@issue-121 @AC10 Should refuse record_decision on any FX pair however it's written, and reject an FX-looking ticker that could escape the cache folder."""
+    # Given an empty assets folder and the server started from .mcp.json
+    async with _server(tmp_path) as client:
+        # When the agent records calls on FX pairs written in other ways
+        refusals = {
+            ticker: await client.call_tool(
+                "record_decision",
+                {
+                    "ticker": ticker,
+                    "direction": "pass",
+                    "horizon": 10,
+                    "reasoning": "An FX pair isn't a stock.",
+                    "signals": [{"name": "trend", "stance": "for"}],
+                },
+            )
+            for ticker in (" eurusd=x ", "EURNOK=X")
+        }
+        # And asks for candles on FX-looking tickers holding a path
+        paths = {
+            ticker: await client.call_tool("get_candles", {"ticker": ticker})
+            for ticker in ("../X=X", "A/B=X")
+        }
+
+    # Then every call is refused as an exchange rate, and nothing is recorded
+    for ticker, result in refusals.items():
+        assert result.is_error, ticker
+        assert "exchange rate, not a stock" in _text(result)
+        assert ticker.strip().upper() in _text(result)
+    assert not _journal(tmp_path).exists()
+    # And the path-like tickers aren't tickers, with no folder written for them
+    for ticker, result in paths.items():
+        assert result.is_error, ticker
+        assert "isn't a ticker" in _text(result)
+    stocks = tmp_path / "stocks"
+    assert not stocks.exists() or sorted(p.name for p in stocks.iterdir()) == []
