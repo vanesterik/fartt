@@ -32,6 +32,8 @@ RESPONSE_TIMEOUT_S = 180
 # The project's margin after an exchange's close before a session counts as
 # closed (CLAUDE.md: `newest_closed_session`, a 30-minute `CLOSE_MARGIN`).
 CLOSE_MARGIN = dt.timedelta(minutes=30)
+# The signal names `record_decision` accepts (`fartt.journal.SIGNALS`); a
+# name added there belongs here too, so AC9's worst case stays the worst.
 SIGNAL_NAMES = [
     "trend",
     "support_resistance",

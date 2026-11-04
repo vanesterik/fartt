@@ -1480,6 +1480,27 @@ async def test_a_damaged_journal_is_a_tool_error_for_get_decisions(
 
 
 @pytest.mark.anyio
+async def test_an_unknown_exchange_in_the_journal_is_a_tool_error_for_get_decisions(
+    tmp_path: Path,
+) -> None:
+    # @AC8: a hand-edited line names a calendar that doesn't exist.
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+    seed(cache, decision_draft())
+    line = journal_path(cache).read_text().replace('"XAMS"', '"XXXX"')
+    with journal_path(cache).open("a") as file:
+        file.write(line)
+    before = journal_path(cache).read_bytes()
+
+    result = await get_decisions(cache)
+
+    assert result.is_error
+    text = result.content[0].text
+    assert str(journal_path(cache)) in text
+    assert "line 2" in text
+    assert journal_path(cache).read_bytes() == before
+
+
+@pytest.mark.anyio
 async def test_get_decisions_never_calls_the_provider(tmp_path: Path) -> None:
     fake = provider(sessions("XAMS", 3))
     fake.reachable = False

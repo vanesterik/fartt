@@ -93,6 +93,20 @@ def test_a_damaged_line_is_reported_not_rewritten(tmp_path: Path) -> None:
     assert journal_file(tmp_path).read_bytes() == before
 
 
+def test_an_exchange_outside_the_universe_is_a_damaged_line(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    journal.append(decision_draft())
+    line = journal_file(tmp_path).read_text().replace('"XAMS"', '"XXXX"')
+    with journal_file(tmp_path).open("a") as file:
+        file.write(line)
+    before = journal_file(tmp_path).read_bytes()
+
+    with pytest.raises(ValueError, match="line 2"):
+        journal.decisions()
+
+    assert journal_file(tmp_path).read_bytes() == before
+
+
 def test_reasoning_with_newlines_and_euros_round_trips(tmp_path: Path) -> None:
     journal = Journal(tmp_path)
 

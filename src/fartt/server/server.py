@@ -296,6 +296,7 @@ class LevelsResult(BaseModel):
 
 
 Status = Literal["open", "scored"]
+StatusFilter = Literal["open", "scored", "all"]
 
 
 class JournalEntry(Decision):
@@ -330,7 +331,7 @@ def _status(decision: Decision) -> Status:
     return "open"
 
 
-def _no_match_note(status: str, ticker: str | None) -> str:
+def _no_match_note(status: StatusFilter, ticker: str | None) -> str:
     filters = [f"status={status}"] if status != "all" else []
     if ticker is not None:
         filters.append(f"ticker={ticker}")
@@ -890,7 +891,7 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
     )
     def get_decisions(
         status: Annotated[
-            Literal["open", "scored", "all"],
+            StatusFilter,
             Field(
                 description=(
                     "open: calls not scored yet, including those whose horizon "
