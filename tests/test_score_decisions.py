@@ -341,6 +341,30 @@ async def test_each_ticker_is_updated_once_per_run(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_each_ticker_is_read_once_per_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = cache_for(fake(), tmp_path)
+    seed(cache, past_call(), past_call(), past_call(direction="pass"))
+    reads: list[str] = []
+    for name in ("latest", "events"):
+        method = getattr(cache, name)
+
+        def spy(ticker: str, *args: Any, method: Any = method) -> Any:
+            reads.append(ticker)
+            return method(ticker, *args)
+
+        monkeypatch.setattr(cache, name, spy)
+
+    result = await score_decisions(cache)
+
+    assert len(result.structured_content["scored"]) == 3
+    # Candles and dividends: one read each for the stock, candles for IWDA.AS.
+    assert reads.count("ASML.AS") == 2
+    assert reads.count("IWDA.AS") == 1
+
+
+@pytest.mark.anyio
 async def test_a_score_written_by_another_run_counts_as_already_scored(
     tmp_path: Path,
 ) -> None:
