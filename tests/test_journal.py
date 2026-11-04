@@ -1,9 +1,11 @@
 import json
+from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from fartt.journal import Journal
+from fartt.journal import BenchmarkScore, Journal, Leg, Score
 from tests.fakes import decision_draft
 
 
@@ -126,3 +128,104 @@ def test_the_directory_is_created_on_the_first_write(tmp_path: Path) -> None:
     journal.append(decision_draft())
 
     assert journal_file(directory).exists()
+
+
+def score(decision_id: int, **changes: Any) -> Score:
+    """A score for call `decision_id` (ASML.AS 612.4 -> 640, IWDA 101.25 -> 104)."""
+    fields: dict[str, Any] = {
+        "decision_id": decision_id,
+        "scored_at": datetime(2026, 11, 27, 9, 0, tzinfo=UTC),
+        "start": Leg(session=date(2026, 10, 29), close=612.4),
+        "end": Leg(session=date(2026, 11, 26), close=640.0),
+        "dividends": 0.0,
+        "return_": 0.045069,
+        "benchmark": BenchmarkScore(
+            ticker="IWDA.AS",
+            start=Leg(session=date(2026, 10, 29), close=101.25),
+            end=Leg(session=date(2026, 11, 26), close=104.0),
+            return_=0.02716,
+        ),
+        "excess_return": 0.017909,
+        "right": True,
+    }
+    return Score(**(fields | changes))
+
+
+def test_a_score_round_trips(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    decision = journal.append(decision_draft())
+
+    stored = journal.append_score(score(1))
+
+    assert stored == score(1)
+    assert journal.scores() == {1: score(1)}
+    lines = journal_file(tmp_path).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    line = json.loads(lines[1])
+    assert line["kind"] == "score"
+    assert line["return"] == 0.045069
+    assert line["benchmark"]["return"] == 0.02716
+    assert journal.decisions() == [decision]
+
+
+def test_a_call_is_scored_once(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    journal.append(decision_draft())
+    journal.append_score(score(1))
+    before = journal_file(tmp_path).read_bytes()
+
+    assert journal.append_score(score(1, right=False)) is None
+
+    assert journal_file(tmp_path).read_bytes() == before
+    assert journal.scores()[1].right
+
+
+def test_a_score_for_an_unknown_call_is_refused(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    journal.append(decision_draft())
+    before = journal_file(tmp_path).read_bytes()
+
+    with pytest.raises(ValueError, match="7"):
+        journal.append_score(score(7))
+
+    assert journal_file(tmp_path).read_bytes() == before
+
+
+def test_a_second_score_line_is_a_damaged_line(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    journal.append(decision_draft())
+    journal.append_score(score(1))
+    second = journal_file(tmp_path).read_text().splitlines(keepends=True)[1]
+    with journal_file(tmp_path).open("a") as file:
+        file.write(second)
+
+    with pytest.raises(ValueError, match="line 3"):
+        journal.scores()
+    with pytest.raises(ValueError, match="line 3"):
+        journal.decisions()
+
+
+def test_a_score_without_its_call_is_a_damaged_line(tmp_path: Path) -> None:
+    other = Journal(tmp_path / "other")
+    other.append(decision_draft())
+    other.append_score(score(1))
+    line = journal_file(tmp_path / "other").read_text().splitlines(keepends=True)[1]
+    journal_file(tmp_path).write_text(line)
+
+    with pytest.raises(ValueError, match="line 1"):
+        Journal(tmp_path).scores()
+
+
+def test_a_torn_line_is_cut_before_a_score(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    journal.append(decision_draft())
+    first_line = journal_file(tmp_path).read_bytes()
+    with journal_file(tmp_path).open("ab") as file:
+        file.write(b'{"kind": "score", "decision_id": 1, "sta')
+
+    assert journal.append_score(score(1)) == score(1)
+
+    lines = journal_file(tmp_path).read_bytes().splitlines(keepends=True)
+    assert len(lines) == 2
+    assert lines[0] == first_line
+    assert json.loads(lines[1])["kind"] == "score"

@@ -8,8 +8,11 @@ appended: nothing here rewrites, truncates or deletes a complete line. The
 one exception is a torn last line (no newline: a write a kill cut short,
 never returned to the agent), which the next append cuts first.
 
-`kind` lets later stories (scores, trade plans) add their own lines to the
-same file without rewriting one; readers skip the kinds they don't know.
+A call's score is a line with `"kind": "score"` and its `decision_id`,
+written once its horizon has passed. A decision has at most one, and it
+comes after the decision's line. `kind` lets later stories (trade plans)
+add their own lines to the same file without rewriting one; readers skip
+the kinds they don't know.
 
 """
 
@@ -22,7 +25,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal, cast, get_args
 
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from fartt.data import SUFFIX_CALENDARS
 
@@ -47,6 +50,7 @@ Direction = Literal["buy", "pass"]
 Stance = Literal["for", "against"]
 
 DECISION = "decision"
+SCORE = "score"
 
 
 class Signal(BaseModel):
@@ -109,6 +113,64 @@ class Decision(DecisionDraft):
     id: int = Field(description="1, 2, 3, ... in recording order.")
 
 
+class Leg(BaseModel):
+    """One end of a scored horizon."""
+
+    session: date = Field(description="The session, on its own exchange.")
+    close: float = Field(description="Its close, split-adjusted, as cached.")
+    rate: float | None = Field(
+        default=None,
+        description=(
+            "The exchange rate used for that session, in units of the stock's "
+            "currency per euro; null for a euro price."
+        ),
+    )
+
+
+class BenchmarkScore(BaseModel):
+    """What the benchmark did over the call's horizon."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    ticker: str = Field(description="The benchmark's ticker.")
+    start: Leg = Field(description="Its session and close the call was stamped with.")
+    end: Leg = Field(
+        description="Its last session on or before the call's horizon_ends."
+    )
+    return_: float = Field(
+        alias="return",
+        serialization_alias="return",
+        description="Its return over the horizon, in EUR: 0.004 means 0.4%.",
+    )
+
+
+class Score(BaseModel):
+    """How a call turned out, measured in EUR against the benchmark."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    decision_id: int = Field(description="The id of the call scored.")
+    scored_at: datetime = Field(description="When the call was scored (UTC).")
+    start: Leg = Field(description="The stock at decision_session.")
+    end: Leg = Field(description="The stock at horizon_ends.")
+    dividends: float = Field(
+        description=(
+            "Dividends per share going ex after decision_session up to and "
+            "including horizon_ends, in the stock's currency."
+        )
+    )
+    return_: float = Field(
+        alias="return",
+        serialization_alias="return",
+        description="The stock's return with dividends, in EUR: 0.004 means 0.4%.",
+    )
+    benchmark: BenchmarkScore = Field(description="The benchmark over the horizon.")
+    excess_return: float = Field(description="return minus the benchmark's return.")
+    right: bool = Field(
+        description=("buy: excess_return above 0; pass: excess_return 0 or below.")
+    )
+
+
 class Journal:
     """The append-only journal in `directory`, created on the first write."""
 
@@ -123,24 +185,53 @@ class Journal:
             _cut_torn_tail(self.path)
             # The id is assigned under the lock, so two servers writing at
             # once still get distinct ids.
-            last = max((d.id for d in self._read()), default=0)
+            decisions, _ = self._read()
+            last = max((d.id for d in decisions), default=0)
             decision = Decision(id=last + 1, **draft.model_dump())
-            line = json.dumps(
-                {"kind": DECISION, **decision.model_dump(mode="json")},
-                ensure_ascii=False,
-            )
-            with self.path.open("a", encoding="utf-8") as file:
-                file.write(line + "\n")
-                file.flush()
-                os.fsync(file.fileno())
+            self._write_line({"kind": DECISION, **decision.model_dump(mode="json")})
         return decision
+
+    def append_score(self, score: Score) -> Score | None:
+        """
+        Store `score`, and return it. `None` when its call already has a
+        score, which stays as it is: a score is stored once. A `ValueError`
+        when there's no such call.
+
+        """
+        self.directory.mkdir(parents=True, exist_ok=True)
+        with self._lock(fcntl.LOCK_EX):
+            _cut_torn_tail(self.path)
+            # Checked under the lock, so two runs at once can't both score it.
+            decisions, scores = self._read()
+            if score.decision_id not in {d.id for d in decisions}:
+                raise ValueError(f"no call #{score.decision_id} in {self.path}")
+            if score.decision_id in scores:
+                return None
+            self._write_line(
+                {"kind": SCORE, **score.model_dump(mode="json", by_alias=True)}
+            )
+        return score
 
     def decisions(self) -> list[Decision]:
         """Every decision, oldest first."""
         if not self.directory.exists():
             return []
         with self._lock(fcntl.LOCK_SH):
-            return self._read()
+            return self._read()[0]
+
+    def scores(self) -> dict[int, Score]:
+        """Every score, keyed by the id of the call it scores."""
+        if not self.directory.exists():
+            return {}
+        with self._lock(fcntl.LOCK_SH):
+            return self._read()[1]
+
+    def _write_line(self, entry: dict[str, Any]) -> None:
+        line = json.dumps(entry, ensure_ascii=False)
+        with self.path.open("a", encoding="utf-8") as file:
+            file.write(line + "\n")
+            file.flush()
+            os.fsync(file.fileno())
 
     @contextmanager
     def _lock(self, operation: int) -> Generator[None]:
@@ -148,23 +239,34 @@ class Journal:
             fcntl.flock(lock, operation)
             yield
 
-    def _read(self) -> list[Decision]:
+    def _read(self) -> tuple[list[Decision], dict[int, Score]]:
         # A torn last line isn't read; only an append cuts it.
-        if not self.path.exists():
-            return []
         decisions: list[Decision] = []
+        scores: dict[int, Score] = {}
+        if not self.path.exists():
+            return decisions, scores
+        ids: set[int] = set()
         content = self.path.read_bytes()
         complete = content[: content.rfind(b"\n") + 1]
         for number, raw in enumerate(complete.splitlines(), start=1):
             entry = _parse(self.path, number, raw)
-            if entry.get("kind") == DECISION:
-                try:
-                    decisions.append(Decision.model_validate(entry))
-                except ValidationError as error:
-                    raise ValueError(
-                        f"{self.path}, line {number}: not a journal entry ({error})"
-                    ) from None
-        return decisions
+            try:
+                if entry.get("kind") == DECISION:
+                    decision = Decision.model_validate(entry)
+                    decisions.append(decision)
+                    ids.add(decision.id)
+                elif entry.get("kind") == SCORE:
+                    score = Score.model_validate(entry)
+                    if score.decision_id not in ids:
+                        raise ValueError(f"no earlier call #{score.decision_id}")
+                    if score.decision_id in scores:
+                        raise ValueError(f"call #{score.decision_id} is already scored")
+                    scores[score.decision_id] = score
+            except ValueError as error:  # ValidationError is a ValueError
+                raise ValueError(
+                    f"{self.path}, line {number}: not a journal entry ({error})"
+                ) from None
+        return decisions, scores
 
 
 def _parse(path: Path, number: int, raw: bytes) -> dict[str, Any]:
