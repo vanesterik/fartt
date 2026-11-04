@@ -226,11 +226,17 @@ def _round_step(price: float) -> float:
     return ROUND_STEP_ABOVE
 
 
-def _range(prices: list[float], sources: set[Source], atr: float) -> ZoneRange:
+def _range(
+    prices: list[float], sources: set[Source], atr: float, floor: float | None
+) -> ZoneRange:
     low, high = min(prices), max(prices)
     centre = (low + high) / 2
     half = MIN_WIDTH_ATR * atr / 2
     low, high = min(low, centre - half), max(high, centre + half)
+    if floor is not None and low < floor:
+        # Split off at the width cap, so close to the zone below that the
+        # widening reached into it: widen away from that zone instead.
+        low, high = floor, max(high, floor + MIN_WIDTH_ATR * atr)
     step = _round_step(centre)
     marks: set[Source] = {"round"} if math.floor(high / step) * step >= low else set()
     return round_value(low), round_value(high), frozenset(sources | marks)
@@ -241,8 +247,8 @@ def group_zones(candidates: list[tuple[float, Source]], atr: float) -> list[Zone
     Candidates merged into zones, ascending: (low, high, sources). A candidate
     joins the current zone within MERGE_ATR of the previous one, while the
     zone stays at most MAX_WIDTH_ATR wide; a zone is widened to at least
-    MIN_WIDTH_ATR around its centre, and marked `round` when a round number
-    lies in it.
+    MIN_WIDTH_ATR around its centre (away from the zone below, where that
+    would overlap it), and marked `round` when a round number lies in it.
 
     """
     zones: list[ZoneRange] = []
@@ -253,13 +259,17 @@ def group_zones(candidates: list[tuple[float, Source]], atr: float) -> list[Zone
             price - prices[-1] > MERGE_ATR * atr
             or price - prices[0] > MAX_WIDTH_ATR * atr
         ):
-            zones.append(_range(prices, sources, atr))
+            zones.append(_range(prices, sources, atr, _top(zones)))
             prices, sources = [], set()
         prices.append(price)
         sources.add(source)
     if prices:
-        zones.append(_range(prices, sources, atr))
+        zones.append(_range(prices, sources, atr, _top(zones)))
     return zones
+
+
+def _top(zones: list[ZoneRange]) -> float | None:
+    return zones[-1][1] if zones else None
 
 
 class ZoneMeasure(NamedTuple):
