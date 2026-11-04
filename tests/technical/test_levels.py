@@ -1,19 +1,26 @@
 from datetime import date, timedelta
 
 import exchange_calendars as xcals
+import numpy as np
 import pytest
+import talib
 
 from fartt.data import Candle
+from fartt.technical import Indicators, Trend, calculate_indicators, calculate_trend
 from fartt.technical.levels import (
+    DETAIL_MAX,
     Levels,
     MeasuredZone,
+    Sign,
     Source,
+    Zone,
     ZoneMeasure,
     calculate_levels,
     candidate_levels,
     group_zones,
     measure_zone,
     pick_zones,
+    support_signs,
     zone_strength,
 )
 
@@ -565,3 +572,236 @@ def test_a_zone_reports_its_evidence() -> None:
     assert 0 < bottom.volume_share < 1
     assert 0 <= bottom.strength <= 100
     assert bottom.last_touch in {c.date.isoformat() for c in path(closes)}
+
+
+# Signs for the nearest support. A neutral case decides no sign; each test
+# changes only the evidence under test.
+BASE = path(walk(*zigzag(90, 110, 15), 100))
+SUPPORT = Zone(
+    low=95.0,
+    high=100.0,
+    sources=["swing_low"],
+    touches=4,
+    turns=2,
+    last_touch="2026-10-01",
+    volume_share=0.05,
+    strength=50,
+    distance=0.0,
+    distance_atr=0.0,
+)
+
+
+def neutral_trend(daily: str = "sideways", weekly: str = "sideways") -> Trend:
+    trend = calculate_trend(BASE, "XAMS")
+    assert trend.weekly is not None
+    return trend.model_copy(
+        update={
+            "daily": trend.daily.model_copy(update={"direction": daily}),
+            "weekly": trend.weekly.model_copy(update={"direction": weekly}),
+        }
+    )
+
+
+def neutral_indicators(
+    price_vs: str | None = None,
+    down_day_ratio: float = 1.0,
+    rsi: str = "flat",
+    histogram: str = "flat",
+) -> Indicators:
+    indicators = calculate_indicators(BASE)
+    assert indicators.sma_200 and indicators.volume and indicators.rsi
+    assert indicators.macd
+    return indicators.model_copy(
+        update={
+            "sma_200": (
+                indicators.sma_200.model_copy(
+                    update={"price_vs": price_vs, "distance": 0.031}
+                )
+                if price_vs
+                else None
+            ),
+            "volume": indicators.volume.model_copy(
+                update={"down_day_ratio": down_day_ratio}
+            ),
+            "rsi": indicators.rsi.model_copy(update={"direction": rsi}),
+            "macd": indicators.macd.model_copy(
+                update={"histogram_direction": histogram}
+            ),
+        }
+    )
+
+
+def signs(
+    candles: list[Candle] | None = None,
+    zone: Zone = SUPPORT,
+    trend: Trend | None = None,
+    indicators: Indicators | None = None,
+    ex_dividend: frozenset[date] = frozenset(),
+) -> dict[str, Sign]:
+    found = support_signs(
+        zone,
+        candles or BASE,
+        ex_dividend,
+        trend or neutral_trend(),
+        indicators or neutral_indicators(),
+    )
+    return {sign.sign: sign for sign in found}
+
+
+def points(found: dict[str, Sign], name: str) -> str | None:
+    return found[name].points if name in found else None
+
+
+def test_a_neutral_case_has_no_signs() -> None:
+    assert signs(zone=SUPPORT.model_copy(update={"low": 50.0, "high": 51.0})) == {}
+
+
+@pytest.mark.parametrize(
+    ("direction", "expected"),
+    [("up", "holding"), ("down", "breaking"), ("sideways", None)],
+)
+def test_trend_signs_follow_get_trend(direction: str, expected: str | None) -> None:
+    far = SUPPORT.model_copy(update={"low": 50.0, "high": 51.0})
+    found = signs(zone=far, trend=neutral_trend(direction, direction))
+
+    assert points(found, "daily_trend") == expected
+    assert points(found, "weekly_trend") == expected
+    if expected:
+        assert found["daily_trend"].detail == f"daily trend {direction}"
+
+
+@pytest.mark.parametrize(
+    ("price_vs", "expected"),
+    [("above", "holding"), ("below", "breaking"), (None, None)],
+)
+def test_the_sma_200_sign(price_vs: str | None, expected: str | None) -> None:
+    far = SUPPORT.model_copy(update={"low": 50.0, "high": 51.0})
+
+    found = signs(zone=far, indicators=neutral_indicators(price_vs=price_vs))
+
+    assert points(found, "sma_200") == expected
+
+
+@pytest.mark.parametrize(
+    ("ratio", "expected"),
+    [(0.7, "holding"), (1.3, "breaking"), (1.0, None), (0.8, None), (1.2, None)],
+)
+def test_volume_on_drop_uses_the_thresholds(ratio: float, expected: str | None) -> None:
+    far = SUPPORT.model_copy(update={"low": 50.0, "high": 51.0})
+
+    found = signs(zone=far, indicators=neutral_indicators(down_day_ratio=ratio))
+
+    assert points(found, "volume_on_drop") == expected
+    if expected:
+        assert f"{ratio:.2f}x" in found["volume_on_drop"].detail
+
+
+def divergence(second_drop: list[float]) -> list[Candle]:
+    """A flat base, a sharp drop to 80, a bounce, then `second_drop` and a rise."""
+    closes = [100.0, 101.0] * 30 + [96, 92, 88, 84, 80, 82, 84, 86, 88]
+    return path([*closes, *second_drop, 81, 83, 85])
+
+
+def test_a_bullish_rsi_divergence_points_to_holding() -> None:
+    candles = divergence([87, 86, 85, 84, 83, 82, 81, 80, 79])
+    rsi = talib.RSI(np.array([c.close for c in candles]), timeperiod=14)
+    assert rsi[-4] > rsi[-17]  # the later, lower low has the higher RSI
+    far = SUPPORT.model_copy(update={"low": 50.0, "high": 51.0})
+
+    found = signs(candles, zone=far)
+
+    assert points(found, "rsi_divergence") == "holding"
+
+
+def test_a_lower_low_on_a_lower_rsi_is_no_divergence() -> None:
+    candles = divergence([84, 80, 76, 72, 68, 64, 60, 56, 52])
+    far = SUPPORT.model_copy(update={"low": 30.0, "high": 31.0})
+
+    assert "rsi_divergence" not in signs(candles, zone=far)
+
+
+@pytest.mark.parametrize(
+    ("rsi", "histogram", "expected"),
+    [
+        ("rising", "rising", "holding"),
+        ("falling", "falling", "breaking"),
+        ("rising", "falling", None),
+        ("flat", "rising", None),
+    ],
+)
+def test_momentum_needs_both_rsi_and_macd(
+    rsi: str, histogram: str, expected: str | None
+) -> None:
+    far = SUPPORT.model_copy(update={"low": 50.0, "high": 51.0})
+
+    found = signs(zone=far, indicators=neutral_indicators(rsi=rsi, histogram=histogram))
+
+    assert points(found, "momentum") == expected
+
+
+def dips(count: int, bottom: float = 96.0) -> list[Candle]:
+    closes = [110.0] * 30
+    for _ in range(count):
+        closes = walk(*closes, bottom, 110)
+    return path(closes)
+
+
+def test_three_recent_retests_point_to_breaking() -> None:
+    assert points(signs(dips(3)), "retests") == "breaking"
+    assert "retests" not in signs(dips(2))
+
+
+def test_a_recent_close_below_points_to_breaking() -> None:
+    found = signs(dips(1, bottom=94.0))
+
+    assert points(found, "recent_break") == "breaking"
+    assert "recent_break" not in signs(dips(1, bottom=96.0))
+
+
+def test_an_ex_dividend_close_below_does_not_count() -> None:
+    candles = dips(1, bottom=94.0)
+    below = frozenset(c.date for c in candles if c.close < 95)
+
+    assert "recent_break" not in signs(candles, ex_dividend=below)
+
+
+def test_three_turns_point_to_holding() -> None:
+    far = SUPPORT.model_copy(update={"low": 50.0, "high": 51.0})
+
+    assert points(signs(zone=far.model_copy(update={"turns": 3})), "turns") == "holding"
+    assert "turns" not in signs(zone=far)
+
+
+def test_no_support_means_no_signs() -> None:
+    result = levels(walk(*zigzag(90, 110, 15), 80))
+
+    assert result.support == []
+    assert result.signs == []
+
+
+def test_signs_are_listed_for_the_nearest_support() -> None:
+    closes = walk(*zigzag(90, 110, 15), 140, 126)
+    candles = path(closes)
+
+    result = calculate_levels(candles, "XAMS")
+
+    assert result.support
+    assert calculate_trend(candles, "XAMS").daily.direction == "up"
+    assert points({s.sign: s for s in result.signs}, "daily_trend") == "holding"
+
+
+def test_every_detail_is_short_and_nothing_is_neutral() -> None:
+    mixed = neutral_indicators(
+        price_vs="below", down_day_ratio=0.5, rsi="rising", histogram="rising"
+    )
+    candles = dips(3, bottom=94.0)
+    zone = SUPPORT.model_copy(update={"turns": 12})
+
+    found = signs(
+        candles, zone=zone, trend=neutral_trend("up", "down"), indicators=mixed
+    )
+
+    assert len(found) >= 7
+    for sign in found.values():
+        assert sign.points in ("holding", "breaking")
+        assert len(sign.detail) < DETAIL_MAX

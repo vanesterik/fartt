@@ -13,11 +13,12 @@ from typing import Literal, NamedTuple
 
 import numpy as np
 from pydantic import BaseModel, Field
-from talib import ATR
+from talib import ATR, RSI
 
 from fartt.data import Candle
-from fartt.technical.indicators import calculate_indicators, round_value
-from fartt.technical.trend import weekly_candles
+from fartt.features.technical_indicators_config import TechnicalIndicatorsConfig
+from fartt.technical.indicators import Indicators, calculate_indicators, round_value
+from fartt.technical.trend import Trend, calculate_trend, weekly_candles
 
 Source = Literal[
     "swing_high", "swing_low", "volume", "pivot", "sma_50", "sma_200", "round"
@@ -67,11 +68,14 @@ RETEST_SESSIONS = 60
 RETESTS = 3
 BREAK_SESSIONS = 20
 STRONG_TURNS = 3
+# Every sign's detail stays under this many characters (the output's budget).
 DETAIL_MAX = 80
 
 # Round-number steps: (below this price, step), then ROUND_STEP_ABOVE.
 ROUND_STEPS = ((20.0, 1.0), (100.0, 5.0), (500.0, 10.0))
 ROUND_STEP_ABOVE = 50.0
+
+RSI_PERIOD = TechnicalIndicatorsConfig().rsi.period
 
 ZoneRange = tuple[float, float, frozenset[Source]]
 Side = Literal["support", "resistance"]
@@ -578,6 +582,138 @@ def calculate_levels(
         atr=atr,
         support=support,
         resistance=resistance,
-        signs=[],
+        signs=(
+            support_signs(
+                support[0],
+                candles,
+                ex_dividend,
+                calculate_trend(candles, exchange),
+                indicators,
+            )
+            if support
+            else []
+        ),
         note=" ".join(notes) or None,
     )
+
+
+def _divergence(candles: list[Candle]) -> Sign | None:
+    """
+    A bullish divergence: of the two latest swing lows in the last
+    DIVERGENCE_SESSIONS sessions, the later is lower in price but higher in RSI.
+
+    """
+    if len(candles) <= RSI_PERIOD:
+        return None
+    rsi = RSI(
+        np.array([c.close for c in candles], dtype=np.float64), timeperiod=RSI_PERIOD
+    )
+    count = len(candles)
+    lows: list[int] = []
+    for i in range(
+        max(DIVERGENCE_SWING, count - DIVERGENCE_SESSIONS), count - DIVERGENCE_SWING
+    ):
+        neighbours = (
+            candles[i - DIVERGENCE_SWING : i]
+            + candles[i + 1 : i + 1 + DIVERGENCE_SWING]
+        )
+        if all(candles[i].low < other.low for other in neighbours):
+            lows.append(i)
+    if len(lows) < 2:
+        return None
+    first, second = lows[-2], lows[-1]
+    if np.isnan(rsi[first]) or np.isnan(rsi[second]):
+        return None
+    if round_value(candles[second].low) < round_value(
+        candles[first].low
+    ) and round_value(rsi[second]) > round_value(rsi[first]):
+        return Sign(
+            sign="rsi_divergence",
+            points="holding",
+            detail=(
+                f"lower low {round_value(candles[second].low):g} on higher rsi "
+                f"({rsi[first]:.0f} to {rsi[second]:.0f})"
+            ),
+        )
+    return None
+
+
+def support_signs(
+    zone: Zone,
+    candles: list[Candle],
+    ex_dividend: frozenset[date],
+    trend: Trend,
+    indicators: Indicators,
+) -> list[Sign]:
+    """
+    What points to the support `zone` holding or breaking, from the trend and
+    indicators as of the last of `candles` (oldest first). A sign that's
+    inconclusive is left out; nothing sums them.
+
+    """
+    signs: list[Sign] = []
+
+    def add(sign: str, holding: bool, breaking: bool, detail: str) -> None:
+        if holding or breaking:
+            signs.append(
+                Sign(
+                    sign=sign,
+                    points="holding" if holding else "breaking",
+                    detail=detail,
+                )
+            )
+
+    daily = trend.daily.direction
+    add("daily_trend", daily == "up", daily == "down", f"daily trend {daily}")
+    if trend.weekly is not None:
+        weekly = trend.weekly.direction
+        add("weekly_trend", weekly == "up", weekly == "down", f"weekly trend {weekly}")
+    if indicators.sma_200 is not None:
+        sma = indicators.sma_200
+        add(
+            "sma_200",
+            sma.price_vs == "above",
+            sma.price_vs == "below",
+            f"close {abs(sma.distance):.1%} {sma.price_vs} the sma_200",
+        )
+    ratio = indicators.volume.down_day_ratio if indicators.volume else None
+    if ratio is not None:
+        add(
+            "volume_on_drop",
+            ratio < DOWN_DAY_HOLDING,
+            ratio > DOWN_DAY_BREAKING,
+            f"down-day volume {ratio:.2f}x up-day",
+        )
+    divergence = _divergence(candles)
+    if divergence is not None:
+        signs.append(divergence)
+    rsi = indicators.rsi.direction if indicators.rsi else None
+    histogram = indicators.macd.histogram_direction if indicators.macd else None
+    if rsi == histogram:
+        add(
+            "momentum",
+            rsi == "rising",
+            rsi == "falling",
+            f"rsi and macd histogram both {rsi}",
+        )
+    retests = len(_touches(zone.low, zone.high, candles[-RETEST_SESSIONS:]))
+    add(
+        "retests",
+        False,
+        retests >= RETESTS,
+        f"{retests} touches in the last {RETEST_SESSIONS} sessions",
+    )
+    broke = [
+        c
+        for c in candles[-BREAK_SESSIONS:]
+        if c.date not in ex_dividend and round_value(c.close) < zone.low
+    ]
+    if broke:
+        add(
+            "recent_break",
+            False,
+            True,
+            f"closed below {zone.low:g} on {broke[-1].date.isoformat()}",
+        )
+    add("turns", zone.turns >= STRONG_TURNS, False, f"{zone.turns} turns")
+    return signs
