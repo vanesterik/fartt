@@ -22,7 +22,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal, cast, get_args
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+from fartt.data import SUFFIX_CALENDARS
 
 # The index every call is measured against: iShares Core MSCI World
 # (accumulating, EUR) on Euronext Amsterdam.
@@ -91,6 +93,14 @@ class DecisionDraft(BaseModel):
     benchmark: BenchmarkClose = Field(
         description="The benchmark's last close when the call was recorded."
     )
+
+    @field_validator("exchange")
+    @classmethod
+    def _in_the_universe(cls, exchange: str) -> str:
+        # A hand-edited code would otherwise fail later, in the calendar.
+        if exchange not in SUFFIX_CALENDARS.values():
+            raise ValueError(f"{exchange} isn't an exchange in the universe")
+        return exchange
 
 
 class Decision(DecisionDraft):
