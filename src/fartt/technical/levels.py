@@ -335,6 +335,10 @@ def _is_turn(
     if side == 0 or math.isnan(atr):
         return False
     after = [c.close for c in window[touch.end : touch.end + BOUNCE_SESSIONS]]
+    # Kept to mirror the design's rule, but it can't decide a turn while a
+    # touch ends at the last session in the zone: the session after lies
+    # wholly outside, so its close is on one side, and the bounce loop below
+    # already rejects the other. It bites only if touches are redefined.
     if not any(_side(close, low, high) == side for close in after[:TURN_SESSIONS]):
         return False
     edge = high if side > 0 else low
