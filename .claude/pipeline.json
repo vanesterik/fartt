@@ -1,0 +1,31 @@
+{
+  "project": {
+    "owner": "vanesterik",
+    "number": 3,
+    "id": "PVT_kwHOACtBLs4Be56X",
+    "statusFieldId": "PVTSSF_lAHOACtBLs4Be56XzhZQszs",
+    "options": {
+      "Backlog": "f75ad846",
+      "Design": "47fc9ee4",
+      "Build": "aba860b9",
+      "Test": "e18bf179",
+      "Review": "15682e39",
+      "Done": "98236657"
+    }
+  },
+  "test": {
+    "basePort": 4000,
+    "start": "",
+    "stop": "",
+    "healthUrl": "",
+    "baseUrl": "",
+    "writablePaths": [
+      "tests/integration/",
+      "artifacts/"
+    ]
+  },
+  "integration": {
+    "dir": "tests/integration",
+    "runCommand": "uv run pytest tests/integration -m network"
+  }
+}

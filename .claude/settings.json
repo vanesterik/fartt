@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "unity": {
+      "source": {
+        "source": "github",
+        "repo": "vanesterik/unity"
+      },
+      "autoUpdate": true
+    }
+  },
+  "enabledPlugins": {
+    "unity@unity": true
+  }
+}
