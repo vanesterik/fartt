@@ -208,7 +208,7 @@ async def test_should_base_the_weekly_timeframe_on_closed_weeks_only(
     `test_an_unclosed_week_is_in_the_note` and
     `test_get_trend_returns_both_timeframes` check the note either way.
     """
-    import exchange_calendars
+    from fartt.data import exchange_calendar
 
     async with _server(tmp_path) as client:
         trend = await _call(client, "get_trend", ticker="ASML.AS")
@@ -218,7 +218,7 @@ async def test_should_base_the_weekly_timeframe_on_closed_weeks_only(
     newest = dt.date.fromisoformat(trend["daily"]["based_on"])
     assert rows[-1][0] == newest
     monday = newest - dt.timedelta(days=newest.weekday())
-    sessions = exchange_calendars.get_calendar("XAMS").sessions_in_range(
+    sessions = exchange_calendar("XAMS").sessions_in_range(
         monday, monday + dt.timedelta(days=6)
     )
     week_closed = newest >= sessions[-1].date()
