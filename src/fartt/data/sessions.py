@@ -35,18 +35,18 @@ SUFFIX_CALENDARS = {
 FX_SUFFIX = "=X"
 FX_CALENDAR = "24/5"
 
-# Letters, digits, dots, dashes and the `=` of an exchange rate: every ticker
-# in the universe, and nothing that could step outside a cache directory
-# (`=` is harmless in a folder name).
-_TICKER = re.compile(r"[A-Z0-9.\-=]+")
+# Letters, digits, dots and dashes, ending in `=X` for an exchange rate:
+# every ticker in the universe, and nothing that could step outside a cache
+# directory. `=` anywhere else (a future, GC=F) would pass for an NYSE stock.
+_TICKER = re.compile(r"[A-Z0-9.\-]+(?:=X)?")
 
 
 def normalise_ticker(ticker: str) -> str:
     """
     A ticker stripped and upper-cased, in Yahoo's format. Raises
     `UnknownTicker` for anything that can't be one (empty, or holding a
-    character other than a letter, digit, `.`, `-` or `=`), before it reaches a
-    request or a file path.
+    character other than a letter, digit, `.` or `-`, apart from an `=X`
+    ending), before it reaches a request or a file path.
 
     """
     normalised = ticker.strip().upper()
