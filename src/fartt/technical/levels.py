@@ -447,7 +447,7 @@ def _zone(
     zone: MeasuredZone, candles: list[Candle], last: float, atr: float, side: Side
 ) -> Zone:
     gap = _gap(zone, last, side)
-    signed = -gap if side == "support" else gap
+    signed = -gap if side == "support" and gap else gap  # never -0.0
     last_touch = zone.measure.last_touch
     assert last_touch is not None  # a zone with turns was touched
     return Zone(
