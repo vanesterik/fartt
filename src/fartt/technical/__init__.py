@@ -11,17 +11,33 @@ from fartt.technical.indicators import (
     calculate_indicators,
     moving_average,
 )
+from fartt.technical.trend import (
+    Basis,
+    TimeframeTrend,
+    Trend,
+    TrendCross,
+    TrendDirection,
+    calculate_trend,
+    weekly_candles,
+)
 
 __all__ = [
     "DECIMALS",
     "SLOPE_SESSIONS",
     "Atr",
+    "Basis",
     "Cross",
     "Indicators",
     "Macd",
     "MovingAverage",
     "Rsi",
+    "TimeframeTrend",
+    "Trend",
+    "TrendCross",
+    "TrendDirection",
     "Volume",
     "calculate_indicators",
+    "calculate_trend",
     "moving_average",
+    "weekly_candles",
 ]
