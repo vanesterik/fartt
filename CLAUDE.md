@@ -167,7 +167,7 @@ The developer's approval of the design is the one human gate: `/unity:design` mo
 <!-- Filled in by /unity:init; adjust as needed. write-e2e-test reads this section. -->
 
 - No browser UI and no Playwright: the server speaks MCP over stdio, so integration tests carry the test role.
-- Integration directory: `tests/integration/` (pytest; `test_server_stdio.py` starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder). Run with `uv run pytest tests/integration -m integration -n auto` (the offline ones and the ones marked `network`, which call Yahoo); `task test` skips them all. A new integration test runs on the `seeded_assets` snapshot with `snapshot.OFFLINE` unless it's about Yahoo's own answer.
+- Integration directory: `tests/integration/` (pytest; `test_server_stdio.py` starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder). Run with `uv run pytest tests/integration -m "integration and not network" -n auto` (`task test:integration`): offline only. The tests marked `network` are for checking a runtime dependency update (Dependabot) and aren't part of testing a story; `task test` skips them all. A new integration test runs on the `seeded_assets` snapshot with `snapshot.OFFLINE` unless it's about Yahoo's own answer.
 - Translations: none
 - UI components: none
 - API layer: the MCP tools in `src/fartt/server/`
