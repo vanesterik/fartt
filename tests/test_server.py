@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -883,6 +883,7 @@ class FakeServer:
         self.cache = cache
         self.journal = journal
         self.ran = False
+        self.provider_kwargs: dict[str, Any] = {}
 
     def run(self) -> None:
         self.ran = True
@@ -898,13 +899,20 @@ def run_main(
         return built[-1]
 
     monkeypatch.setattr(server_module, "build_server", fake_build_server)
-    monkeypatch.setattr(server_module, "YFinanceProvider", lambda: provider([]))
+    providers: list[Any] = []
+
+    def fake_provider(**kwargs: Any) -> Any:
+        providers.append(kwargs)
+        return provider([])
+
+    monkeypatch.setattr(server_module, "YFinanceProvider", fake_provider)
     # A developer's own .env must not decide what these tests see.
     monkeypatch.setattr(
         server_module, "ENV_FILE", env_file or ROOT / "no-such-dir" / ".env"
     )
     server_module.main()
     assert built[0].ran
+    built[0].provider_kwargs = providers[0]
     return built[0]
 
 
@@ -965,6 +973,55 @@ def test_the_environment_wins_over_the_env_file(
     server = run_main(monkeypatch, env_file)
 
     assert server.cache.directory("AAPL") == tmp_path / "from-env" / "stocks" / "AAPL"
+
+
+def test_main_runs_on_the_real_clock_without_fartt_now(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(server_module.NOW_ENV, raising=False)
+
+    server = run_main(monkeypatch)
+
+    assert abs(server.cache.clock() - datetime.now(UTC)) < timedelta(seconds=5)
+    assert server.provider_kwargs["clock"] is server.cache.clock
+
+
+def test_fartt_now_pins_the_clock_of_the_cache_and_the_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(server_module.NOW_ENV, "2026-11-05T13:00:00+01:00")
+
+    server = run_main(monkeypatch)
+
+    pinned = datetime(2026, 11, 5, 12, tzinfo=UTC)
+    assert server.cache.clock() == pinned
+    assert server.cache.clock().tzinfo == UTC
+    assert server.provider_kwargs["clock"]() == pinned
+
+
+@pytest.mark.parametrize(
+    ("setting", "words"),
+    [("next tuesday", "ISO 8601"), ("2026-11-05T12:00:00", "no offset")],
+)
+def test_an_unreadable_fartt_now_stops_the_server_saying_why(
+    monkeypatch: pytest.MonkeyPatch, setting: str, words: str
+) -> None:
+    monkeypatch.setenv(server_module.NOW_ENV, setting)
+
+    with pytest.raises(SystemExit, match=words):
+        run_main(monkeypatch)
+
+
+def test_fartt_now_in_the_env_file_is_ignored(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv(server_module.NOW_ENV, raising=False)
+    env_file = tmp_path / ".env"
+    env_file.write_text("FARTT_NOW=2000-01-03T12:00:00+00:00\n")
+
+    server = run_main(monkeypatch, env_file)
+
+    assert server.cache.clock().year == datetime.now(UTC).year
 
 
 def test_the_example_env_file_names_the_assets_dir() -> None:

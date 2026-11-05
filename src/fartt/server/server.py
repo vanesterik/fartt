@@ -1,7 +1,7 @@
 import os
 import sys
-from collections.abc import Mapping
-from datetime import date, datetime
+from collections.abc import Callable, Mapping
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated, Literal, NamedTuple
 
@@ -90,6 +90,12 @@ DEFAULT_ASSETS_DIR = ROOT / "assets"
 # test does) or in the repository's .env (see .env.example).
 ASSETS_DIR_ENV = "FARTT_ASSETS_DIR"
 ENV_FILE = ROOT / ".env"
+# FARTT_NOW pins the server's clock to one moment (ISO 8601 with an offset,
+# `2026-11-05T12:00:00+00:00`), so a cache filled up to that moment counts as
+# current and nothing is fetched for it. The integration tests run the server
+# on a checked-in snapshot this way. Read from the environment only, never
+# from .env, so a forgotten line can't freeze the operator's own server.
+NOW_ENV = "FARTT_NOW"
 
 INSTRUCTIONS = (
     "Fartt's stock analysis server. Tools take one ticker per call, in "
@@ -1455,6 +1461,29 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
     return server
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _clock() -> Callable[[], datetime]:
+    """The real clock, or the moment FARTT_NOW pins it to."""
+    setting = os.environ.get(NOW_ENV)
+    if not setting:
+        return _utc_now
+    try:
+        pinned = datetime.fromisoformat(setting)
+    except ValueError as error:
+        raise SystemExit(
+            f"{NOW_ENV}={setting} isn't an ISO 8601 date and time; "
+            "give one with an offset, such as 2026-11-05T12:00:00+00:00"
+        ) from error
+    if pinned.tzinfo is None:
+        raise SystemExit(f"{NOW_ENV}={setting} has no offset; add one, such as +00:00")
+    pinned = pinned.astimezone(UTC)
+    logger.warning(f"{NOW_ENV} pins the clock at {pinned.isoformat()}")
+    return lambda: pinned
+
+
 def main() -> None:
     """
     Run the server over stdio: Claude Code starts it from `.mcp.json`
@@ -1467,7 +1496,9 @@ def main() -> None:
         ASSETS_DIR_ENV
     )
     assets_dir = ROOT / setting if setting else DEFAULT_ASSETS_DIR
+    clock = _clock()
     logger.info(f"Serving stocks cached in {assets_dir} over stdio")
     build_server(
-        StockCache(YFinanceProvider(), assets_dir), Journal(assets_dir / "journal")
+        StockCache(YFinanceProvider(clock=clock), assets_dir, clock=clock),
+        Journal(assets_dir / "journal"),
     ).run()
