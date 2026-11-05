@@ -1,5 +1,5 @@
 """
-End-to-end check of the MCP server over stdio, the way Claude Code runs it:
+Integration check of the whole MCP server over stdio, the way Claude Code runs it:
 the command and arguments come from the project's `.mcp.json`, unchanged, and
 `FARTT_ASSETS_DIR` points the cache at a temporary folder.
 `test_tools_over_stdio` fills an empty folder from the live data provider, the
@@ -125,7 +125,7 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
                 "ticker": "ASML.AS",
                 "direction": "buy",
                 "horizon": 20,
-                "reasoning": "End-to-end check over stdio.",
+                "reasoning": "Integration check over stdio.",
                 "signals": [{"name": "trend", "stance": "for"}],
             },
         )
@@ -180,7 +180,7 @@ def test_stdout_carries_only_the_protocol(seeded_assets: Path) -> None:
             "params": {
                 "protocolVersion": LATEST_PROTOCOL_VERSION,
                 "capabilities": {},
-                "clientInfo": {"name": "fartt-e2e", "version": "0"},
+                "clientInfo": {"name": "fartt-integration", "version": "0"},
             },
         },
         {"jsonrpc": "2.0", "method": "notifications/initialized"},

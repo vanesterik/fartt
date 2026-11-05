@@ -65,7 +65,7 @@ tasks:
       - uv run pytest -m "integration and not network" -n auto
 
   # The tests marked `network`, which call Yahoo Finance: the provider's live
-  # tests, the one end-to-end run of every tool from an empty folder, and the
+  # tests, the one integration run of every tool from an empty folder, and the
   # integration checks of what Yahoo answers (a first download, a quote, a
   # ticker it doesn't list). A gate must not fail because Yahoo is down, so
   # `check` leaves them out; run them after a runtime dependency update.
