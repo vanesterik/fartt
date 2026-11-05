@@ -326,6 +326,25 @@ async def test_a_delisted_ticker_stays_open(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+async def test_a_ticker_without_history_stays_open(tmp_path: Path) -> None:
+    # Its cache was deleted, and Yahoo has no daily history for it any more.
+    cache = cache_for(fake(**{"ASML.AS": History([], [], [])}), tmp_path)
+    seed(cache, past_call())
+
+    result = await score_decisions(cache)
+
+    assert not result.is_error, result.content
+    assert result.structured_content["not_scored"] == [
+        {
+            "id": 1,
+            "ticker": "ASML.AS",
+            "horizon_ends": "2026-09-29",
+            "reason": "Yahoo has no daily history for ASML.AS",
+        }
+    ]
+
+
+@pytest.mark.anyio
 async def test_each_ticker_is_updated_once_per_run(tmp_path: Path) -> None:
     provider = fake()
     cache = cache_for(provider, tmp_path)

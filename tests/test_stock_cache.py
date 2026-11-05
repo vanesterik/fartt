@@ -14,9 +14,10 @@ from fartt.data import (
     Listing,
     ProviderUnavailable,
     Split,
+    UnknownTicker,
     UnsupportedExchange,
 )
-from fartt.stock_cache import StockCache, UpdateResult
+from fartt.stock_cache import NoHistory, StockCache, UpdateResult
 from tests.fakes import FakeProvider, stock_candle
 
 AAPL = Listing("AAPL", "Apple Inc.", "USD", "XNYS")
@@ -374,3 +375,90 @@ def test_a_ticker_that_names_no_exchange_is_rejected_by_reads(
 ) -> None:
     with pytest.raises(UnsupportedExchange):
         cache.latest("..", 1)
+
+
+def test_a_first_fill_without_candles_raises_no_history_and_writes_nothing(
+    cache: StockCache, provider: FakeProvider, tmp_path: Path
+) -> None:
+    provider.histories["AAPL"] = History([], [], [])
+
+    with pytest.raises(NoHistory) as raised:
+        cache.update("AAPL")
+
+    assert raised.value.listing == AAPL
+    assert not (tmp_path / "stocks" / "AAPL").exists()
+
+
+def test_an_unknown_ticker_leaves_no_folder(cache: StockCache, tmp_path: Path) -> None:
+    with pytest.raises(UnknownTicker):
+        cache.update("NOSUCH")
+
+    assert not (tmp_path / "stocks" / "NOSUCH").exists()
+
+
+def test_an_unreachable_provider_on_a_first_fill_leaves_no_folder(
+    cache: StockCache, provider: FakeProvider, tmp_path: Path
+) -> None:
+    provider.reachable = False
+
+    with pytest.raises(ProviderUnavailable):
+        cache.update("AAPL")
+
+    assert not (tmp_path / "stocks" / "AAPL").exists()
+
+
+def header_only_leftover(tmp_path: Path) -> Path:
+    # What a first fill without history left behind before #116.
+    directory = tmp_path / "stocks" / "AAPL"
+    directory.mkdir(parents=True)
+    (directory / ".lock").touch()
+    (directory / "candles.csv").write_text("Date,Open,High,Low,Close,Volume\n")
+    (directory / "events.csv").write_text("Date,Type,Value\n")
+    (directory / "listing.json").write_text(json.dumps(AAPL._asdict()))
+    return directory
+
+
+def test_a_header_only_leftover_is_refilled(cache: StockCache, tmp_path: Path) -> None:
+    header_only_leftover(tmp_path)
+
+    result = cache.update("AAPL")
+
+    assert result == UpdateResult(new_candles=3, rebuilt=None, fetched=True)
+    assert [c.date for c in cache.latest("AAPL", 10)] == DAYS[:3]
+
+
+def test_a_header_only_leftover_without_history_raises_no_history_and_stays(
+    cache: StockCache, provider: FakeProvider, tmp_path: Path
+) -> None:
+    directory = header_only_leftover(tmp_path)
+    before = {path.name: path.read_text() for path in directory.iterdir()}
+    provider.histories["AAPL"] = History([], [], [])
+
+    with pytest.raises(NoHistory):
+        cache.update("AAPL")
+
+    assert {path.name: path.read_text() for path in directory.iterdir()} == before
+    assert cache.latest("AAPL", 10) == []
+
+
+def test_a_fill_racing_a_first_fill_updates_what_it_wrote(
+    cache: StockCache, provider: FakeProvider, tmp_path: Path
+) -> None:
+    # Another server fills the cache while this one fetches: this one finds
+    # the candles under the lock and updates them instead of writing its own.
+    original = provider.history
+    raced: list[bool] = []
+
+    def racing_history(ticker: str, start: date | None) -> History:
+        fetched = original(ticker, start)
+        if not raced:
+            raced.append(True)
+            StockCache(provider, tmp_path, clock=lambda: provider.now).update("AAPL")
+        return fetched
+
+    provider.history = racing_history  # type: ignore[method-assign]
+
+    result = cache.update("AAPL")
+
+    assert result == UpdateResult(new_candles=0, rebuilt=None, fetched=False)
+    assert [c.date for c in cache.latest("AAPL", 10)] == DAYS[:3]

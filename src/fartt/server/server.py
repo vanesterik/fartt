@@ -48,7 +48,7 @@ from fartt.performance import (
     calculate_performance,
 )
 from fartt.scoring import RATE_DECIMALS, Unscorable, score_call
-from fartt.stock_cache import StockCache, UpdateResult
+from fartt.stock_cache import NoHistory, StockCache, UpdateResult
 from fartt.technical import (
     DECIMALS,
     Atr,
@@ -575,9 +575,10 @@ def _update(
 ) -> tuple[str, UpdateResult | None]:
     """
     The ticker normalised, and the result of bringing its cache up to date,
-    or `None` when the provider is unreachable. Every other failure becomes
-    a ToolError: the SDK reports any other exception to the agent as a bare
-    "Error executing tool", so each one says what to do.
+    or `None` when the provider is unreachable. `NoHistory` propagates, for
+    the caller to word. Every other failure becomes a ToolError: the SDK
+    reports any other exception to the agent as a bare "Error executing
+    tool", so each one says what to do.
 
     """
     try:
@@ -613,7 +614,14 @@ def _snapshot(tool: str, cache: StockCache, ticker: str, count: int) -> Snapshot
     nothing cached, or no closed sessions yet, it's a ToolError.
 
     """
-    ticker, update = _update(tool, cache, ticker)
+    try:
+        ticker, update = _update(tool, cache, ticker)
+    except NoHistory as error:
+        raise ToolError(
+            f"The data provider has no closed sessions for "
+            f"{error.listing.ticker} yet, for instance because it listed "
+            "today. Try again after its first session closes."
+        ) from error
     try:
         candles = cache.latest(ticker, count)
         listing = cache.listing(ticker)
@@ -757,9 +765,16 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
         is open, and how delayed the quote is. Use it to judge liquidity and
         where a limit order should sit.
         """
-        ticker, update = _update("get_quote", cache, ticker)
-        if update is None:
-            raise _unreachable(ticker)
+        # A listed ticker without daily history still has a live quote; its
+        # listing comes with the error, since the cache doesn't keep it.
+        uncached: Listing | None = None
+        try:
+            ticker, update = _update("get_quote", cache, ticker)
+            if update is None:
+                raise _unreachable(ticker)
+        except NoHistory as error:
+            uncached = error.listing
+            ticker = uncached.ticker
         try:
             quote = cache.provider.quote(ticker)
         except UnknownTicker as error:
@@ -767,11 +782,13 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
         except ProviderUnavailable as error:
             logger.warning(f"get_quote {ticker}: {error}")
             raise _unreachable(ticker) from error
-        try:
-            listing = cache.listing(ticker)
-            candles = cache.latest(ticker, AVERAGE_SESSIONS + 1)
-        except CACHE_ERRORS as error:
-            raise _cache_error("get_quote", ticker, error) from error
+        listing, candles = uncached, list[Candle]()
+        if uncached is None:
+            try:
+                listing = cache.listing(ticker)
+                candles = cache.latest(ticker, AVERAGE_SESSIONS + 1)
+            except CACHE_ERRORS as error:
+                raise _cache_error("get_quote", ticker, error) from error
         if listing is None:
             raise _unreachable(ticker)
 
@@ -1206,6 +1223,8 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
                 unreachable.add(ticker)
             except UnknownTicker:
                 unlisted[ticker] = f"Yahoo no longer lists {ticker}"
+            except NoHistory:
+                unlisted[ticker] = f"Yahoo has no daily history for {ticker}"
             except UnsupportedExchange as error:
                 unlisted[ticker] = str(error)
             except CACHE_ERRORS as error:

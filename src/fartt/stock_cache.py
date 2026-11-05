@@ -33,6 +33,19 @@ class UpdateResult(NamedTuple):
     fetched: bool  # Whether the provider was asked at all
 
 
+class NoHistory(Exception):
+    """
+    The provider lists the ticker but returned no closed daily session for
+    it, so there's nothing to cache. Carries the listing it fetched, which
+    the cache doesn't store.
+
+    """
+
+    def __init__(self, listing: Listing) -> None:
+        super().__init__(f"The provider has no daily history for {listing.ticker}")
+        self.listing = listing
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -77,17 +90,26 @@ class StockCache:
         """
         Bring the ticker's cache up to date with the provider. A ticker the
         cache hasn't seen is fetched in full. Provider errors propagate, and
-        leave the cached files as they were.
+        leave the cached files as they were. A fill without cached candles
+        that gets none raises `NoHistory` and writes nothing.
 
         """
         ticker = normalise_ticker(ticker)
         calendar_for(ticker)  # an unsupported exchange fails before any I/O
+        fetched = None
+        if not self.directory(ticker).exists():
+            # A first fill fetches before it creates the directory, so a
+            # provider error or an empty history leaves no folder behind,
+            # and nothing is ever removed from under another update.
+            fetched = self._fetch_all(ticker)
         with self._lock(ticker, fcntl.LOCK_EX) as directory:
             candles_path = directory / "candles.csv"
             _heal_tail(candles_path)
             last = _last_candle(candles_path)
             if last is None:
-                return self._rebuild(ticker, reason=None)
+                listing, history = fetched or self._fetch_all(ticker)
+                self._write_all(ticker, listing, history)
+                return UpdateResult(len(history.candles), None, True)
             if (
                 not (directory / "events.csv").exists()
                 or not (directory / "listing.json").exists()
@@ -154,11 +176,19 @@ class StockCache:
             first_trade=date.fromisoformat(first_trade) if first_trade else None,
         )
 
-    def _rebuild(self, ticker: str, reason: str | None) -> UpdateResult:
+    def _rebuild(self, ticker: str, reason: str) -> UpdateResult:
         listing = self.provider.listing(ticker)
         history = self.provider.history(ticker, None)
         self._write_all(ticker, listing, history)
         return UpdateResult(len(history.candles), reason, True)
+
+    def _fetch_all(self, ticker: str) -> tuple[Listing, History]:
+        # The listing and full history of a ticker with no cached candles.
+        listing = self.provider.listing(ticker)
+        history = self.provider.history(ticker, None)
+        if not history.candles:
+            raise NoHistory(listing)
+        return listing, history
 
     @contextmanager
     def _lock(self, ticker: str, operation: int) -> Generator[Path]:
