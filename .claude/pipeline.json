@@ -26,6 +26,6 @@
   },
   "integration": {
     "dir": "tests/integration",
-    "runCommand": "uv run pytest tests/integration -m integration -n auto"
+    "runCommand": "uv run pytest tests/integration -m \"integration and not network\" -n auto"
   }
 }
