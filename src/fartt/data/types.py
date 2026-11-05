@@ -41,6 +41,9 @@ class Listing(NamedTuple):
     name: str
     currency: str  # ISO 4217, e.g. "EUR"
     exchange: str  # The exchange_calendars code, e.g. "XAMS"
+    # The first session it traded, in the exchange's calendar; None when the
+    # provider doesn't say.
+    first_trade: date | None = None
 
 
 class Quote(NamedTuple):

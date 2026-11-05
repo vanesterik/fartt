@@ -1,3 +1,4 @@
+import json
 import threading
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -72,6 +73,39 @@ def test_events_and_listing_are_cached(cache: StockCache) -> None:
 
     assert cache.events("AAPL") == ([Dividend(date(2026, 10, 27), 0.26)], [])
     assert cache.listing("AAPL") == AAPL
+
+
+def test_the_first_trade_date_is_cached(
+    cache: StockCache, provider: FakeProvider
+) -> None:
+    listing = AAPL._replace(first_trade=date(1980, 12, 12))
+    provider.listings["AAPL"] = listing
+
+    cache.update("AAPL")
+
+    assert cache.listing("AAPL") == listing
+
+
+def test_a_listing_cached_without_a_first_trade_date_still_reads(
+    cache: StockCache, tmp_path: Path
+) -> None:
+    # A listing.json written before the first trade date was kept.
+    cache.update("AAPL")
+    (tmp_path / "stocks" / "AAPL" / "listing.json").write_text(
+        json.dumps(
+            {
+                "ticker": "AAPL",
+                "name": "Apple Inc.",
+                "currency": "USD",
+                "exchange": "XNYS",
+            }
+        )
+    )
+
+    listing = cache.listing("AAPL")
+
+    assert listing == AAPL
+    assert listing is not None and listing.first_trade is None
 
 
 def test_first_update_never_writes_the_forming_session(cache: StockCache) -> None:

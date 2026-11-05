@@ -11,6 +11,7 @@ from yfinance.exceptions import YFPricesMissingError, YFTickerMissingError
 from fartt.data.provider import ProviderUnavailable, UnknownTicker
 from fartt.data.sessions import (
     calendar_for,
+    exchange_date,
     newest_closed_session,
     normalise_ticker,
 )
@@ -66,7 +67,13 @@ class YFinanceProvider:
         if "currency" not in info or "quoteType" not in info:
             raise UnknownTicker(f"Yahoo doesn't list '{ticker}'")
         name = info.get("longName") or info.get("shortName") or ticker
-        return Listing(ticker, str(name), str(info["currency"]), exchange)
+        return Listing(
+            ticker,
+            str(name),
+            str(info["currency"]),
+            exchange,
+            _first_trade(info, exchange),
+        )
 
     def history(self, ticker: str, start: date | None) -> History:
         ticker = normalise_ticker(ticker)
@@ -143,6 +150,19 @@ class YFinanceProvider:
             time=datetime.fromtimestamp(struck, UTC),
             delay_minutes=delay if isinstance(delay, int) else None,
         )
+
+
+def _first_trade(info: dict[str, Any], exchange: str) -> date | None:
+    # Yahoo's milliseconds mark the first session's open, so the exchange's
+    # own time zone gives its date; in UTC a listing far east of it would
+    # land on the day before.
+    value = info.get("firstTradeDateMilliseconds")
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    try:
+        return exchange_date(exchange, datetime.fromtimestamp(value / 1000, UTC))
+    except OverflowError, OSError, ValueError:
+        return None
 
 
 def _positive(value: object) -> float | None:
