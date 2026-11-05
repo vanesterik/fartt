@@ -65,6 +65,15 @@ tasks:
     cmds:
       - uv run pytest -m network -n auto
 
+  # The integration tests' market data (tests/integration/snapshot/): the
+  # tickers they read, downloaded as they stood at SNAPSHOT_NOW in
+  # tests/integration/snapshot.py. Move that moment forward first; then
+  # update the tests whose expectations are dates or values from the snapshot.
+  test:snapshot:
+    desc: Rebuild the integration tests' data snapshot from Yahoo Finance
+    cmds:
+      - uv run python -m tests.integration.snapshot
+
   # On-demand counterpart to Dependabot's weekly pull requests
   # (.github/dependabot.yml): direct dependencies with a newer release.
   # A release that differs only in its local version label (`+cpu`) is not
