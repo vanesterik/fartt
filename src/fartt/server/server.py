@@ -9,11 +9,13 @@ from dotenv import dotenv_values
 from loguru import logger
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import ToolAnnotations
+from mcp.shared.exceptions import MCPError
+from mcp.types import INVALID_PARAMS, ToolAnnotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from fartt.data import (
     FX_SUFFIX,
+    SUFFIX_CALENDARS,
     Candle,
     Dividend,
     Listing,
@@ -21,6 +23,7 @@ from fartt.data import (
     UnknownTicker,
     UnsupportedExchange,
     YFinanceProvider,
+    calendar_for,
     exchange_date,
     fx_pair,
     market_status,
@@ -47,6 +50,7 @@ from fartt.performance import (
     TickerPerformance,
     calculate_performance,
 )
+from fartt.procedure import analysis_prompt
 from fartt.scoring import RATE_DECIMALS, Unscorable, score_call
 from fartt.stock_cache import NoHistory, StockCache, UpdateResult
 from fartt.technical import (
@@ -105,7 +109,16 @@ INSTRUCTIONS = (
     "At the daily check-in, call score_decisions: it scores every call whose "
     "horizon has passed against IWDA.AS, in EUR. Read get_performance to see "
     "how the calls have done, overall, per signal and per ticker; they are "
-    "calls, not trades: no costs or position sizes."
+    "calls, not trades: no costs or position sizes. An analysis of a ticker "
+    "follows the analyze_ticker prompt: its steps in order, ending in a call."
+)
+
+# What a ticker the analyze_ticker prompt accepts looks like, closing every
+# refusal so the operator can retype it.
+TICKER_FORMAT = (
+    "Give one stock in Yahoo's format: AAPL for a US listing, ASML.AS for "
+    "Euronext Amsterdam. The universe is US tickers without a suffix and "
+    "Euronext suffixes " + ", ".join(s for s in SUFFIX_CALENDARS if s) + "."
 )
 
 MIN_HORIZON = 5
@@ -706,6 +719,29 @@ def _current_close(tool: str, cache: StockCache, ticker: str) -> Snapshot:
             "Try again later."
         )
     return snapshot
+
+
+def _prompt_ticker(ticker: str) -> str:
+    """
+    The ticker normalised, checked offline as the tools check it, or an
+    `MCPError` (INVALID_PARAMS) saying what a valid ticker looks like: the
+    SDK passes an `MCPError` through prompt rendering as it is and turns
+    anything else into a bare "Error rendering prompt". Whether the ticker
+    is listed is left to the tools.
+
+    """
+    try:
+        normalised = normalise_ticker(ticker)
+        calendar_for(normalised)
+    except UnknownTicker:
+        reason = f"'{ticker}' isn't a ticker."
+    except UnsupportedExchange:
+        reason = f"'{normalise_ticker(ticker)}' is on an exchange outside the universe."
+    else:
+        if not normalised.endswith(FX_SUFFIX):
+            return normalised
+        reason = f"{normalised} is an exchange rate, not a stock to make a call on."
+    raise MCPError(INVALID_PARAMS, f"{reason} {TICKER_FORMAT}")
 
 
 def build_server(cache: StockCache, journal: Journal) -> MCPServer:
@@ -1394,6 +1430,27 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
                 performance.overall.calls, due, performance.more_tickers
             ),
         )
+
+    @server.prompt(
+        name="analyze_ticker",
+        title="Analyse a ticker",
+        description=(
+            "Analyse one stock by fartt's eight-step procedure, in order, "
+            "ending in a buy or pass call recorded in the journal."
+        ),
+    )
+    def analyze_ticker(
+        ticker: Annotated[
+            str,
+            Field(
+                description=(
+                    "One stock in Yahoo's format: AAPL for a US listing, "
+                    "ASML.AS for Euronext Amsterdam."
+                )
+            ),
+        ],
+    ) -> str:
+        return analysis_prompt(_prompt_ticker(ticker))
 
     return server
 
