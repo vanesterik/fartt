@@ -28,11 +28,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import exchange_calendars as xcals
 import pandas as pd
 import pytest
 from mcp import Client, StdioServerParameters
 
+from fartt.data import exchange_calendar
 from tests.integration.snapshot import OFFLINE, SNAPSHOT_DIR
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -120,7 +120,7 @@ def _dividends(assets_dir: Path, ticker: str) -> dict[str, float]:
 
 
 def _session_after(exchange: str, day: str, count: int) -> str:
-    calendar = xcals.get_calendar(exchange)
+    calendar = exchange_calendar(exchange)
     session = pd.Timestamp(day)
     for _ in range(count):
         session = calendar.next_session(session)
@@ -128,7 +128,7 @@ def _session_after(exchange: str, day: str, count: int) -> str:
 
 
 def _session_on_or_before(exchange: str, day: str) -> str:
-    calendar = xcals.get_calendar(exchange)
+    calendar = exchange_calendar(exchange)
     return (
         calendar.date_to_session(pd.Timestamp(day), direction="previous")
         .date()

@@ -20,11 +20,11 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-import exchange_calendars as xcals
 import pandas as pd
 import pytest
 from mcp import Client, StdioServerParameters
 
+from fartt.data import exchange_calendar
 from tests.integration.snapshot import OFFLINE, SNAPSHOT_NOW
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -123,7 +123,7 @@ def _journal(assets_dir: Path) -> Path:
 
 def _newest_closed_session(exchange: str) -> dt.date:
     """The exchange's latest session whose close lies CLOSE_MARGIN in the past."""
-    calendar = xcals.get_calendar(exchange)
+    calendar = exchange_calendar(exchange)
     now = pd.Timestamp(SNAPSHOT_NOW - CLOSE_MARGIN)
     start = now.normalize().tz_localize(None) - pd.Timedelta(days=14)
     sessions = calendar.sessions_in_range(start, now.normalize().tz_localize(None))
@@ -132,7 +132,7 @@ def _newest_closed_session(exchange: str) -> dt.date:
 
 
 def _sessions_after(exchange: str, day: dt.date, count: int) -> list[dt.date]:
-    calendar = xcals.get_calendar(exchange)
+    calendar = exchange_calendar(exchange)
     sessions = calendar.sessions_in_range(
         pd.Timestamp(day + dt.timedelta(days=1)),
         pd.Timestamp(day + dt.timedelta(days=count * 2 + 30)),
