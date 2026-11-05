@@ -5,7 +5,7 @@ the command and arguments come from the project's `.mcp.json`, unchanged, and
 provider, so it's marked `network` (run with `task test:network`).
 
 Each tool story adds its tool to `EXPECTED_TOOLS` and its call to
-`test_tools_over_stdio`.
+`test_tools_over_stdio`; each prompt story its prompt to `EXPECTED_PROMPTS`.
 """
 
 import json
@@ -33,6 +33,7 @@ EXPECTED_TOOLS = [
     "score_decisions",
     "get_performance",
 ]
+EXPECTED_PROMPTS = ["analyze_ticker"]
 # Per response; also the MCP client's read timeout, which defaults to none.
 RESPONSE_TIMEOUT_S = 120
 
@@ -62,6 +63,14 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
     async with Client(params, read_timeout_seconds=RESPONSE_TIMEOUT_S) as client:
         tools = sorted(tool.name for tool in (await client.list_tools()).tools)
         assert tools == sorted(EXPECTED_TOOLS)
+
+        # @issue-131 @AC10
+        prompts = sorted(p.name for p in (await client.list_prompts()).prompts)
+        assert prompts == sorted(EXPECTED_PROMPTS)
+        analysis = await client.get_prompt("analyze_ticker", {"ticker": "ASML.AS"})
+        assert len(analysis.messages) == 1
+        assert analysis.messages[0].content.type == "text"
+        assert "ASML.AS" in analysis.messages[0].content.text
 
         candles = await client.call_tool(
             "get_candles", {"ticker": "ASML.AS", "count": 5}
@@ -180,6 +189,14 @@ def test_stdout_carries_only_the_protocol(tmp_path: Path) -> None:
                 "arguments": {"ticker": "ASML.AS", "count": 2},
             },
         },
+        # @issue-131 @AC10
+        {"jsonrpc": "2.0", "id": 4, "method": "prompts/list"},
+        {
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "prompts/get",
+            "params": {"name": "analyze_ticker", "arguments": {"ticker": "ASML.AS"}},
+        },
     ]
     process = subprocess.Popen(
         _server_command(),
@@ -242,7 +259,11 @@ def _check_stdout(
 
         # Keep stdin open until the last response: closing it ends the
         # session before a tool call (run on a worker thread) can answer.
-        while not any(message.get("id") == 3 for message in received):
+        last_id = max(message["id"] for message in messages if "id" in message)
+        while not all(
+            any(message.get("id") == i for message in received)
+            for i in range(1, last_id + 1)
+        ):
             line = next_line()
             if line is None:
                 pytest.fail(f"server closed stdout early; got {received}")
@@ -257,6 +278,10 @@ def _check_stdout(
     process.wait(timeout=30)
 
     responses = {message["id"]: message for message in received if "id" in message}
-    assert set(responses) == {1, 2, 3}
+    assert set(responses) == {1, 2, 3, 4, 5}
     assert "error" not in responses[3]
     assert responses[3]["result"].get("isError") is not True
+    # @issue-131 @AC10
+    assert [p["name"] for p in responses[4]["result"]["prompts"]] == EXPECTED_PROMPTS
+    assert "error" not in responses[5]
+    assert len(responses[5]["result"]["messages"]) == 1
