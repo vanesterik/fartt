@@ -146,7 +146,13 @@ class StockCache:
             if not path.exists():
                 return None
             fields = json.loads(path.read_text(encoding="utf-8"))
-        return Listing(**fields)
+        # A listing.json written before the first trade date was kept has
+        # no such key, and reads as None.
+        first_trade = fields.pop("first_trade", None)
+        return Listing(
+            **fields,
+            first_trade=date.fromisoformat(first_trade) if first_trade else None,
+        )
 
     def _rebuild(self, ticker: str, reason: str | None) -> UpdateResult:
         listing = self.provider.listing(ticker)
@@ -183,7 +189,9 @@ class StockCache:
         directory = self.directory(ticker)
         _replace(directory / "events.csv", EVENT_COLUMNS, _event_rows(history))
         temporary = directory / "listing.json.tmp"
-        temporary.write_text(json.dumps(listing._asdict()), encoding="utf-8")
+        first_trade = listing.first_trade.isoformat() if listing.first_trade else None
+        fields = listing._asdict() | {"first_trade": first_trade}
+        temporary.write_text(json.dumps(fields), encoding="utf-8")
         os.replace(temporary, directory / "listing.json")
         _replace(
             directory / "candles.csv", CANDLE_COLUMNS, map(_candle_row, history.candles)

@@ -211,6 +211,36 @@ def test_listing_maps_info() -> None:
     assert requested == ["ASML.AS"]
 
 
+def test_listing_reads_the_first_trade_date_in_the_exchange_time_zone() -> None:
+    # 2021-05-24 07:00 UTC, the first session's open in Amsterdam (09:00).
+    goog = {
+        "currency": "EUR",
+        "quoteType": "ETF",
+        "firstTradeDateMilliseconds": 1621839600000,
+    }
+    provider, _ = provider_for(FakeTicker(info=goog))
+    assert provider.listing("GOOG.AS").first_trade == date(2021, 5, 24)
+
+    # 1980-12-12 14:30 UTC, NYSE's open that day.
+    aapl = {
+        "currency": "USD",
+        "quoteType": "EQUITY",
+        "firstTradeDateMilliseconds": 345479400000,
+    }
+    provider, _ = provider_for(FakeTicker(info=aapl))
+    assert provider.listing("AAPL").first_trade == date(1980, 12, 12)
+
+
+@pytest.mark.parametrize("value", ["missing", "2021", True, None, 10**20])
+def test_listing_without_a_usable_first_trade_date_has_none(value: object) -> None:
+    info: dict[str, Any] = {"currency": "USD", "quoteType": "EQUITY"}
+    if value != "missing":
+        info["firstTradeDateMilliseconds"] = value
+    provider, _ = provider_for(FakeTicker(info=info))
+
+    assert provider.listing("AAPL").first_trade is None
+
+
 def test_listing_falls_back_to_short_name() -> None:
     info = {"currency": "USD", "quoteType": "EQUITY", "shortName": "Apple"}
     provider, _ = provider_for(FakeTicker(info=info))
