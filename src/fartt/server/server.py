@@ -39,6 +39,14 @@ from fartt.journal import (
     Score,
     Signal,
 )
+from fartt.performance import (
+    MAX_TICKERS,
+    MIN_CALLS,
+    Group,
+    SignalPerformance,
+    TickerPerformance,
+    calculate_performance,
+)
 from fartt.scoring import RATE_DECIMALS, Unscorable, score_call
 from fartt.stock_cache import StockCache, UpdateResult
 from fartt.technical import (
@@ -95,7 +103,9 @@ INSTRUCTIONS = (
     "entries can't be changed afterwards. Before a daily check-in or a "
     "re-analysis of a ticker, read the earlier calls with get_decisions. "
     "At the daily check-in, call score_decisions: it scores every call whose "
-    "horizon has passed against IWDA.AS, in EUR."
+    "horizon has passed against IWDA.AS, in EUR. Read get_performance to see "
+    "how the calls have done, overall, per signal and per ticker; they are "
+    "calls, not trades: no costs or position sizes."
 )
 
 MIN_HORIZON = 5
@@ -396,6 +406,77 @@ class ScoreResult(BaseModel):
         default=None,
         description="Why nothing was scored, or what the lists leave out, if anything.",
     )
+
+
+BASIS = (
+    "These are calls, not trades: each return is in EUR against IWDA.AS, "
+    "without costs or position sizes. Calls whose horizons overlap aren't "
+    "independent, so the hit rate can look steadier than it is."
+)
+
+
+class PerformanceResult(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    basis: str = Field(description="What the figures measure, and what they don't.")
+    min_calls: int = Field(
+        description=(
+            "How many scored calls a group (overall, buy, pass, either side "
+            "of a signal) needs before it reports a rate or average."
+        )
+    )
+    scored: int = Field(description="How many calls are scored: overall.calls.")
+    open: int = Field(
+        description="How many calls aren't scored yet; left out of every figure."
+    )
+    due: int = Field(
+        description=(
+            "How many of the open calls have reached their horizon: "
+            "score_decisions scores them."
+        )
+    )
+    overall: Group = Field(description="Every scored call.")
+    buy: Group = Field(description="The scored buy calls.")
+    pass_: Group = Field(
+        validation_alias="pass",
+        serialization_alias="pass",
+        description="The scored pass calls.",
+    )
+    signals: list[SignalPerformance] = Field(
+        description=(
+            "Each signal record_decision takes, in order: the scored calls "
+            "that used it (for or against) next to those that didn't."
+        )
+    )
+    tickers: list[TickerPerformance] = Field(
+        description=(
+            "Every ticker with a scored call, most scored calls first, then "
+            f"by ticker; at most {MAX_TICKERS}. Its figures hold whatever "
+            "its count: weigh them by calls."
+        )
+    )
+    note: str | None = Field(
+        default=None, description="What to know first about the figures, if anything."
+    )
+
+
+def _performance_note(scored: int, due: int, more_tickers: int) -> str | None:
+    notes: list[str] = []
+    if not scored:
+        notes.append("No call has been scored yet.")
+    if due:
+        notes.append(
+            "1 call is due: call score_decisions to score it."
+            if due == 1
+            else f"{due} calls are due: call score_decisions to score them."
+        )
+    if more_tickers:
+        notes.append(
+            f"Listing the {MAX_TICKERS} tickers with the most scored calls; "
+            f"{more_tickers} more {'has' if more_tickers == 1 else 'have'} "
+            "scored calls too."
+        )
+    return " ".join(notes) or None
 
 
 def _status(decision: Decision, scores: Mapping[int, Score]) -> Status:
@@ -1225,6 +1306,49 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
                 running,
                 max(len(scored) - MAX_SCORED, 0),
                 max(len(not_scored) - MAX_SCORED, 0),
+            ),
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False)
+    )
+    def get_performance() -> PerformanceResult:
+        """
+        How the scored calls have done against IWDA.AS, in EUR: the hit rate
+        and the average return, benchmark return, excess return and edge,
+        overall, for buy and pass, per signal (used against not used) and
+        per ticker. Edge is the excess return for a buy and its negation for
+        a pass, so above 0 means right on average; read it, not the excess
+        return, for a group mixing both. Calls, not trades: no costs or
+        position sizes. Open calls are counted, not figured.
+        """
+        try:
+            decisions = journal.decisions()
+            scores = journal.scores()
+        except CACHE_ERRORS as error:
+            raise _journal_unreadable("get_performance", journal.path, error) from error
+
+        now = cache.clock()
+        still_open = [d for d in decisions if _status(d, scores) == "open"]
+        due = sum(_horizon_passed(d, now) for d in still_open)
+        performance = calculate_performance(decisions, scores)
+        logger.info(
+            f"get_performance: {performance.overall.calls} scored, "
+            f"{len(still_open)} open, {due} due"
+        )
+        return PerformanceResult(
+            basis=BASIS,
+            min_calls=MIN_CALLS,
+            scored=performance.overall.calls,
+            open=len(still_open),
+            due=due,
+            overall=performance.overall,
+            buy=performance.buy,
+            pass_=performance.pass_,
+            signals=performance.signals,
+            tickers=performance.tickers,
+            note=_performance_note(
+                performance.overall.calls, due, performance.more_tickers
             ),
         )
 
