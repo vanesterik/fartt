@@ -1,0 +1,6 @@
+{
+  "permissions": {
+    "defaultMode": "default",
+    "allow": ["mcp__fartt"]
+  }
+}

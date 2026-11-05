@@ -83,6 +83,30 @@ tasks:
           }')"
         if [ -n "$outdated" ]; then echo "$outdated"; else echo "Every direct dependency is up to date."; fi
 
+  # The analysis session: Claude Code limited to the fartt server's tools, so an
+  # analysis can't run commands, browse the web or edit files (#132). A plain
+  # `claude` stays the development session. Extra arguments pass through:
+  # `task analyse -- --resume`.
+  #   --restricted         ignore the user, project and local settings files
+  #                        (the user's `defaultMode: auto` among them)
+  #   --tools ""           no built-in tools at all (Bash, Read, Edit, WebSearch, ...)
+  #   --strict-mcp-config  only the servers in .mcp.json, no other connectors
+  #   --settings           the profile: allow every mcp__fartt tool, ask for anything else
+  #   --permission-mode    default, so nothing starts the session in auto
+  # interactive: Claude Code needs the terminal, not the prefixed output above.
+  analyse:
+    desc: Start a Claude Code session for stock analysis, limited to the fartt server's tools
+    aliases: [analyze]
+    interactive: true
+    cmds:
+      - >-
+        claude --restricted
+        --tools ""
+        --strict-mcp-config --mcp-config .mcp.json
+        --settings .claude/analysis-settings.json
+        --permission-mode default
+        {{.CLI_ARGS}}
+
   pre-commit:
     desc: Run the checks the git pre-commit hook runs, over staged files
     prefix: pre-commit
