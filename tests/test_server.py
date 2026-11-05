@@ -5,6 +5,8 @@ from typing import Any
 
 import pytest
 from mcp import Client
+from mcp.shared.exceptions import MCPError
+from mcp.types import INVALID_PARAMS
 
 from fartt.data import (
     Candle,
@@ -16,6 +18,7 @@ from fartt.data import (
     session_after,
 )
 from fartt.journal import SIGNALS, Decision, DecisionDraft, Journal, Signal
+from fartt.procedure import analysis_prompt, procedure_tools
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
@@ -1731,3 +1734,62 @@ async def test_a_ticker_without_history_or_first_trade_date(
         "today, try again after its first session closes; otherwise it has no "
         "daily history and can't be analysed."
     )
+
+
+@pytest.mark.anyio
+async def test_the_analyze_ticker_prompt_is_listed(tmp_path: Path) -> None:
+    cache = cache_for(provider([]), tmp_path)
+    async with Client(build_server(cache, journal_of(cache))) as client:
+        prompts = (await client.list_prompts()).prompts
+
+    assert [prompt.name for prompt in prompts] == ["analyze_ticker"]
+    prompt = prompts[0]
+    assert prompt.description
+    assert prompt.arguments is not None
+    assert [(a.name, a.required) for a in prompt.arguments] == [("ticker", True)]
+    assert prompt.arguments[0].description
+
+
+@pytest.mark.anyio
+async def test_analyze_ticker_returns_the_procedure_for_the_normalised_ticker(
+    tmp_path: Path,
+) -> None:
+    fake = provider([])
+    fake.reachable = False
+    cache = cache_for(fake, tmp_path)
+    async with Client(build_server(cache, journal_of(cache))) as client:
+        result = await client.get_prompt("analyze_ticker", {"ticker": " asml.as "})
+
+    assert len(result.messages) == 1
+    message = result.messages[0]
+    assert message.role == "user"
+    assert message.content.text == analysis_prompt("ASML.AS")
+    assert fake.history_calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ticker", ["", "AS ML", "VOD.L", "EURUSD=X", " eurusd=x "])
+async def test_analyze_ticker_refuses_what_isnt_a_stock_in_the_universe(
+    tmp_path: Path, ticker: str
+) -> None:
+    fake = provider([])
+    cache = cache_for(fake, tmp_path)
+    async with Client(build_server(cache, journal_of(cache))) as client:
+        with pytest.raises(MCPError) as raised:
+            await client.get_prompt("analyze_ticker", {"ticker": ticker})
+
+    assert raised.value.code == INVALID_PARAMS
+    message = raised.value.message
+    assert "AAPL" in message
+    assert "ASML.AS" in message
+    assert ".AS" in message and ".OL" in message
+    assert fake.history_calls == []
+
+
+@pytest.mark.anyio
+async def test_every_tool_the_procedure_names_is_registered(tmp_path: Path) -> None:
+    cache = cache_for(provider([]), tmp_path)
+    async with Client(build_server(cache, journal_of(cache))) as client:
+        tools = {tool.name for tool in (await client.list_tools()).tools}
+
+    assert procedure_tools() <= tools
