@@ -144,9 +144,13 @@ select = [
 ]
 
 [tool.pytest.ini_options]
-# Tests marked `network` call Yahoo Finance. They are deselected by
-# default so the suite, and the lefthook gate that runs it, stays offline;
-# run them with `uv run pytest -m network`. Strict markers turn a misspelt
-# marker into an error instead of a test that silently always runs.
-addopts = ["--strict-markers", "-m", "not network"]
-markers = ["network: calls Yahoo Finance"]
+# The default run is the unit tests. Tests marked `integration` start the
+# server over stdio on the checked-in snapshot, offline (`task
+# test:integration`); tests marked `network` call Yahoo Finance (`task
+# test:network`). Strict markers turn a misspelt marker into an error instead
+# of a test that silently always runs.
+addopts = ["--strict-markers", "-m", "not network and not integration"]
+markers = [
+    "integration: starts the server over stdio, on the snapshot unless also network",
+    "network: calls Yahoo Finance",
+]

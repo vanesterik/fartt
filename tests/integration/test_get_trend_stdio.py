@@ -1,7 +1,9 @@
 """
 Integration tests for `get_trend` (#108), driven the way Claude Code drives
 the server: started from `.mcp.json` over stdio, with `FARTT_ASSETS_DIR` set to
-a temporary folder, against the live data provider. Marked `network`.
+a temporary folder holding the snapshot, its clock pinned to the snapshot's
+moment and Yahoo out of reach (`snapshot.OFFLINE`). Only the check that asks
+Yahoo for a ticker it doesn't list is live, and marked `network`.
 
 Each test's docstring starts with its tags: `@issue-108` and the acceptance
 criteria it verifies. Expectations come from the issue's criteria, and the
@@ -21,13 +23,15 @@ from typing import Any
 import pytest
 from mcp import Client, StdioServerParameters
 
+from tests.integration.snapshot import OFFLINE
+
 ROOT = Path(__file__).resolve().parents[2]
 RESPONSE_TIMEOUT_S = 180
 TEST_TICKERS = ["ASML.AS", "AAPL", "GOOG"]
 # A proxy nobody listens on: every request to the data provider fails fast.
 UNREACHABLE = "http://127.0.0.1:9"
 
-pytestmark = [pytest.mark.network, pytest.mark.anyio]
+pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
@@ -37,10 +41,18 @@ def anyio_backend() -> str:
 
 @asynccontextmanager
 async def _server(
-    assets_dir: Path, extra_env: dict[str, str] | None = None
+    assets_dir: Path,
+    extra_env: dict[str, str] | None = None,
+    *,
+    live: bool = False,
 ) -> AsyncIterator[Client]:
     server = json.loads((ROOT / ".mcp.json").read_text())["mcpServers"]["fartt"]
-    env = {**os.environ, "FARTT_ASSETS_DIR": str(assets_dir), **(extra_env or {})}
+    env = {
+        **os.environ,
+        "FARTT_ASSETS_DIR": str(assets_dir),
+        **({} if live else OFFLINE),
+        **(extra_env or {}),
+    }
     params = StdioServerParameters(
         command=server["command"], args=server["args"], cwd=str(ROOT), env=env
     )
@@ -101,10 +113,10 @@ def _sma(closes: list[float], period: int) -> float:
 
 
 async def test_should_return_both_timeframes_with_their_evidence(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-108 @AC1 @AC8 Should return both timeframes with their evidence."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         trend = await _call(client, "get_trend", ticker="ASML.AS")
 
     assert set(trend) >= {
@@ -142,10 +154,10 @@ async def test_should_return_both_timeframes_with_their_evidence(
 
 @pytest.mark.parametrize("ticker", TEST_TICKERS)
 async def test_should_judge_the_direction_from_its_evidence(
-    live_assets: Path, ticker: str
+    seeded_assets: Path, ticker: str
 ) -> None:
     """@issue-108 @AC2 Should judge each timeframe's direction from its evidence."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         trend = await _call(client, "get_trend", ticker=ticker)
 
     directions = []
@@ -161,13 +173,13 @@ async def test_should_judge_the_direction_from_its_evidence(
 
 
 async def test_should_report_averages_that_agree_with_the_cached_closes(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-108 @AC2 Should report averages that agree with the cached closes."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         trend = await _call(client, "get_trend", ticker="ASML.AS")
 
-    daily = _cached_closes(live_assets, "ASML.AS")
+    daily = _cached_closes(seeded_assets, "ASML.AS")
     closes = [close for _, close in daily]
     assert trend["daily"]["based_on"] == daily[-1][0].isoformat()
     assert trend["daily"]["sma_50"]["value"] == pytest.approx(_sma(closes, 50))
@@ -184,10 +196,10 @@ async def test_should_report_averages_that_agree_with_the_cached_closes(
 
 @pytest.mark.parametrize("ticker", TEST_TICKERS)
 async def test_should_match_get_indicators_daily_averages(
-    live_assets: Path, ticker: str
+    seeded_assets: Path, ticker: str
 ) -> None:
     """@issue-108 @AC3 Should match get_indicators' daily SMA 50 and SMA 200."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         trend = await _call(client, "get_trend", ticker=ticker)
         indicators = await _call(client, "get_indicators", ticker=ticker)
 
@@ -197,20 +209,20 @@ async def test_should_match_get_indicators_daily_averages(
 
 
 async def test_should_base_the_weekly_timeframe_on_closed_weeks_only(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """
     @issue-108 @AC4 Should base the weekly timeframe on closed weeks only.
 
-    Against live data the note is checked only when this runs before the
-    week's last session has closed; after Friday's close or over a weekend
-    the week is complete and there's no note to check. The unit tests
+    The snapshot's newest session is a Wednesday, so its week isn't
+    complete and the note is checked; the branch for a closed week stays for
+    a snapshot rebuilt after a Friday. The unit tests
     `test_an_unclosed_week_is_in_the_note` and
     `test_get_trend_returns_both_timeframes` check the note either way.
     """
     from fartt.data import exchange_calendar
 
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         trend = await _call(client, "get_trend", ticker="ASML.AS")
         candles = await _call(client, "get_candles", ticker="ASML.AS", count=15)
 
@@ -235,10 +247,10 @@ async def test_should_base_the_weekly_timeframe_on_closed_weeks_only(
 
 
 async def test_should_rest_a_short_listing_on_the_weekly_sma_50(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-108 @AC5 Should rest a short listing's weekly trend on the SMA 50."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         trend = await _call(client, "get_trend", ticker="ARM")
 
     weekly = trend["weekly"]
@@ -248,7 +260,7 @@ async def test_should_rest_a_short_listing_on_the_weekly_sma_50(
     assert weekly["sma_50"] is not None
 
     closed_weeks = _weekly_closes(
-        _cached_closes(live_assets, "ARM"), dt.date.fromisoformat(weekly["based_on"])
+        _cached_closes(seeded_assets, "ARM"), dt.date.fromisoformat(weekly["based_on"])
     )
     assert len(closed_weeks) < 205
     note = trend["note"] or ""
@@ -258,21 +270,21 @@ async def test_should_rest_a_short_listing_on_the_weekly_sma_50(
 
 
 async def test_should_serve_a_stale_cache_when_the_provider_is_unreachable(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-108 @AC6 Should serve a stale cache when the provider is down."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         fresh = await _call(client, "get_trend", ticker="ASML.AS")
     assert fresh["is_current"] is True
 
     # Given the cache is two sessions behind, and the provider unreachable.
-    path = live_assets / "stocks" / "ASML.AS" / "candles.csv"
+    path = seeded_assets / "stocks" / "ASML.AS" / "candles.csv"
     lines = path.read_text().splitlines(keepends=True)
     path.write_text("".join(lines[:-2]))
     behind = dt.date.fromisoformat(lines[-3].split(",")[0])
     proxy = {name: UNREACHABLE for name in ("HTTPS_PROXY", "https_proxy")}
 
-    async with _server(live_assets, proxy) as client:
+    async with _server(seeded_assets, proxy) as client:
         stale = await _call(client, "get_trend", ticker="ASML.AS")
 
     assert stale["is_current"] is False
@@ -281,11 +293,12 @@ async def test_should_serve_a_stale_cache_when_the_provider_is_unreachable(
     assert "2 sessions behind" in (stale["warning"] or "")
 
 
+@pytest.mark.network
 async def test_should_say_what_to_do_for_a_ticker_it_cannot_serve(
     tmp_path: Path,
 ) -> None:
     """@issue-108 @AC7 Should say what to do for a ticker it can't serve."""
-    async with _server(tmp_path) as client:
+    async with _server(tmp_path, live=True) as client:
         for ticker in ("ZZZQXQ", "VOD.L"):
             trend_error = await _error(client, "get_trend", ticker=ticker)
             candles_error = await _error(client, "get_candles", ticker=ticker)

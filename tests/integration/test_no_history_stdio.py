@@ -1,8 +1,12 @@
 """
 Integration tests for a listed ticker without daily history (#116), driven
 the way Claude Code drives the server: started from `.mcp.json` over stdio,
-with `FARTT_ASSETS_DIR` set to a temporary folder, against the live data
-provider. Marked `network`.
+with `FARTT_ASSETS_DIR` set to a temporary folder. Marked `network`: they're
+about what Yahoo answers for a listing without history, except the check
+that a current cached ticker is served as it is, which runs offline on the
+snapshot (`snapshot.OFFLINE`). The cases that refill a cache from Yahoo keep
+the clock pinned to the snapshot's moment (`snapshot.PINNED`), so Yahoo fills
+it up to that moment and the snapshot's last session stays the newest.
 
 GOOG.AS is the live example: Yahoo lists it (first trade May 2021) but its
 history holds no closed session. The cases that need another first trade
@@ -38,6 +42,7 @@ from fartt.data import (
 from fartt.journal import Journal
 from fartt.server import build_server
 from fartt.stock_cache import StockCache
+from tests.integration.snapshot import OFFLINE, PINNED
 
 ROOT = Path(__file__).resolve().parents[2]
 RESPONSE_TIMEOUT_S = 180
@@ -61,7 +66,7 @@ HISTORY_TOOLS: list[tuple[str, dict[str, Any]]] = [
 ]
 READ_TOOLS = ["get_candles", "get_indicators", "get_trend", "get_support_resistance"]
 
-pytestmark = [pytest.mark.network, pytest.mark.anyio]
+pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
@@ -70,9 +75,12 @@ def anyio_backend() -> str:
 
 
 @asynccontextmanager
-async def _server(assets_dir: Path) -> AsyncIterator[Client]:
+async def _server(
+    assets_dir: Path, settings: dict[str, str] | None = None
+) -> AsyncIterator[Client]:
+    """The server on Yahoo and the real clock, unless `settings` say otherwise."""
     server = json.loads((ROOT / ".mcp.json").read_text())["mcpServers"]["fartt"]
-    env = {**os.environ, "FARTT_ASSETS_DIR": str(assets_dir)}
+    env = {**os.environ, "FARTT_ASSETS_DIR": str(assets_dir), **(settings or {})}
     params = StdioServerParameters(
         command=server["command"], args=server["args"], cwd=str(ROOT), env=env
     )
@@ -160,6 +168,7 @@ async def _skip_if_goog_as_has_history(client: Client) -> None:
         )
 
 
+@pytest.mark.network
 async def test_should_say_a_listed_ticker_has_no_history(tmp_path: Path) -> None:
     """@issue-116 @AC1 @AC4 Should say a listed ticker has no history, and cache nothing."""
     async with _server(tmp_path) as client:
@@ -170,6 +179,7 @@ async def test_should_say_a_listed_ticker_has_no_history(tmp_path: Path) -> None
     _assert_no_folder(tmp_path, NO_HISTORY)
 
 
+@pytest.mark.network
 @pytest.mark.parametrize(
     ("first_trade", "expected"),
     [
@@ -210,6 +220,7 @@ async def test_should_word_the_error_from_the_first_trade_date(
     _assert_no_folder(tmp_path, NO_HISTORY)
 
 
+@pytest.mark.network
 async def test_should_count_a_first_trade_on_the_newest_closed_session_as_history(
     tmp_path: Path,
 ) -> None:
@@ -223,6 +234,7 @@ async def test_should_count_a_first_trade_on_the_newest_closed_session_as_histor
     _assert_no_history_message(errors)
 
 
+@pytest.mark.network
 async def test_should_leave_no_folder_for_an_unknown_ticker(tmp_path: Path) -> None:
     """@issue-116 @AC4 Should leave no folder for a ticker the provider doesn't know."""
     async with _server(tmp_path) as client:
@@ -234,21 +246,28 @@ async def test_should_leave_no_folder_for_an_unknown_ticker(tmp_path: Path) -> N
     _assert_no_folder(tmp_path, UNKNOWN)
 
 
-@pytest.mark.parametrize("behind", [0, 3], ids=["current", "three-sessions-behind"])
+@pytest.mark.parametrize(
+    "behind",
+    [
+        pytest.param(0, id="current"),
+        pytest.param(3, id="three-sessions-behind", marks=pytest.mark.network),
+    ],
+)
 async def test_should_keep_a_cache_with_a_listing_from_before_the_change(
-    live_assets: Path, behind: int
+    seeded_assets: Path, behind: int
 ) -> None:
     """@issue-116 @AC5 Should keep serving a cache whose listing.json has no first trade date."""
-    directory = live_assets / "stocks" / CACHED
+    directory = seeded_assets / "stocks" / CACHED
     listing = json.loads((directory / "listing.json").read_text())
     listing.pop("first_trade", None)
     (directory / "listing.json").write_text(json.dumps(listing))
-    full = _candle_lines(live_assets, CACHED)
+    full = _candle_lines(seeded_assets, CACHED)
     if behind:
         with (directory / "candles.csv").open("w", newline="") as file:
             csv.writer(file).writerows(full[:-behind])
 
-    async with _server(live_assets) as client:
+    # Three sessions behind, it refills from Yahoo up to the pinned clock.
+    async with _server(seeded_assets, PINNED if behind else OFFLINE) as client:
         for tool in READ_TOOLS:
             result = await client.call_tool(tool, {"ticker": CACHED})
             assert not result.is_error, (tool, _text(result))
@@ -259,16 +278,17 @@ async def test_should_keep_a_cache_with_a_listing_from_before_the_change(
     assert content["is_current"] is True
     assert content["rebuilt"] is None
     assert content["rows"][-1][0] == full[-1][0]
-    after = _candle_lines(live_assets, CACHED)
+    after = _candle_lines(seeded_assets, CACHED)
     assert len(after) >= len(full)
     assert after[:2] == full[:2]
 
 
+@pytest.mark.network
 async def test_should_not_serve_a_header_only_leftover_as_history(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-116 @AC5 Should report a no-history leftover and refill a real one."""
-    stocks = live_assets / "stocks"
+    stocks = seeded_assets / "stocks"
     for ticker, name in ((NO_HISTORY, "LS 1x Alphabet Tracker ETP"), (CACHED, "ASML")):
         shutil.rmtree(stocks / ticker, ignore_errors=True)
         leftover = stocks / ticker
@@ -282,7 +302,7 @@ async def test_should_not_serve_a_header_only_leftover_as_history(
             )
         )
 
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets, PINNED) as client:
         await _skip_if_goog_as_has_history(client)
         errors = await _errors(client, NO_HISTORY)
         refilled = await client.call_tool("get_candles", {"ticker": CACHED, "count": 2})
@@ -290,9 +310,10 @@ async def test_should_not_serve_a_header_only_leftover_as_history(
     _assert_no_history_message(errors)
     assert not refilled.is_error, _text(refilled)
     assert refilled.structured_content["new_candles"] > 1000
-    assert len(_candle_lines(live_assets, CACHED)) > 1000
+    assert len(_candle_lines(seeded_assets, CACHED)) > 1000
 
 
+@pytest.mark.network
 async def test_should_quote_a_listed_ticker_without_history(tmp_path: Path) -> None:
     """@issue-116 @AC6 Should still quote a listed ticker without daily history."""
     async with _server(tmp_path) as client:

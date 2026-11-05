@@ -1,8 +1,9 @@
 """
 Integration tests for `get_performance` (#122), driven the way Claude Code
 drives the server: started from `.mcp.json` over stdio, with
-`FARTT_ASSETS_DIR` set to a temporary folder. Marked `network` with the
-other stdio tests, though `get_performance` itself reads only the journal.
+`FARTT_ASSETS_DIR` set to a temporary folder, its clock pinned to the
+snapshot's moment and Yahoo out of reach (`snapshot.OFFLINE`):
+`get_performance` reads only the journal.
 
 Each test's docstring starts with its tags: `@issue-122` and the acceptance
 criteria it verifies. Expectations come from the issue's criteria and are
@@ -28,9 +29,10 @@ from typing import Any
 import pytest
 from mcp import Client, StdioServerParameters
 
+from tests.integration.snapshot import OFFLINE, UNREACHABLE
+
 ROOT = Path(__file__).resolve().parents[2]
 RESPONSE_TIMEOUT_S = 120
-UNREACHABLE = "http://127.0.0.1:9"
 MIN_CALLS = 10  # the design's minimum before a group reports figures
 SIGNAL_NAMES = [
     "trend",
@@ -45,7 +47,7 @@ SIGNAL_NAMES = [
 PAST = date(2026, 1, 2)  # a horizon end long passed: an open call on it is due
 FUTURE = date(2027, 6, 1)  # a horizon end still ahead: not due
 
-pytestmark = [pytest.mark.network, pytest.mark.anyio]
+pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
@@ -59,7 +61,7 @@ async def _server(assets_dir: Path) -> AsyncIterator[Client]:
     env = {
         **os.environ,
         "FARTT_ASSETS_DIR": str(assets_dir),
-        **{name: UNREACHABLE for name in ("HTTPS_PROXY", "https_proxy")},
+        **OFFLINE,
         **{name: UNREACHABLE for name in ("HTTP_PROXY", "http_proxy")},
     }
     params = StdioServerParameters(

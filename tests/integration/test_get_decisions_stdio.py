@@ -1,17 +1,15 @@
 """
 Integration tests for `get_decisions` (#120), driven the way Claude Code
 drives the server: started from `.mcp.json` over stdio, with
-`FARTT_ASSETS_DIR` set to a temporary folder, against the live data provider.
-Marked `network`.
+`FARTT_ASSETS_DIR` set to a temporary folder holding the snapshot, its clock
+pinned to the snapshot's moment and Yahoo out of reach (`snapshot.OFFLINE`).
 
 Each test's docstring starts with its tags: `@issue-120` and the acceptance
 criteria it verifies. Expectations come from the issue's criteria. Calls are
 recorded through `record_decision`, so they are the entries the server itself
-stores; between an exchange's close and Yahoo publishing that session
-`record_decision` refuses by design, and the tests skip then. The
-`horizon_passed` test rewrites a recorded entry's `horizon_ends` to sessions
-either side of the exchange's newest closed session, as the clock can't be
-set from outside the server.
+stores. The `horizon_passed` test rewrites a recorded entry's `horizon_ends`
+to sessions either side of the exchange's newest closed session at the
+pinned clock.
 """
 
 import datetime as dt
@@ -26,6 +24,8 @@ import exchange_calendars as xcals
 import pandas as pd
 import pytest
 from mcp import Client, StdioServerParameters
+
+from tests.integration.snapshot import OFFLINE, SNAPSHOT_NOW
 
 ROOT = Path(__file__).resolve().parents[2]
 RESPONSE_TIMEOUT_S = 180
@@ -60,7 +60,7 @@ ENTRY_FIELDS = {
     "benchmark",
 }
 
-pytestmark = [pytest.mark.network, pytest.mark.anyio]
+pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
@@ -69,9 +69,13 @@ def anyio_backend() -> str:
 
 
 @asynccontextmanager
-async def _server(assets_dir: Path) -> AsyncIterator[Client]:
+async def _server(assets_dir: Path, *, live: bool = False) -> AsyncIterator[Client]:
     server = json.loads((ROOT / ".mcp.json").read_text())["mcpServers"]["fartt"]
-    env = {**os.environ, "FARTT_ASSETS_DIR": str(assets_dir)}
+    env = {
+        **os.environ,
+        "FARTT_ASSETS_DIR": str(assets_dir),
+        **({} if live else OFFLINE),
+    }
     params = StdioServerParameters(
         command=server["command"], args=server["args"], cwd=str(ROOT), env=env
     )
@@ -116,8 +120,6 @@ async def _record(
             "signals": signals or [{"name": "trend", "stance": "for"}],
         },
     )
-    if result.is_error and "isn't available" in _text(result):
-        pytest.skip(f"Yahoo hasn't published the newest session: {_text(result)}")
     assert not result.is_error, result.content
     entry = result.structured_content
     assert entry is not None
@@ -142,7 +144,7 @@ def _journal(assets_dir: Path) -> Path:
 def _newest_closed_session(exchange: str) -> dt.date:
     """The exchange's latest session whose close lies CLOSE_MARGIN in the past."""
     calendar = xcals.get_calendar(exchange)
-    now = pd.Timestamp(dt.datetime.now(dt.UTC) - CLOSE_MARGIN)
+    now = pd.Timestamp(SNAPSHOT_NOW - CLOSE_MARGIN)
     start = now.normalize().tz_localize(None) - pd.Timedelta(days=14)
     sessions = calendar.sessions_in_range(start, now.normalize().tz_localize(None))
     closed = [s for s in sessions if calendar.session_close(s) <= now]
@@ -154,10 +156,10 @@ def _next_session(exchange: str, day: dt.date) -> dt.date:
 
 
 async def test_should_return_open_calls_newest_first_as_recorded(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-120 @AC1 @AC7 @AC10 Should return open calls newest first, as recorded."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         tools = {tool.name for tool in (await client.list_tools()).tools}
         assert "get_decisions" in tools
         recorded = [
@@ -187,10 +189,10 @@ async def test_should_return_open_calls_newest_first_as_recorded(
 
 
 async def test_should_filter_by_ticker_case_and_space_insensitively(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-120 @AC2 Should return only that ticker's calls, newest first."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         await _record(client, "ASML.AS")
         await _record(client, "AAPL")
         await _record(client, "ASML.AS")
@@ -219,25 +221,25 @@ async def test_should_reject_a_string_that_cant_be_a_ticker(
 
 
 async def test_should_return_calls_unchanged_after_a_restart(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-120 @AC3 Should return calls recorded before a restart unchanged."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         recorded = [await _record(client, "ASML.AS"), await _record(client, "AAPL")]
-    journal_before = _journal(live_assets).read_bytes()
+    journal_before = _journal(seeded_assets).read_bytes()
 
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         after = await _decisions(client)
 
     assert [_stored(entry) for entry in after["decisions"]] == recorded[::-1]
-    assert _journal(live_assets).read_bytes() == journal_before
+    assert _journal(seeded_assets).read_bytes() == journal_before
 
 
 async def test_should_cap_at_the_limit_with_the_total_and_a_note(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-120 @AC4 Should return the newest up to the limit, the total and a note."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         for number in range(1, 13):
             await _record(client, reasoning=f"Call {number}.")
         default = await _decisions(client)
@@ -263,10 +265,10 @@ async def test_should_reject_a_limit_outside_1_to_10(
 
 
 async def test_should_return_an_empty_list_with_a_note_when_nothing_matches(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-120 @AC5 Should return an empty list, total 0 and a note, not an error."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         empty_journal = await _decisions(client)
         await _record(client, "ASML.AS")
         no_match = await _decisions(client, ticker="MSFT")
@@ -280,7 +282,7 @@ async def test_should_return_an_empty_list_with_a_note_when_nothing_matches(
 
 
 async def test_should_pass_the_horizon_from_the_close_of_its_last_session(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """
     @issue-120 @AC6 Should set horizon_passed from the close of horizon_ends.
@@ -288,11 +290,11 @@ async def test_should_pass_the_horizon_from_the_close_of_its_last_session(
     The newest closed session (close plus margin in the past) has passed; the
     session after it hasn't closed yet, so it hasn't.
     """
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         await _record(client, "ASML.AS")
         await _record(client, "AAPL")
     stored = [
-        json.loads(line) for line in _journal(live_assets).read_text().splitlines()
+        json.loads(line) for line in _journal(seeded_assets).read_text().splitlines()
     ]
 
     lines: list[str] = []
@@ -305,9 +307,9 @@ async def test_should_pass_the_horizon_from_the_close_of_its_last_session(
             changed = {**entry, "id": line_id, "horizon_ends": ends.isoformat()}
             lines.append(json.dumps(changed))
             expected[line_id] = passed
-    _journal(live_assets).write_text("\n".join(lines) + "\n")
+    _journal(seeded_assets).write_text("\n".join(lines) + "\n")
 
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         content = await _decisions(client)
 
     got = {entry["id"]: entry["horizon_passed"] for entry in content["decisions"]}
@@ -315,17 +317,17 @@ async def test_should_pass_the_horizon_from_the_close_of_its_last_session(
 
 
 async def test_should_be_a_tool_error_on_a_damaged_line_and_leave_the_file(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-120 @AC8 Should name the journal file and leave it byte-for-byte."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         await _record(client, "ASML.AS")
-    journal = _journal(live_assets)
+    journal = _journal(seeded_assets)
     with journal.open("ab") as file:
         file.write(b"not json\n")
     before = journal.read_bytes()
 
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         text = await _error(client)
         filtered = await _error(client, ticker="ASML.AS")
 
@@ -335,13 +337,13 @@ async def test_should_be_a_tool_error_on_a_damaged_line_and_leave_the_file(
 
 
 async def test_should_fit_ten_of_the_largest_calls_under_60000_characters(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-120 @AC9 Should return ten of the largest calls in under 60,000 characters."""
     signals = [
         {"name": name, "stance": "for", "note": "n" * 200} for name in SIGNAL_NAMES
     ]
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         for _ in range(10):
             await _record(client, reasoning="x" * 2000, signals=signals)
         content = await _decisions(client)

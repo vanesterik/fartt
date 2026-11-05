@@ -38,13 +38,15 @@ task lint                        # ruff format --check + ruff check, without wri
 task format                      # ruff format + ruff check --fix
 task typecheck                   # pyright (strict mode, src/ only — tests/ excluded)
 task test                        # pytest, offline
-task test:network                # live Yahoo tests + the end-to-end check of the server over stdio, in parallel (deselected by default)
+task test:integration            # the stdio tests, offline on the data snapshot, in parallel (deselected by default)
+task test:network                # the tests that call Yahoo, in parallel (deselected by default)
+task test:snapshot               # rebuild the integration tests' data snapshot from Yahoo
 task pre-commit                  # the pre-commit hook's checks over staged files
 task outdated                    # direct dependencies with a newer release
 task analyse                     # Claude Code limited to the fartt server's tools, for an analysis (alias analyze)
 ```
 
-Tool versions are upgraded on purpose, never because a run nags: ruff's rule set is pinned in `pyproject.toml`, and pyright's new-release warning is silenced. Instead, Dependabot (`.github/dependabot.yml`) opens weekly pull requests for newer releases: minor and patch updates grouped into one for dev tools and one for runtime dependencies, each major update on its own. There's no CI, so check a Dependabot pull request out and run `task check` (or push to it) before merging. A runtime update also needs `task test:network`: the offline suite runs on a fake provider, so a yfinance, exchange_calendars or MCP SDK release that breaks the live fetch or the stdio server passes `task check` unnoticed. `task outdated` is the on-demand version.
+Tool versions are upgraded on purpose, never because a run nags: ruff's rule set is pinned in `pyproject.toml`, and pyright's new-release warning is silenced. Instead, Dependabot (`.github/dependabot.yml`) opens weekly pull requests for newer releases: minor and patch updates grouped into one for dev tools and one for runtime dependencies, each major update on its own. There's no CI, so check a Dependabot pull request out and run `task check` (or push to it) before merging. A runtime update also needs `task test:integration` and `task test:network`: the unit tests run on a fake provider, so an MCP SDK or exchange_calendars release that breaks the stdio server passes `task check` unnoticed, and a yfinance release that breaks the live fetch passes everything but `test:network`. `task outdated` is the on-demand version.
 
 Everything below remains the direct route, and is what the Taskfile calls. Dependency management is via `uv` (see `uv.lock`), run from the repository root. The Python version is pinned in `.python-version` (3.14) and matched by `requires-python` in `pyproject.toml`; Dependabot doesn't track it, so moving to a new Python release is a deliberate change to both.
 
@@ -53,6 +55,7 @@ uv sync                          # install dependencies
 uv run fartt                     # run the MCP server over stdio (Claude Code does this from .mcp.json)
 uv run pytest                    # run test suite
 uv run pytest tests/test_server.py::test_count_beyond_the_history_returns_what_is_cached  # single test
+uv run pytest -m "integration and not network" -n auto  # the offline integration tests
 uv run pytest -m network -n auto # run the live tests, in parallel (deselected by default)
 uv run ruff format .             # format
 uv run ruff check . --fix        # lint
@@ -61,9 +64,9 @@ uv run pyright                   # type check (strict mode, src/ only — tests/
 
 There is no CLI: the agent calls the server's tools, and a ticker's cache fills on its first call. The server reads `FARTT_ASSETS_DIR` for the cache's folder from the environment or else the repository's `.env` (copy `.env.example`), defaulting to `assets/` in the repository wherever it was started from; a relative path is relative to the repository. The assets folder holds `stocks/`, a cache that's safe to delete, and `journal/`, the record of every call, which can't be rebuilt: never delete it. `FARTT_NOW` (environment only, never `.env`; ISO 8601 with an offset) pins the server's clock to one moment, so a cache filled up to it counts as current and nothing is fetched for it: the integration tests run the server on a checked-in snapshot this way. An unreadable value stops the server saying why. It logs to stderr only, since stdout carries the protocol.
 
-`tests/integration/test_server_stdio.py` checks the server end to end: it starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder, calls the tools, and asserts stdout carries only JSON-RPC, including anything written at shutdown. Each new tool joins it: the test role adds its name to `EXPECTED_TOOLS` and its call to `test_tools_over_stdio` (integration tests are the test role's, not the builder's).
+The integration tests (`tests/integration/`, all marked `integration` by its `conftest.py`) start the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder. Most run on a copy of the checked-in snapshot (`tests/integration/snapshot/`, the `seeded_assets` fixture) with the server's clock pinned to the snapshot's moment and Yahoo out of reach (`snapshot.OFFLINE`), so they're offline and give the same result every run; `snapshot.py` names the tickers and the moment, and `task test:snapshot` rebuilds it. The few that are about Yahoo itself (a first download, a quote, a ticker Yahoo doesn't list) are also marked `network`; refilling a cut snapshot from Yahoo keeps the clock pinned (`snapshot.PINNED`). A new test is offline unless it needs Yahoo's answer. `tests/integration/test_server_stdio.py` checks the server end to end: `test_tools_over_stdio` fills an empty folder from Yahoo and calls every tool (`network`), and the stdout check asserts, offline, that stdout carries only JSON-RPC, including anything written at shutdown. Each new tool joins it: the test role adds its name to `EXPECTED_TOOLS` and its call to `test_tools_over_stdio` (integration tests are the test role's, not the builder's).
 
-Hooks are managed by `lefthook` (`.lefthook.yml`) and stand in for CI, which this project doesn't have. On every commit, staged Python files get `ruff format` + `ruff check --fix`, then `pyright` and `pytest` run. On every push, `task check` runs the full suite on the whole repository (`ruff format --check .`, `ruff check .`, `pyright`, `pytest`), because pre-commit only sees staged files and a commit touching only `pyproject.toml`, `uv.lock` or `.mcp.json` would otherwise skip tests and type checks. `git push --no-verify` skips the gate for one push; use it deliberately, never by default. Tests marked `network` call Yahoo and are deselected by default; run them with `task test:network`.
+Hooks are managed by `lefthook` (`.lefthook.yml`) and stand in for CI, which this project doesn't have. On every commit, staged Python files get `ruff format` + `ruff check --fix`, then `pyright` and `pytest` run. On every push, `task check` runs the full suite on the whole repository (`ruff format --check .`, `ruff check .`, `pyright`, `pytest`), because pre-commit only sees staged files and a commit touching only `pyproject.toml`, `uv.lock` or `.mcp.json` would otherwise skip tests and type checks. `git push --no-verify` skips the gate for one push; use it deliberately, never by default. Tests marked `integration` or `network` are deselected by default; run them with `task test:integration` (offline) and `task test:network` (Yahoo).
 
 ## Running an analysis
 
@@ -164,7 +167,7 @@ The developer's approval of the design is the one human gate: `/unity:design` mo
 <!-- Filled in by /unity:init; adjust as needed. write-e2e-test reads this section. -->
 
 - No browser UI and no Playwright: the server speaks MCP over stdio, so integration tests carry the test role.
-- Integration directory: `tests/integration/` (pytest; `test_server_stdio.py` starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder). Run with `uv run pytest tests/integration -m network`; the tests are marked `network` (they call Yahoo), so `task test` skips them.
+- Integration directory: `tests/integration/` (pytest; `test_server_stdio.py` starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder). Run with `uv run pytest tests/integration -m integration -n auto` (the offline ones and the ones marked `network`, which call Yahoo); `task test` skips them all. A new integration test runs on the `seeded_assets` snapshot with `snapshot.OFFLINE` unless it's about Yahoo's own answer.
 - Translations: none
 - UI components: none
 - API layer: the MCP tools in `src/fartt/server/`

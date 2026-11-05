@@ -1,8 +1,10 @@
 """
 End-to-end check of the MCP server over stdio, the way Claude Code runs it:
 the command and arguments come from the project's `.mcp.json`, unchanged, and
-`FARTT_ASSETS_DIR` points the cache at a temporary folder. Calls the live data
-provider, so it's marked `network` (run with `task test:network`).
+`FARTT_ASSETS_DIR` points the cache at a temporary folder.
+`test_tools_over_stdio` fills an empty folder from the live data provider, the
+one run of every tool against Yahoo, so it's marked `network` (`task
+test:network`); the stdout check runs offline on the snapshot.
 
 Each tool story adds its tool to `EXPECTED_TOOLS` and its call to
 `test_tools_over_stdio`; each prompt story its prompt to `EXPECTED_PROMPTS`.
@@ -20,6 +22,8 @@ from typing import Any
 import pytest
 from mcp import Client, StdioServerParameters
 from mcp.types import LATEST_PROTOCOL_VERSION
+
+from tests.integration.snapshot import OFFLINE
 
 ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_TOOLS = [
@@ -48,8 +52,10 @@ def _server_command() -> list[str]:
     return [server["command"], *server["args"]]
 
 
-def _environment(assets_dir: Path) -> dict[str, str]:
-    return {**os.environ, "FARTT_ASSETS_DIR": str(assets_dir)}
+def _environment(
+    assets_dir: Path, settings: dict[str, str] | None = None
+) -> dict[str, str]:
+    return {**os.environ, "FARTT_ASSETS_DIR": str(assets_dir), **(settings or {})}
 
 
 @pytest.mark.network
@@ -165,8 +171,7 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
     assert (tmp_path / "journal" / "decisions.jsonl").exists()
 
 
-@pytest.mark.network
-def test_stdout_carries_only_the_protocol(tmp_path: Path) -> None:
+def test_stdout_carries_only_the_protocol(seeded_assets: Path) -> None:
     messages: list[dict[str, Any]] = [
         {
             "jsonrpc": "2.0",
@@ -201,7 +206,7 @@ def test_stdout_carries_only_the_protocol(tmp_path: Path) -> None:
     process = subprocess.Popen(
         _server_command(),
         cwd=ROOT,
-        env=_environment(tmp_path),
+        env=_environment(seeded_assets, OFFLINE),
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
