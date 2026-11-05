@@ -68,7 +68,7 @@ The server places real orders through Saxo, each approved by the operator, for t
 ### Broker and data
 
 - **Broker: Saxo** (decided 2026-11-04). It has an OpenAPI with a free simulation environment, trades every exchange in the universe, and includes real-time quotes for European and US stocks for private clients. Trades in a currency other than EUR (the US, Oslo) pay a currency conversion fee, counted in the costs below. **DEGIRO** is out because it has no official API.
-- **Development data: yfinance** (free, delayed), behind a `DataProvider` interface. It switches to Saxo's OpenAPI feed once the tooling works.
+- **Development data: yfinance** (free, delayed), behind a `DataProvider` interface. It switches to Saxo's OpenAPI feed for candles and quotes when stage 2 starts (epic L), so the paper period runs on one source throughout.
 
 ## 5. Solution Overview
 
@@ -127,6 +127,7 @@ All of Euronext and the US exchanges. The screen's liquidity and market-cap filt
 | H | `plan_trade(...)` | Entry, stop, target, size, reward-to-risk; rejects plans that break a limit |
 | H | `get_portfolio()` | Paper positions against their plans, P&L after costs |
 | I | `backtest_rule(rule)` | Return, hit rate, drawdown and trades after costs, with a walk-forward split |
+| L | `SaxoProvider` | Candles and quotes from Saxo's OpenAPI, behind the same `DataProvider` interface |
 | J | `place_order(plan)` | Places an approved plan's limit order and its stop through Saxo's OpenAPI |
 | K | `get_news(ticker)` | Recent headlines with source, publication time and link, only from before the call |
 
@@ -200,9 +201,10 @@ Built in the order of this table (decided 2026-11-05, at the walking-skeleton mi
 | K. News | #133 | `get_news`, and news as a journal signal |
 | E. Visualization | #92 | `render_chart` with indicator panels |
 | I. Validation | #96 | `backtest_rule`, walk-forward checks |
+| L. Saxo Market Data | #140 | `SaxoProvider` behind `DataProvider`; candles and quotes switch to Saxo when stage 2 starts |
 | J. Live Orders | #101 | Saxo order placement with approval, behind the stage 2 → 3 gate |
 
-Paper trading starts once epic H lands, so H comes straight after the walking skeleton: every month it waits pushes the first gate back a month. Before then, decisions are journalled and scored, but not as sized plans. F, G and K land while the paper clock runs, so the system changes during it; the gate judges the procedure as a whole, and `get_performance` splits results per signal, so what each addition contributed stays visible. F comes first of the three: it's small, and the index against its 200-day average is the best-supported filter after trend. E comes after them, since the agent works from numbers and charts mostly help the operator check its work.
+Paper trading starts once epic H lands, so H comes straight after the walking skeleton: every month it waits pushes the first gate back a month. Before then, decisions are journalled and scored, but not as sized plans. F, G and K land while the paper clock runs, so the system changes during it; the gate judges the procedure as a whole, and `get_performance` splits results per signal, so what each addition contributed stays visible. F comes first of the three: it's small, and the index against its 200-day average is the best-supported filter after trend. E comes after them, since the agent works from numbers and charts mostly help the operator check its work. L is built during the paper months and switched on when the stage 1 gate passes, which is when stage 2 starts: at the earliest 3 months after H lands, and only if the gate's results hold.
 
 ### Stories
 
@@ -247,7 +249,7 @@ Stories are written just in time, one epic at a time, as GitHub issues in the Us
 ## 10. Open Questions
 
 1. 🔵 **Benchmark:** VWCE or IWDA. Decided in epic C's design.
-2. **Order of epics E–K.** Decided 2026-11-05 at the walking-skeleton milestone: H, F, G, K, E, I, J (section 7).
+2. **Order of epics E–K.** Decided 2026-11-05 at the walking-skeleton milestone: H, F, G, K, E, I, L, J (section 7).
 3. 🔵 **Costs per exchange:** Saxo's commissions and currency conversion fee are known (section 6). Still open: transaction taxes outside Saxo's tariff (France's and Italy's financial transaction taxes on purchases), and whether 0.1% slippage per leg matches real fills.
 4. 🔵 **Horizon of a call:** fixed per call (chosen by the agent), or the plan's stop/target with a maximum holding period. Decided in epic C's design.
 5. 🔵 **Macro events** for step 1: which source, given that yfinance doesn't provide an economic calendar. Decided in epic F's design.
