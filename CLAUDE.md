@@ -164,13 +164,10 @@ The developer's approval of the design is the one human gate: `/unity:design` mo
 
 ### Integration testing
 
-<!-- Filled in by /unity:init as unity's "E2E testing" section; this project has integration tests only, no E2E tests. write-e2e-test reads this section. -->
+<!-- Kept by /unity:init when the project has integration tests, removed otherwise; adjust as needed. write-system-test reads this section. -->
 
-- No browser UI and no Playwright: the server speaks MCP over stdio, so integration tests carry the test role.
-- Integration directory: `tests/integration/` (pytest; `test_server_stdio.py` starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder). Run with `uv run pytest tests/integration -m "integration and not network" -n auto` (`task test:integration`): offline only. The tests marked `network` are for checking a runtime dependency update (Dependabot) and aren't part of testing a story; `task test` skips them all. A new integration test runs on the `seeded_assets` snapshot with `snapshot.OFFLINE` unless it's about Yahoo's own answer.
-- Translations: none
-- UI components: none
-- API layer: the MCP tools in `src/fartt/server/`
-- Start the app for testing: nothing to start; the tests launch the server themselves, in the PR checkout
-- Test users and data: none; tickers are fetched live from Yahoo into the temporary assets folder
+- Integration test directory: `tests/integration/` (pytest; `integration.dir` in `.claude/pipeline.json`)
+- Run every integration test: `uv run pytest tests/integration -m "integration and not network" -n auto` (`task test:integration`; `integration.runCommand`). Offline only: the tests also marked `network` call Yahoo and are for checking a runtime dependency update (Dependabot), not part of testing a story. `task test` skips them all.
+- How the tests start or call the system: each test starts the server from `.mcp.json`'s command (`uv run fartt`) over stdio with `FARTT_ASSETS_DIR` set to a temporary folder, and talks to it through the MCP SDK's `Client`; nothing to start beforehand, everything runs in the PR checkout. The surface under test is the MCP tools and the `analyze_ticker` prompt in `src/fartt/server/`.
+- Test data: a copy of the checked-in snapshot `tests/integration/snapshot/` (the `seeded_assets` fixture), with the server on `snapshot.OFFLINE`: its clock pinned to the snapshot's moment and Yahoo out of reach. Each test writes its own journal. A new test uses this unless it's about Yahoo's own answer.
 <!-- unity:workflow:end -->
