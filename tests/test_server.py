@@ -1668,3 +1668,66 @@ async def test_no_scored_match_for_a_ticker_says_nothing_of_other_scores(
     assert result.structured_content["note"] == (
         "No calls match status=scored, ticker=AAPL."
     )
+
+
+NO_HISTORY_TOOLS = [
+    ("get_candles", {"ticker": "ASML.AS"}),
+    ("get_indicators", {"ticker": "ASML.AS"}),
+    ("get_trend", {"ticker": "ASML.AS"}),
+    ("get_support_resistance", {"ticker": "ASML.AS"}),
+    ("record_decision", decision()),
+]
+
+
+async def without_history(
+    tmp_path: Path, first_trade: date | None, tool: str, arguments: dict[str, Any]
+) -> str:
+    """The error a tool gives for ASML.AS with no closed session (AFTER_CLOSE)."""
+    fake = provider([])
+    fake.listings["ASML.AS"] = ASML._replace(first_trade=first_trade)
+    result = await call(cache_for(fake, tmp_path), arguments, tool)
+    assert result.is_error
+    return result.content[0].text
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("tool", "arguments"), NO_HISTORY_TOOLS)
+@pytest.mark.parametrize("first_trade", [date(2021, 5, 24), date(2026, 10, 29)])
+async def test_a_listed_ticker_without_history_cannot_be_analysed(
+    tmp_path: Path, tool: str, arguments: dict[str, Any], first_trade: date
+) -> None:
+    # It traded in a closed session (GOOG.AS since 2021), so retrying won't help.
+    text = await without_history(tmp_path, first_trade, tool, arguments)
+
+    assert text.endswith(
+        "The data provider lists ASML.AS (ASML Holding N.V.) but has no daily "
+        "price history for it, so it can't be analysed. Retrying won't help; "
+        "pick another listing."
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("tool", "arguments"), NO_HISTORY_TOOLS)
+async def test_a_ticker_whose_first_session_has_not_closed(
+    tmp_path: Path, tool: str, arguments: dict[str, Any]
+) -> None:
+    text = await without_history(tmp_path, date(2026, 10, 30), tool, arguments)
+
+    assert text.endswith(
+        "The data provider has no closed sessions for ASML.AS yet, for instance "
+        "because it listed today. Try again after its first session closes."
+    )
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("tool", "arguments"), NO_HISTORY_TOOLS)
+async def test_a_ticker_without_history_or_first_trade_date(
+    tmp_path: Path, tool: str, arguments: dict[str, Any]
+) -> None:
+    text = await without_history(tmp_path, None, tool, arguments)
+
+    assert text.endswith(
+        "The data provider has no closed sessions for ASML.AS yet. If it listed "
+        "today, try again after its first session closes; otherwise it has no "
+        "daily history and can't be analysed."
+    )
