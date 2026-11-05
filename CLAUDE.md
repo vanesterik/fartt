@@ -18,6 +18,7 @@ The project follows the [cookiecutter data science](https://drivendata.github.io
 - **Stock cache.** `fartt/stock_cache.py` keeps each ticker's daily candles, dividends, splits and listing under `assets/stocks/<TICKER>/` and brings them up to date on demand.
 - **The MCP server.** Claude Code starts it from `.mcp.json` (`uv run fartt`). It has nine tools: seven read tools, `get_candles(ticker, count)`, `get_quote(ticker)`, `get_indicators(ticker)`, `get_trend(ticker)`, `get_support_resistance(ticker)` and `get_decisions(status, ticker, limit)`, which reads the journal back, and `get_performance()`, which reports how the scored calls did, `record_decision(...)`, which writes a call to the journal, and `score_decisions()`, which scores the calls whose horizon has passed. It has one prompt, `analyze_ticker(ticker)`, which the operator invokes in Claude Code as `/mcp__fartt__analyze_ticker ASML.AS`: the PRD's eight-step analysis procedure for that ticker, ending in a recorded call.
 - **Analysis procedure.** `fartt/procedure.py` holds the eight steps as data, with the tools that carry each step today or the epic that adds them, and generates the `analyze_ticker` prompt's text from them.
+- **Analysis session.** `task analyse` starts Claude Code with only the `fartt` server's tools, under a checked-in permission profile (see Running an analysis below); a plain `claude` stays the development session.
 - **Technical analysis.** `fartt/technical/indicators.py` computes moving averages, RSI, MACD, ATR and volume with their states over plain candles, `trend.py` the daily and weekly trend, and `levels.py` the support and resistance zones with the signs that the nearest support holds or breaks.
 - **Journal.** `fartt/journal.py` keeps every call the agent records (buy or pass, horizon, reasoning, signals, and the stock's and IWDA.AS's last closes) in `assets/journal/decisions.jsonl`, append-only, and `get_decisions` reads them back. `score_decisions` scores each call whose horizon has passed against IWDA.AS, in EUR (`fartt/scoring.py`), and stores the score as a line of the same file; `get_performance` reports the hit rate and average returns over the scores (`fartt/performance.py`). Unlike `stocks/`, it can't be rebuilt.
 - **Helpers later epics build on**, not called by the server yet: the DataFrame indicators behind the chart, a candlestick chart (epic E) and a long-only backtest (`calculate_trade_returns`, epic I).
@@ -40,6 +41,7 @@ task test                        # pytest, offline
 task test:network                # live Yahoo tests + the end-to-end check of the server over stdio, in parallel (deselected by default)
 task pre-commit                  # the pre-commit hook's checks over staged files
 task outdated                    # direct dependencies with a newer release
+task analyse                     # Claude Code limited to the fartt server's tools, for an analysis (alias analyze)
 ```
 
 Tool versions are upgraded on purpose, never because a run nags: ruff's rule set is pinned in `pyproject.toml`, and pyright's new-release warning is silenced. Instead, Dependabot (`.github/dependabot.yml`) opens weekly pull requests for newer releases: minor and patch updates grouped into one for dev tools and one for runtime dependencies, each major update on its own. There's no CI, so check a Dependabot pull request out and run `task check` (or push to it) before merging. A runtime update also needs `task test:network`: the offline suite runs on a fake provider, so a yfinance, exchange_calendars or MCP SDK release that breaks the live fetch or the stdio server passes `task check` unnoticed. `task outdated` is the on-demand version.
@@ -62,6 +64,26 @@ There is no CLI: the agent calls the server's tools, and a ticker's cache fills 
 `tests/integration/test_server_stdio.py` checks the server end to end: it starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder, calls the tools, and asserts stdout carries only JSON-RPC, including anything written at shutdown. Each new tool joins it: the test role adds its name to `EXPECTED_TOOLS` and its call to `test_tools_over_stdio` (integration tests are the test role's, not the builder's).
 
 Hooks are managed by `lefthook` (`.lefthook.yml`) and stand in for CI, which this project doesn't have. On every commit, staged Python files get `ruff format` + `ruff check --fix`, then `pyright` and `pytest` run. On every push, `task check` runs the full suite on the whole repository (`ruff format --check .`, `ruff check .`, `pyright`, `pytest`), because pre-commit only sees staged files and a commit touching only `pyproject.toml`, `uv.lock` or `.mcp.json` would otherwise skip tests and type checks. `git push --no-verify` skips the gate for one push; use it deliberately, never by default. Tests marked `network` call Yahoo and are deselected by default; run them with `task test:network`.
+
+## Running an analysis
+
+An analysis runs in its own Claude Code session, started from the repository with `task analyse` (alias `analyze`); then `/mcp__fartt__analyze_ticker ASML.AS` runs the procedure for a ticker. Extra arguments go through to `claude`: `task analyse -- --resume`. A plain `claude` in the repository is the development session, with the permissions it always had.
+
+What the session may do: call every tool of the `fartt` server (also the ones later epics add), without a permission prompt, and use its prompt. What it may not do: anything else. There is no shell, no file read, write or edit, no web search or fetch, no subagents or skills, and no other MCP server or connector (Google Drive, Calendar and the like): those tools aren't offered to the model at all, so it can't even propose them. Should one ever slip in, it asks instead of running, also when the user settings set `defaultMode` to `auto`. Anything the analysis changes, it changes through the server (the journal, later the risk limits).
+
+The profile is two pieces, both checked in:
+
+- `.claude/analysis-settings.json`: the permissions, `allow: ["mcp__fartt"]` in `defaultMode: default`.
+- The `analyse` task in `Taskfile.yml`: `--restricted` (ignore the user, project and local settings files), `--tools ""` (no built-in tools), `--strict-mcp-config --mcp-config .mcp.json` (only the `fartt` server), `--settings .claude/analysis-settings.json` and `--permission-mode default`.
+
+Changing the profile is a deliberate commit to those two files, as changing the risk limits will be; an analysis session can't change it, since it has no file tools. Claude Code's flags change between releases, so after a Claude Code update check the profile headlessly: anything that would prompt is denied, and the stream's `init` message lists the tools the session has (only `mcp__fartt__*`) and its `permissionMode` (`default`):
+
+```bash
+claude -p --permission-prompts none --output-format stream-json --verbose \
+  --restricted --tools "" --strict-mcp-config --mcp-config .mcp.json \
+  --settings .claude/analysis-settings.json --permission-mode default \
+  "Call get_quote for ASML.AS." < /dev/null
+```
 
 ## Development workflow and pull requests
 
