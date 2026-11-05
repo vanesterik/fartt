@@ -217,6 +217,7 @@ async def test_a_ticker_without_closed_sessions_is_a_tool_error(
     text = result.content[0].text
     assert "no closed sessions" in text
     assert "unreachable" not in text
+    assert not (tmp_path / "stocks" / "ASML.AS").exists()
 
 
 @pytest.mark.anyio
@@ -246,6 +247,7 @@ async def test_an_unknown_ticker_is_a_tool_error_with_the_format(
     text = result.content[0].text
     assert "NOSUCH" in text
     assert "ASML.AS" in text
+    assert not (tmp_path / "stocks" / "NOSUCH").exists()
 
 
 @pytest.mark.anyio
@@ -478,6 +480,20 @@ async def test_get_quote_of_an_unknown_ticker_is_a_tool_error(tmp_path: Path) ->
     text = result.content[0].text
     assert "NOSUCH" in text
     assert "ASML.AS" in text
+
+
+@pytest.mark.anyio
+async def test_get_quote_of_a_listed_ticker_without_history(tmp_path: Path) -> None:
+    # Yahoo quotes GOOG.AS live but has no closed daily session for it.
+    result = await get_quote(quoting([], []), tmp_path)
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert (content["ticker"], content["currency"]) == ("ASML.AS", "EUR")
+    assert content["last"] == 102.0
+    assert content["average_volume_20d"] is None
+    assert content["volume_ratio"] is None
+    assert not (tmp_path / "stocks" / "ASML.AS").exists()
 
 
 @pytest.mark.anyio
