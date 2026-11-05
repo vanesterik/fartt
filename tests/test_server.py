@@ -292,6 +292,7 @@ async def test_the_tools_are_listed(tmp_path: Path) -> None:
         "get_candles",
         "get_decisions",
         "get_indicators",
+        "get_performance",
         "get_quote",
         "get_support_resistance",
         "get_trend",
