@@ -86,8 +86,8 @@ COLUMNS = ["date", "open", "high", "low", "close", "volume"]
 # from. This assumes an editable install (`uv sync`), as the project runs.
 ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_ASSETS_DIR = ROOT / "assets"
-# FARTT_ASSETS_DIR moves the cache, set in the environment (the end-to-end
-# test does) or in the repository's .env (see .env.example).
+# FARTT_ASSETS_DIR moves the cache, set in the environment (the integration
+# tests do) or in the repository's .env (see .env.example).
 ASSETS_DIR_ENV = "FARTT_ASSETS_DIR"
 ENV_FILE = ROOT / ".env"
 # FARTT_NOW pins the server's clock to one moment (ISO 8601 with an offset,

@@ -64,7 +64,7 @@ uv run pyright                   # type check (strict mode, src/ only — tests/
 
 There is no CLI: the agent calls the server's tools, and a ticker's cache fills on its first call. The server reads `FARTT_ASSETS_DIR` for the cache's folder from the environment or else the repository's `.env` (copy `.env.example`), defaulting to `assets/` in the repository wherever it was started from; a relative path is relative to the repository. The assets folder holds `stocks/`, a cache that's safe to delete, and `journal/`, the record of every call, which can't be rebuilt: never delete it. `FARTT_NOW` (environment only, never `.env`; ISO 8601 with an offset) pins the server's clock to one moment, so a cache filled up to it counts as current and nothing is fetched for it: the integration tests run the server on a checked-in snapshot this way. An unreadable value stops the server saying why. It logs to stderr only, since stdout carries the protocol.
 
-The integration tests (`tests/integration/`, all marked `integration` by its `conftest.py`) start the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder. Most run on a copy of the checked-in snapshot (`tests/integration/snapshot/`, the `seeded_assets` fixture) with the server's clock pinned to the snapshot's moment and Yahoo out of reach (`snapshot.OFFLINE`), so they're offline and give the same result every run; `snapshot.py` names the tickers and the moment, and `task test:snapshot` rebuilds it. The few that are about Yahoo itself (a first download, a quote, a ticker Yahoo doesn't list) are also marked `network`; refilling a cut snapshot from Yahoo keeps the clock pinned (`snapshot.PINNED`). A new test is offline unless it needs Yahoo's answer. `tests/integration/test_server_stdio.py` checks the server end to end: `test_tools_over_stdio` fills an empty folder from Yahoo and calls every tool (`network`), and the stdout check asserts, offline, that stdout carries only JSON-RPC, including anything written at shutdown. Each new tool joins it: the test role adds its name to `EXPECTED_TOOLS` and its call to `test_tools_over_stdio` (integration tests are the test role's, not the builder's).
+The integration tests (`tests/integration/`, all marked `integration` by its `conftest.py`) start the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder. Most run on a copy of the checked-in snapshot (`tests/integration/snapshot/`, the `seeded_assets` fixture) with the server's clock pinned to the snapshot's moment and Yahoo out of reach (`snapshot.OFFLINE`), so they're offline and give the same result every run; `snapshot.py` names the tickers and the moment, and `task test:snapshot` rebuilds it. The few that are about Yahoo itself (a first download, a quote, a ticker Yahoo doesn't list) are also marked `network`; refilling a cut snapshot from Yahoo keeps the clock pinned (`snapshot.PINNED`). A new test is offline unless it needs Yahoo's answer. `tests/integration/test_server_stdio.py` checks the whole server: `test_tools_over_stdio` fills an empty folder from Yahoo and calls every tool (`network`), and the stdout check asserts, offline, that stdout carries only JSON-RPC, including anything written at shutdown. Each new tool joins it: the test role adds its name to `EXPECTED_TOOLS` and its call to `test_tools_over_stdio` (integration tests are the test role's, not the builder's).
 
 Hooks are managed by `lefthook` (`.lefthook.yml`) and stand in for CI, which this project doesn't have. On every commit, staged Python files get `ruff format` + `ruff check --fix`, then `pyright` and `pytest` run. On every push, `task check` runs the full suite on the whole repository (`ruff format --check .`, `ruff check .`, `pyright`, `pytest`), because pre-commit only sees staged files and a commit touching only `pyproject.toml`, `uv.lock` or `.mcp.json` would otherwise skip tests and type checks. `git push --no-verify` skips the gate for one push; use it deliberately, never by default. Tests marked `integration` or `network` are deselected by default; run them with `task test:integration` (offline) and `task test:network` (Yahoo).
 
@@ -132,7 +132,7 @@ GitHub Project columns are the workflow state. IDs live in `.claude/pipeline.jso
 | Backlog | Not picked up yet | the developer |
 | Design | Design and plan in progress, with the developer | `/unity:design` at start |
 | Build | Design approved; implementation and unit tests (TDD), also rework | `/unity:design` once the developer approves the design in conversation; the tester and the reviewer on rejection |
-| Test | PR ready, integration/E2E testing | the builder when every task is done |
+| Test | PR ready, integration testing | the builder when every task is done |
 | Review | Tests passed, final code review | the tester on PASS |
 | Done | Merged | the board's "Item closed" workflow, when the merge closes the issue |
 
@@ -160,11 +160,11 @@ The developer's approval of the design is the one human gate: `/unity:design` mo
 ### Testing responsibilities
 
 - **Build** owns unit tests, written test-first.
-- **Test** owns integration and end-to-end tests, and never changes application code or unit tests.
+- **Test** owns the integration tests, and never changes application code or unit tests.
 
-### E2E testing
+### Integration testing
 
-<!-- Filled in by /unity:init; adjust as needed. write-e2e-test reads this section. -->
+<!-- Filled in by /unity:init as unity's "E2E testing" section; this project has integration tests only, no E2E tests. write-e2e-test reads this section. -->
 
 - No browser UI and no Playwright: the server speaks MCP over stdio, so integration tests carry the test role.
 - Integration directory: `tests/integration/` (pytest; `test_server_stdio.py` starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder). Run with `uv run pytest tests/integration -m "integration and not network" -n auto` (`task test:integration`): offline only. The tests marked `network` are for checking a runtime dependency update (Dependabot) and aren't part of testing a story; `task test` skips them all. A new integration test runs on the `seeded_assets` snapshot with `snapshot.OFFLINE` unless it's about Yahoo's own answer.
