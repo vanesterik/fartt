@@ -598,6 +598,33 @@ def _update(
         raise _cache_error(tool, ticker, error) from error
 
 
+def _no_history_error(listing: Listing, newest: date) -> ToolError:
+    """
+    Why a listed ticker has no closed session, from its first trade date
+    against the exchange's newest closed session: only a listing whose
+    first session hasn't closed yet will have one by retrying.
+
+    """
+    ticker = listing.ticker
+    if listing.first_trade is None:
+        return ToolError(
+            f"The data provider has no closed sessions for {ticker} yet. If it "
+            "listed today, try again after its first session closes; otherwise "
+            "it has no daily history and can't be analysed."
+        )
+    if listing.first_trade <= newest:
+        return ToolError(
+            f"The data provider lists {ticker} ({listing.name}) but has no "
+            "daily price history for it, so it can't be analysed. Retrying "
+            "won't help; pick another listing."
+        )
+    return ToolError(
+        f"The data provider has no closed sessions for {ticker} yet, for "
+        "instance because it listed today. Try again after its first session "
+        "closes."
+    )
+
+
 class Snapshot(NamedTuple):
     listing: Listing
     candles: list[Candle]  # Oldest first
@@ -617,11 +644,8 @@ def _snapshot(tool: str, cache: StockCache, ticker: str, count: int) -> Snapshot
     try:
         ticker, update = _update(tool, cache, ticker)
     except NoHistory as error:
-        raise ToolError(
-            f"The data provider has no closed sessions for "
-            f"{error.listing.ticker} yet, for instance because it listed "
-            "today. Try again after its first session closes."
-        ) from error
+        newest = cache.newest_closed_session(error.listing.ticker)
+        raise _no_history_error(error.listing, newest) from error
     try:
         candles = cache.latest(ticker, count)
         listing = cache.listing(ticker)
