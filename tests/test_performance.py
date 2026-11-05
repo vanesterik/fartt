@@ -1,8 +1,13 @@
 from datetime import date
 from typing import Any
 
-from fartt.journal import BenchmarkScore, Decision, Leg, Score
-from fartt.performance import MIN_CALLS, Period, calculate_performance
+from fartt.journal import SIGNALS, BenchmarkScore, Decision, Leg, Score, Signal
+from fartt.performance import (
+    MAX_TICKERS,
+    MIN_CALLS,
+    Period,
+    calculate_performance,
+)
 from tests.fakes import decision_draft, decision_score
 
 
@@ -203,3 +208,145 @@ def test_a_zero_edge_is_not_negative_zero() -> None:
 
     assert pass_.average_edge == 0.0
     assert str(pass_.average_edge) == "0.0"
+
+
+def test_every_signal_is_listed_in_order() -> None:
+    # @AC3
+    journal = Journal()
+    journal.scored(0.01)
+
+    signals = calculate_performance(journal.decisions, journal.scores).signals
+
+    assert [s.signal for s in signals] == list(SIGNALS)
+    assert len(signals) == 8
+    by_name = {s.signal: s for s in signals}
+    assert by_name["trend"].used.calls == 1  # decision_draft uses trend and rsi
+    assert by_name["rsi"].used.calls == 1
+    assert by_name["macd"].used.calls == 0
+    assert by_name["macd"].not_used.calls == 1
+
+
+def test_a_signal_is_used_with_either_stance() -> None:
+    # @AC3
+    journal = Journal()
+    for _ in range(10):
+        journal.scored(0.02, signals=[Signal(name="volume", stance="for")])
+    for _ in range(10):
+        journal.scored(
+            0.01, direction="pass", signals=[Signal(name="volume", stance="against")]
+        )
+    for _ in range(10):
+        journal.scored(-0.01, signals=[Signal(name="macd", stance="for")])
+
+    by_name = {
+        s.signal: s
+        for s in calculate_performance(journal.decisions, journal.scores).signals
+    }
+
+    volume = by_name["volume"]
+    assert volume.used.calls == 20
+    assert volume.used.hit_rate == 0.5
+    assert volume.used.average_excess_return == 0.015
+    assert volume.used.average_edge == 0.005
+    assert volume.used.note is None
+    assert volume.not_used.calls == 10
+    assert volume.not_used.hit_rate == 0.0
+    assert volume.not_used.average_excess_return == -0.01
+    assert volume.not_used.average_edge == -0.01
+
+
+def test_each_side_of_a_signal_has_its_own_minimum() -> None:
+    # @AC4
+    journal = Journal()
+    for _ in range(3):
+        journal.scored(0.02, signals=[Signal(name="atr", stance="for")])
+    for _ in range(12):
+        journal.scored(0.01)
+
+    atr = next(
+        s
+        for s in calculate_performance(journal.decisions, journal.scores).signals
+        if s.signal == "atr"
+    )
+
+    assert atr.used.calls == 3
+    assert atr.used.hit_rate is None
+    assert atr.used.average_excess_return is None
+    assert atr.used.average_edge is None
+    assert atr.used.note == "3 scored calls; needs 7 more (minimum 10)."
+    assert atr.not_used.calls == 12
+    assert atr.not_used.average_edge == 0.01
+    assert atr.not_used.note is None
+
+
+def test_tickers_are_filled_whatever_the_count() -> None:
+    # @AC5
+    journal = Journal()
+    journal.scored(-0.03, ticker="AAPL", currency="USD", exchange="XNYS")
+    journal.scored(
+        0.02, direction="pass", ticker="AAPL", currency="USD", exchange="XNYS"
+    )
+    journal.open(ticker="AAPL", currency="USD", exchange="XNYS")
+    journal.open(ticker="AAPL", currency="USD", exchange="XNYS")
+
+    tickers = calculate_performance(journal.decisions, journal.scores).tickers
+
+    assert len(tickers) == 1
+    aapl = tickers[0]
+    assert aapl.ticker == "AAPL"
+    assert aapl.calls == 2
+    assert aapl.open == 2
+    assert aapl.hit_rate == 0.0
+    assert aapl.average_excess_return == -0.005
+    assert aapl.average_edge == -0.025
+
+
+def test_tickers_are_ordered_by_calls_then_ticker() -> None:
+    # @AC5
+    journal = Journal()
+    journal.scored(0.01, ticker="SAP.AS")
+    for _ in range(2):
+        journal.scored(0.01, ticker="AAPL", currency="USD", exchange="XNYS")
+    journal.scored(0.01, ticker="ASML.AS")
+
+    tickers = calculate_performance(journal.decisions, journal.scores).tickers
+
+    assert [t.ticker for t in tickers] == ["AAPL", "ASML.AS", "SAP.AS"]
+
+
+def test_a_ticker_with_only_open_calls_is_not_listed() -> None:
+    # @AC5
+    journal = Journal()
+    journal.scored(0.01)
+    journal.open(ticker="AAPL", currency="USD", exchange="XNYS")
+
+    tickers = calculate_performance(journal.decisions, journal.scores).tickers
+
+    assert [t.ticker for t in tickers] == ["ASML.AS"]
+
+
+def test_tickers_are_capped() -> None:
+    # @AC5
+    journal = Journal()
+    for i in range(MAX_TICKERS + 5):
+        journal.scored(0.01, ticker=f"T{i:03}.AS")
+    journal.scored(0.01, ticker="T054.AS")
+
+    performance = calculate_performance(journal.decisions, journal.scores)
+
+    assert MAX_TICKERS == 50
+    assert len(performance.tickers) == 50
+    assert performance.tickers[0].ticker == "T054.AS"
+    assert performance.more_tickers == 5
+
+
+def test_no_scored_calls_has_no_tickers_and_empty_signals() -> None:
+    # @AC7
+    journal = Journal()
+    journal.open()
+
+    performance = calculate_performance(journal.decisions, journal.scores)
+
+    assert performance.tickers == []
+    assert performance.more_tickers == 0
+    assert all(s.used.calls == s.not_used.calls == 0 for s in performance.signals)
