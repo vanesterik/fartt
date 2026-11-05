@@ -31,6 +31,7 @@ EXPECTED_TOOLS = [
     "record_decision",
     "get_decisions",
     "score_decisions",
+    "get_performance",
 ]
 # Per response; also the MCP client's read timeout, which defaults to none.
 RESPONSE_TIMEOUT_S = 120
@@ -141,6 +142,15 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
         assert run["not_scored"] == []
         assert run["running"] == 1
         assert run["already_scored"] == 0
+
+        # @issue-122 @AC10
+        performance = await client.call_tool("get_performance", {})
+        assert not performance.is_error, performance.content
+        figures = performance.structured_content
+        assert figures["scored"] == 0
+        assert figures["open"] == 1
+        assert figures["overall"]["calls"] == 0
+        assert figures["tickers"] == []
 
     assert (tmp_path / "stocks" / "ASML.AS" / "candles.csv").exists()
     assert (tmp_path / "journal" / "decisions.jsonl").exists()
