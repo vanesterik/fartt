@@ -52,15 +52,25 @@ tasks:
       # pytest exits 5 when it collects nothing, which is not a failure here.
       - uv run pytest; code=$?; [ "$code" = "5" ] && exit 0 || exit "$code"
 
-  # The tests marked `network`, which the default suite deselects: the live
-  # Yahoo Finance tests and the end-to-end check of the server over stdio
-  # (tests/integration). They call Yahoo, so `check` leaves them out: a gate must not
-  # fail because Yahoo is down. They run in parallel (pytest-xdist): most of
-  # their time is starting a server per test, and the workers share one
-  # download (tests/integration/conftest.py). The unit tests stay serial;
-  # they take about two seconds, less than starting the workers costs.
+  # The integration tests (tests/integration): the server started over stdio
+  # the way Claude Code starts it, on the checked-in snapshot with its clock
+  # pinned and Yahoo out of reach, so they're offline and deterministic. They
+  # run in parallel (pytest-xdist): nearly all of their time is starting a
+  # server per test, under a second each. The unit tests stay serial; they
+  # take about four seconds, less than starting the workers costs.
+  test:integration:
+    desc: Run the integration tests over stdio, offline on the data snapshot
+    prefix: test:integration
+    cmds:
+      - uv run pytest -m "integration and not network" -n auto
+
+  # The tests marked `network`, which call Yahoo Finance: the provider's live
+  # tests, the one end-to-end run of every tool from an empty folder, and the
+  # integration checks of what Yahoo answers (a first download, a quote, a
+  # ticker it doesn't list). A gate must not fail because Yahoo is down, so
+  # `check` leaves them out; run them after a runtime dependency update.
   test:network:
-    desc: Run the tests that call Yahoo Finance, including the end-to-end server check
+    desc: Run the tests that call Yahoo Finance
     prefix: test:network
     cmds:
       - uv run pytest -m network -n auto

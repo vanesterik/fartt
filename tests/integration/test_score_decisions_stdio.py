@@ -1,8 +1,8 @@
 """
 Integration tests for `score_decisions` (#121), driven the way Claude Code
 drives the server: started from `.mcp.json` over stdio, with
-`FARTT_ASSETS_DIR` set to a temporary folder, against the live data provider.
-Marked `network`.
+`FARTT_ASSETS_DIR` set to a temporary folder holding the snapshot, its clock
+pinned to the snapshot's moment and Yahoo out of reach (`snapshot.OFFLINE`).
 
 Each test's docstring starts with its tags: `@issue-121` and the acceptance
 criteria it verifies. Expectations come from the issue's criteria and are
@@ -13,8 +13,9 @@ computed here from what the server itself returns: closes from `get_candles`
 `record_decision` only records calls whose horizon starts today, so, as the
 design says, past calls are written straight into the temporary
 `journal/decisions.jsonl` before the server starts: real tickers, real
-sessions and closes from the cache. A provider that's down is simulated by
-pointing the server's HTTP(S) proxy at a closed local port.
+sessions and closes from the snapshot. Data that isn't there yet is simulated
+by removing a ticker from the test's copy of the snapshot, and arrives by
+copying it back.
 """
 
 import csv
@@ -31,6 +32,8 @@ import exchange_calendars as xcals
 import pandas as pd
 import pytest
 from mcp import Client, StdioServerParameters
+
+from tests.integration.snapshot import OFFLINE, SNAPSHOT_DIR
 
 ROOT = Path(__file__).resolve().parents[2]
 RESPONSE_TIMEOUT_S = 180
@@ -55,7 +58,7 @@ USD_CALLS: list[tuple[Any, ...]] = [
     ("AAPL", "USD", "XNYS", "pass", "2026-05-04", 10, "2026-04-30"),  # dividend inside
 ]
 
-pytestmark = [pytest.mark.network, pytest.mark.anyio]
+pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
@@ -65,10 +68,18 @@ def anyio_backend() -> str:
 
 @asynccontextmanager
 async def _server(
-    assets_dir: Path, extra_env: dict[str, str] | None = None
+    assets_dir: Path,
+    extra_env: dict[str, str] | None = None,
+    *,
+    live: bool = False,
 ) -> AsyncIterator[Client]:
     server = json.loads((ROOT / ".mcp.json").read_text())["mcpServers"]["fartt"]
-    env = {**os.environ, "FARTT_ASSETS_DIR": str(assets_dir), **(extra_env or {})}
+    env = {
+        **os.environ,
+        "FARTT_ASSETS_DIR": str(assets_dir),
+        **({} if live else OFFLINE),
+        **(extra_env or {}),
+    }
     params = StdioServerParameters(
         command=server["command"], args=server["args"], cwd=str(ROOT), env=env
     )
@@ -211,21 +222,21 @@ def _check_score(scored: dict[str, Any], expected: dict[str, Any]) -> None:
 
 
 async def test_should_score_eur_calls_from_closes_and_dividends_after_the_decision(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-121 @AC1 @AC3 @AC4 @AC5 @AC8 Should score due EUR calls as the criteria define and leave a running one open."""
-    seeded = _seed(live_assets, EUR_CALLS)
-    running = _seed(live_assets, [("ASML.AS", "EUR", "XAMS", "buy", "2026-11-03", 20)])[
-        0
-    ]
-    dividends = _dividends(live_assets, "ASML.AS")
+    seeded = _seed(seeded_assets, EUR_CALLS)
+    running = _seed(
+        seeded_assets, [("ASML.AS", "EUR", "XAMS", "buy", "2026-11-03", 20)]
+    )[0]
+    dividends = _dividends(seeded_assets, "ASML.AS")
     assert (
         "2026-07-27" in dividends
         and "2026-04-24" in dividends
         and "2026-10-26" in dividends
     )
 
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         result = await _call(client, "score_decisions")
         closes = {t: await _closes(client, t) for t in ("ASML.AS", BENCHMARK)}
         journal = await _call(client, "get_decisions", limit=10)
@@ -260,7 +271,7 @@ async def test_should_score_eur_calls_from_closes_and_dividends_after_the_decisi
     # AC8: the running call isn't scored and stays open.
     assert by_id[running["id"]]["status"] == "open"
     assert by_id[running["id"]]["score"] is None
-    assert '"decision_id": 6' not in _journal(live_assets).read_text()
+    assert '"decision_id": 6' not in _journal(seeded_assets).read_text()
 
 
 async def _score_usd_calls(
@@ -284,10 +295,10 @@ async def _score_usd_calls(
 
 
 async def test_should_end_a_usd_calls_benchmark_on_its_last_amsterdam_session(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-121 @AC3 @AC4 Should measure IWDA.AS from the call's benchmark.session to its last session on or before horizon_ends."""
-    seeded, result, closes, _, scores = await _score_usd_calls(live_assets)
+    seeded, result, closes, _, scores = await _score_usd_calls(seeded_assets)
 
     benchmark = closes[BENCHMARK]
     for entry, scored in zip(seeded, result["scored"], strict=True):
@@ -312,12 +323,12 @@ async def test_should_end_a_usd_calls_benchmark_on_its_last_amsterdam_session(
 
 
 async def test_should_measure_a_usd_call_in_euros_at_the_eurusd_closes(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-121 @AC2 Should divide each end's close (and the dividends at the end) by EURUSD=X's close of that date, as get_candles returns it."""
-    dividends = _dividends(live_assets, "AAPL")
+    dividends = _dividends(seeded_assets, "AAPL")
     assert "2026-05-11" in dividends
-    seeded, result, closes, rates, scores = await _score_usd_calls(live_assets)
+    seeded, result, closes, rates, scores = await _score_usd_calls(seeded_assets)
 
     for entry, scored in zip(seeded, result["scored"], strict=True):
         score = scores[entry["id"]]
@@ -328,13 +339,13 @@ async def test_should_measure_a_usd_call_in_euros_at_the_eurusd_closes(
 
 
 async def test_should_not_change_a_score_when_later_candles_are_cached(
-    live_assets: Path, tmp_path_factory: pytest.TempPathFactory
+    seeded_assets: Path, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     """@issue-121 @AC5 Should score the same with or without candles after horizon_ends."""
     truncated = tmp_path_factory.mktemp("truncated")
-    shutil.copytree(live_assets / "stocks", truncated / "stocks")
+    shutil.copytree(seeded_assets / "stocks", truncated / "stocks")
     calls = [EUR_CALLS[0], USD_CALLS[1]]
-    _seed(live_assets, calls)
+    _seed(seeded_assets, calls)
     entries = _seed(truncated, calls)
     cutoff = max(e["horizon_ends"] for e in entries)
     for ticker in ("ASML.AS", "AAPL", BENCHMARK, "EURUSD=X"):
@@ -347,7 +358,7 @@ async def test_should_not_change_a_score_when_later_candles_are_cached(
     # The truncated cache can't be brought up to date: it scores on what it has.
     async with _server(truncated, UNREACHABLE) as client:
         without_later = await _call(client, "score_decisions")
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         with_later = await _call(client, "score_decisions")
 
     assert len(without_later["scored"]) == 2, without_later
@@ -355,15 +366,15 @@ async def test_should_not_change_a_score_when_later_candles_are_cached(
 
 
 async def test_should_score_nothing_twice_and_leave_the_journal_unchanged(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-121 @AC6 Should score nothing on a second run and keep every byte of the journal."""
-    _seed(live_assets, [*EUR_CALLS, *USD_CALLS])
-    async with _server(live_assets) as client:
+    _seed(seeded_assets, [*EUR_CALLS, *USD_CALLS])
+    async with _server(seeded_assets) as client:
         first = await _call(client, "score_decisions")
-        before = _journal(live_assets).read_bytes()
+        before = _journal(seeded_assets).read_bytes()
         second = await _call(client, "score_decisions")
-    async with _server(live_assets) as client:  # and after a restart
+    async with _server(seeded_assets) as client:  # and after a restart
         third = await _call(client, "score_decisions")
 
     assert len(first["scored"]) == 7
@@ -371,23 +382,28 @@ async def test_should_score_nothing_twice_and_leave_the_journal_unchanged(
         assert again["scored"] == []
         assert again["not_scored"] == []
         assert again["already_scored"] == 7
-    assert _journal(live_assets).read_bytes() == before
+    assert _journal(seeded_assets).read_bytes() == before
 
 
 async def test_should_keep_a_call_open_with_a_reason_until_its_data_is_there(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-121 @AC7 Should list unscorable calls with the ticker or rate and session, keep them open, and score them later."""
-    seeded = _seed(live_assets, [EUR_CALLS[0], USD_CALLS[0]])
+    seeded = _seed(seeded_assets, [EUR_CALLS[0], USD_CALLS[0]])
     # Then the stock's and the rate's caches are gone, and Yahoo is down.
-    shutil.rmtree(live_assets / "stocks" / "ASML.AS")
-    shutil.rmtree(live_assets / "stocks" / "EURUSD=X", ignore_errors=True)
+    shutil.rmtree(seeded_assets / "stocks" / "ASML.AS")
+    shutil.rmtree(seeded_assets / "stocks" / "EURUSD=X", ignore_errors=True)
 
-    async with _server(live_assets, UNREACHABLE) as client:
+    async with _server(seeded_assets, UNREACHABLE) as client:
         down = await _call(client, "score_decisions")
         journal = await _call(client, "get_decisions")
-    lines_while_down = _journal(live_assets).read_text().splitlines()
-    async with _server(live_assets) as client:
+    lines_while_down = _journal(seeded_assets).read_text().splitlines()
+    # When the data is there: both tickers back, as Yahoo would deliver them.
+    for ticker in ("ASML.AS", "EURUSD=X"):
+        shutil.copytree(
+            SNAPSHOT_DIR / "stocks" / ticker, seeded_assets / "stocks" / ticker
+        )
+    async with _server(seeded_assets) as client:
         up = await _call(client, "score_decisions")
 
     reasons = {c["id"]: c["reason"] for c in down["not_scored"]}
@@ -410,13 +426,13 @@ async def test_should_keep_a_call_open_with_a_reason_until_its_data_is_there(
     assert up["not_scored"] == []
 
 
-async def test_should_show_scores_after_a_restart(live_assets: Path) -> None:
+async def test_should_show_scores_after_a_restart(seeded_assets: Path) -> None:
     """@issue-121 @AC9 Should return scored calls with their score after a restart and filter on status."""
-    _seed(live_assets, [EUR_CALLS[0], USD_CALLS[0]])
-    _seed(live_assets, [("ASML.AS", "EUR", "XAMS", "buy", "2026-11-03", 20)])
-    async with _server(live_assets) as client:
+    _seed(seeded_assets, [EUR_CALLS[0], USD_CALLS[0]])
+    _seed(seeded_assets, [("ASML.AS", "EUR", "XAMS", "buy", "2026-11-03", 20)])
+    async with _server(seeded_assets) as client:
         result = await _call(client, "score_decisions")
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         every = await _call(client, "get_decisions")
         scored = await _call(client, "get_decisions", status="scored")
         still_open = await _call(client, "get_decisions", status="open")
@@ -437,10 +453,10 @@ async def test_should_show_scores_after_a_restart(live_assets: Path) -> None:
 
 
 async def test_should_read_fx_candles_and_refuse_a_call_on_an_fx_pair(
-    tmp_path: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-121 @AC10 Should return EURUSD=X's daily closes and refuse record_decision on it."""
-    async with _server(tmp_path) as client:
+    async with _server(seeded_assets) as client:
         candles = await _call(client, "get_candles", ticker="eurusd=x", count=10)
         refused = await client.call_tool(
             "record_decision",
@@ -462,27 +478,27 @@ async def test_should_read_fx_candles_and_refuse_a_call_on_an_fx_pair(
     assert all(0.5 < row[4] < 2 for row in candles["rows"])  # a EUR/USD rate
     assert refused.is_error
     assert "exchange rate, not a stock" in _text(refused)
-    assert not _journal(tmp_path).exists()
+    assert not _journal(seeded_assets).exists()
 
 
 async def test_should_be_a_tool_error_on_a_damaged_journal_and_write_nothing(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-121 @AC11 Should name the file and line of a damaged journal and leave it unchanged."""
-    _seed(live_assets, [EUR_CALLS[0]])
-    with _journal(live_assets).open("a") as file:
+    _seed(seeded_assets, [EUR_CALLS[0]])
+    with _journal(seeded_assets).open("a") as file:
         file.write("this is not json\n")
-    _seed(live_assets, [EUR_CALLS[2]])  # a due call after the damage
-    before = _journal(live_assets).read_bytes()
+    _seed(seeded_assets, [EUR_CALLS[2]])  # a due call after the damage
+    before = _journal(seeded_assets).read_bytes()
 
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         result = await client.call_tool("score_decisions", {})
 
     assert result.is_error, result.structured_content
     message = _text(result)
-    assert str(_journal(live_assets)) in message or "decisions.jsonl" in message
+    assert str(_journal(seeded_assets)) in message or "decisions.jsonl" in message
     assert "line 2" in message
-    assert _journal(live_assets).read_bytes() == before
+    assert _journal(seeded_assets).read_bytes() == before
 
 
 async def test_should_refuse_a_call_on_any_fx_pair_and_reject_path_like_ones(

@@ -28,9 +28,12 @@ SNAPSHOT_DIR = Path(__file__).parent / "snapshot"
 # reaching Yahoo.
 UNREACHABLE = "http://127.0.0.1:9"
 PROVIDER_DOWN = {name: UNREACHABLE for name in ("HTTPS_PROXY", "https_proxy")}
+# The clock of a server on the snapshot. With Yahoo reachable, a test can
+# refill a cut snapshot from Yahoo up to the snapshot's moment and no further.
+PINNED = {"FARTT_NOW": SNAPSHOT_NOW.isoformat()}
 # The environment of a server on the snapshot: its clock pinned and Yahoo out
 # of reach, so a test that would fetch anything fails instead of going online.
-OFFLINE = {"FARTT_NOW": SNAPSHOT_NOW.isoformat(), **PROVIDER_DOWN}
+OFFLINE = {**PINNED, **PROVIDER_DOWN}
 
 
 def build(target: Path = SNAPSHOT_DIR) -> None:

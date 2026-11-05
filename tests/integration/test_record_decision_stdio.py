@@ -1,8 +1,8 @@
 """
 Integration tests for `record_decision` (#119), driven the way Claude Code
 drives the server: started from `.mcp.json` over stdio, with
-`FARTT_ASSETS_DIR` set to a temporary folder, against the live data provider.
-Marked `network`.
+`FARTT_ASSETS_DIR` set to a temporary folder holding the snapshot, its clock
+pinned to the snapshot's moment and Yahoo out of reach (`snapshot.OFFLINE`).
 
 Each test's docstring starts with its tags: `@issue-119` and the acceptance
 criteria it verifies. Expectations come from the issue's criteria. Closes
@@ -24,6 +24,8 @@ import exchange_calendars as xcals
 import pandas as pd
 import pytest
 from mcp import Client, StdioServerParameters
+
+from tests.integration.snapshot import OFFLINE, SNAPSHOT_NOW
 
 ROOT = Path(__file__).resolve().parents[2]
 RESPONSE_TIMEOUT_S = 180
@@ -72,7 +74,7 @@ ENTRY_FIELDS = {
 }
 THANKSGIVING = {dt.date(2026, 11, 26), dt.date(2027, 11, 25)}
 
-pytestmark = [pytest.mark.network, pytest.mark.anyio]
+pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
@@ -82,10 +84,18 @@ def anyio_backend() -> str:
 
 @asynccontextmanager
 async def _server(
-    assets_dir: Path, extra_env: dict[str, str] | None = None
+    assets_dir: Path,
+    extra_env: dict[str, str] | None = None,
+    *,
+    live: bool = False,
 ) -> AsyncIterator[Client]:
     server = json.loads((ROOT / ".mcp.json").read_text())["mcpServers"]["fartt"]
-    env = {**os.environ, "FARTT_ASSETS_DIR": str(assets_dir), **(extra_env or {})}
+    env = {
+        **os.environ,
+        "FARTT_ASSETS_DIR": str(assets_dir),
+        **({} if live else OFFLINE),
+        **(extra_env or {}),
+    }
     params = StdioServerParameters(
         command=server["command"], args=server["args"], cwd=str(ROOT), env=env
     )
@@ -114,7 +124,7 @@ def _journal(assets_dir: Path) -> Path:
 def _newest_closed_session(exchange: str) -> dt.date:
     """The exchange's latest session whose close lies CLOSE_MARGIN in the past."""
     calendar = xcals.get_calendar(exchange)
-    now = pd.Timestamp(dt.datetime.now(dt.UTC) - CLOSE_MARGIN)
+    now = pd.Timestamp(SNAPSHOT_NOW - CLOSE_MARGIN)
     start = now.normalize().tz_localize(None) - pd.Timedelta(days=14)
     sessions = calendar.sessions_in_range(start, now.normalize().tz_localize(None))
     closed = [s for s in sessions if calendar.session_close(s) <= now]
@@ -130,16 +140,16 @@ def _sessions_after(exchange: str, day: dt.date, count: int) -> list[dt.date]:
     return [s.date() for s in sessions[:count]]
 
 
-async def test_should_return_the_stored_entry(live_assets: Path) -> None:
+async def test_should_return_the_stored_entry(seeded_assets: Path) -> None:
     """@issue-119 @AC1 Should return the stored entry with every field."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         entry = await _call(client, "record_decision", **CALL)
 
     assert set(entry) >= ENTRY_FIELDS
     assert entry["id"] == 1
     recorded_at = dt.datetime.fromisoformat(entry["recorded_at"])
     assert recorded_at.utcoffset() == dt.timedelta(0)
-    assert abs(dt.datetime.now(dt.UTC) - recorded_at) < dt.timedelta(minutes=5)
+    assert recorded_at == SNAPSHOT_NOW
     assert (entry["ticker"], entry["currency"], entry["exchange"]) == (
         "ASML.AS",
         "EUR",
@@ -166,21 +176,13 @@ async def test_should_return_the_stored_entry(live_assets: Path) -> None:
     ("ticker", "exchange"), [("ASML.AS", "XAMS"), ("AAPL", "XNYS")]
 )
 async def test_should_stamp_the_newest_closes_get_candles_returns(
-    live_assets: Path, ticker: str, exchange: str
+    seeded_assets: Path, ticker: str, exchange: str
 ) -> None:
     """
     @issue-119 @AC2 Should stamp the stock's and the benchmark's newest closes.
-
-    Between an exchange's close (plus the margin) and Yahoo publishing that
-    session, record_decision refuses by design; the test skips then rather
-    than reading a late Yahoo as a regression.
     """
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         result = await client.call_tool("record_decision", {**CALL, "ticker": ticker})
-        if result.is_error:
-            text = " ".join(getattr(part, "text", "") for part in result.content)
-            if "isn't available" in text:
-                pytest.skip(f"Yahoo hasn't published the newest session: {text}")
         assert not result.is_error, result.content
         entry = result.structured_content
         assert entry is not None
@@ -203,10 +205,10 @@ async def test_should_stamp_the_newest_closes_get_candles_returns(
     [("ASML.AS", "XAMS", 20), ("AAPL", "XNYS", 20), ("AAPL", "XNYS", 60)],
 )
 async def test_should_end_the_horizon_on_the_exchange_s_own_sessions(
-    live_assets: Path, ticker: str, exchange: str, horizon: int
+    seeded_assets: Path, ticker: str, exchange: str, horizon: int
 ) -> None:
     """@issue-119 @AC3 Should count the horizon in the exchange's sessions."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         entry = await _call(
             client, "record_decision", **{**CALL, "ticker": ticker, "horizon": horizon}
         )
@@ -228,11 +230,11 @@ async def test_should_end_the_horizon_on_the_exchange_s_own_sessions(
 
 
 async def test_should_append_one_line_per_call_and_never_rewrite(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-119 @AC4 Should append one line per call and keep earlier lines."""
-    journal = _journal(live_assets)
-    async with _server(live_assets) as client:
+    journal = _journal(seeded_assets)
+    async with _server(seeded_assets) as client:
         first = await _call(client, "record_decision", **CALL)
         after_first = journal.read_bytes()
         second = await _call(client, "record_decision", **CALL)
@@ -253,15 +255,15 @@ async def test_should_append_one_line_per_call_and_never_rewrite(
         assert {key: stored[key] for key in entry} == entry
 
 
-async def test_should_continue_the_ids_after_a_restart(live_assets: Path) -> None:
+async def test_should_continue_the_ids_after_a_restart(seeded_assets: Path) -> None:
     """@issue-119 @AC5 Should keep the journal and continue its ids after a restart."""
-    journal = _journal(live_assets)
-    async with _server(live_assets) as client:
+    journal = _journal(seeded_assets)
+    async with _server(seeded_assets) as client:
         await _call(client, "record_decision", **CALL)
         await _call(client, "record_decision", **CALL)
     before = journal.read_bytes()
 
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         entry = await _call(client, "record_decision", **CALL)
 
     assert entry["id"] == 3
@@ -305,11 +307,11 @@ INVALID_CALLS = [
 
 @pytest.mark.parametrize(("change", "words"), INVALID_CALLS)
 async def test_should_reject_an_invalid_call_and_record_nothing(
-    live_assets: Path, change: dict[str, Any], words: list[str]
+    seeded_assets: Path, change: dict[str, Any], words: list[str]
 ) -> None:
     """@issue-119 @AC6 Should reject an invalid call, saying what's allowed."""
-    journal = _journal(live_assets)
-    async with _server(live_assets) as client:
+    journal = _journal(seeded_assets)
+    async with _server(seeded_assets) as client:
         await _call(client, "record_decision", **CALL)
         before = journal.read_bytes()
         message = await _error(client, "record_decision", **{**CALL, **change})
@@ -320,21 +322,21 @@ async def test_should_reject_an_invalid_call_and_record_nothing(
 
 
 async def test_should_record_nothing_on_a_first_invalid_call(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-119 @AC6 Should leave no journal behind when the first call is invalid."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         await _error(client, "record_decision", **{**CALL, "direction": "sell"})
         await _error(client, "record_decision", **{**CALL, "ticker": "NOPEZZZ"})
 
-    assert not _journal(live_assets).exists()
+    assert not _journal(seeded_assets).exists()
 
 
 async def test_should_list_the_valid_values_in_the_input_schema(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-119 @AC6 Should list the valid names and stances in the schema."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         tools = (await client.list_tools()).tools
     schema = json.dumps(
         next(t for t in tools if t.name == "record_decision").input_schema
@@ -346,18 +348,18 @@ async def test_should_list_the_valid_values_in_the_input_schema(
 
 @pytest.mark.parametrize("stale", ["ASML.AS", BENCHMARK])
 async def test_should_refuse_when_a_newest_close_is_not_cached(
-    live_assets: Path, stale: str
+    seeded_assets: Path, stale: str
 ) -> None:
     """@issue-119 @AC7 Should refuse a call without the newest close, provider down."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         await _call(client, "record_decision", **CALL)
-    journal = _journal(live_assets)
+    journal = _journal(seeded_assets)
     before = journal.read_bytes()
-    candles = live_assets / "stocks" / stale / "candles.csv"
+    candles = seeded_assets / "stocks" / stale / "candles.csv"
     rows = candles.read_text().splitlines(keepends=True)
     candles.write_text("".join(rows[:-1]))
 
-    async with _server(live_assets, PROVIDER_DOWN) as client:
+    async with _server(seeded_assets, PROVIDER_DOWN) as client:
         message = await _error(client, "record_decision", **CALL)
 
     assert stale in message
@@ -367,13 +369,13 @@ async def test_should_refuse_when_a_newest_close_is_not_cached(
 
 
 async def test_should_record_with_the_provider_down_when_both_closes_are_cached(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-119 @AC7 Should record as usual when both newest closes are cached."""
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         first = await _call(client, "record_decision", **CALL)
 
-    async with _server(live_assets, PROVIDER_DOWN) as client:
+    async with _server(seeded_assets, PROVIDER_DOWN) as client:
         entry = await _call(client, "record_decision", **CALL)
 
     assert entry["id"] == first["id"] + 1
@@ -382,7 +384,7 @@ async def test_should_record_with_the_provider_down_when_both_closes_are_cached(
 
 
 async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """
     @issue-119 @AC8 Should offer the read tools plus record_decision only.
@@ -392,7 +394,7 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
     get_performance (#122) reads the journal's scores; it joins as a read-only
     tool.
     """
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         tools = (await client.list_tools()).tools
 
     assert sorted(tool.name for tool in tools) == sorted(
@@ -423,11 +425,11 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
 
 
 async def test_should_normalise_the_ticker_and_keep_the_reasoning_as_sent(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-119 @AC1 @AC4 Should normalise the ticker and store multi-line text intact."""
     reasoning = "Trend up.\nTarget €55."
-    async with _server(live_assets) as client:
+    async with _server(seeded_assets) as client:
         entry = await _call(
             client,
             "record_decision",
@@ -436,17 +438,17 @@ async def test_should_normalise_the_ticker_and_keep_the_reasoning_as_sent(
 
     assert entry["ticker"] == "ASML.AS"
     assert entry["reasoning"] == reasoning
-    lines = _journal(live_assets).read_text(encoding="utf-8").splitlines()
+    lines = _journal(seeded_assets).read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["reasoning"] == reasoning
 
 
 async def test_should_report_a_damaged_journal_without_rewriting_it(
-    live_assets: Path,
+    seeded_assets: Path,
 ) -> None:
     """@issue-119 @AC4 Should refuse to append to a damaged journal and leave it."""
-    journal = _journal(live_assets)
-    async with _server(live_assets) as client:
+    journal = _journal(seeded_assets)
+    async with _server(seeded_assets) as client:
         await _call(client, "record_decision", **CALL)
         with journal.open("ab") as file:
             file.write(b"not json\n")

@@ -1,9 +1,8 @@
 """
 Integration tests for the `analyze_ticker` prompt (#131), driven the way
 Claude Code drives the server: started from `.mcp.json` over stdio, with
-`FARTT_ASSETS_DIR` set to a temporary folder. The prompt itself calls no
-provider, but the tests start the real server and sit with the other stdio
-tests, so they're marked `network` too.
+`FARTT_ASSETS_DIR` set to a temporary folder, its clock pinned and Yahoo out
+of reach (`snapshot.OFFLINE`): the prompt itself calls no provider.
 
 The check that a refused ticker never reaches the provider builds the same
 server in this process on the real `YFinanceProvider`, with a ticker factory
@@ -35,6 +34,7 @@ from fartt.data import YFinanceProvider
 from fartt.journal import Journal
 from fartt.server import build_server
 from fartt.stock_cache import StockCache
+from tests.integration.snapshot import OFFLINE
 
 ROOT = Path(__file__).resolve().parents[2]
 RESPONSE_TIMEOUT_S = 120
@@ -80,7 +80,7 @@ REPORT_SECTIONS = [
 NOT_A_TICKER = ["", "   ", "AS ML!", "ASML/AS"]
 REFUSED = [*NOT_A_TICKER, "VOD.L", "EURUSD=X"]
 
-pytestmark = [pytest.mark.network, pytest.mark.anyio]
+pytestmark = pytest.mark.anyio
 
 
 @pytest.fixture
@@ -91,7 +91,7 @@ def anyio_backend() -> str:
 @asynccontextmanager
 async def _server(assets_dir: Path) -> AsyncIterator[Client]:
     server = json.loads((ROOT / ".mcp.json").read_text())["mcpServers"]["fartt"]
-    env = {**os.environ, "FARTT_ASSETS_DIR": str(assets_dir)}
+    env = {**os.environ, "FARTT_ASSETS_DIR": str(assets_dir), **OFFLINE}
     params = StdioServerParameters(
         command=server["command"], args=server["args"], cwd=str(ROOT), env=env
     )
