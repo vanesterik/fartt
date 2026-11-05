@@ -128,6 +128,7 @@ All of Euronext and the US exchanges. The screen's liquidity and market-cap filt
 | H | `get_portfolio()` | Paper positions against their plans, P&L after costs |
 | I | `backtest_rule(rule)` | Return, hit rate, drawdown and trades after costs, with a walk-forward split |
 | J | `place_order(plan)` | Places an approved plan's limit order and its stop through Saxo's OpenAPI |
+| K | `get_news(ticker)` | Recent headlines with source, publication time and link, only from before the call |
 
 Tool names and outputs are settled in each epic's design; this table is the intent.
 
@@ -183,7 +184,7 @@ If we give Claude Code a fixed analysis procedure, tools that turn data into com
 
 ### Epics
 
-Built in this order. Each epic is a GitHub issue on the [project board](https://github.com/users/vanesterik/projects/3) in the epic-hypothesis format.
+Built in the order of this table (decided 2026-11-05, at the walking-skeleton milestone; letters are the order they were planned in). Each epic is a GitHub issue on the [project board](https://github.com/users/vanesterik/projects/3) in the epic-hypothesis format.
 
 | Epic | Issue | Scope |
 |---|---|---|
@@ -192,14 +193,16 @@ Built in this order. Each epic is a GitHub issue on the [project board](https://
 | C. Journal & Evaluation | #90 | `record_decision`, `score_decisions`, `get_performance` |
 | D. Analysis Pipeline | #91 | The procedure as an MCP prompt; the permission profile |
 | | | **Milestone: walking skeleton.** A full analysis runs end to end on one ticker. |
-| E. Visualization | #92 | `render_chart` with indicator panels |
+| H. Trade Plan & Risk | #95 | Risk config, `plan_trade`, paper portfolio, kill switch |
+| | | **Milestone: paper trading starts.** The 3-month clock for the first gate runs from here. |
 | F. Market Context | #93 | `get_market_regime`, `get_sector_strength` |
 | G. Fundamentals & Screening | #94 | `get_fundamentals`, `compare_peers`, `screen`, `get_events`, `estimate_value` |
-| H. Trade Plan & Risk | #95 | Risk config, `plan_trade`, paper portfolio, kill switch |
+| K. News | #133 | `get_news`, and news as a journal signal |
+| E. Visualization | #92 | `render_chart` with indicator panels |
 | I. Validation | #96 | `backtest_rule`, walk-forward checks |
 | J. Live Orders | #101 | Saxo order placement with approval, behind the stage 2 → 3 gate |
 
-🔵 Paper trading starts once epic H lands, so the 3-month clock for the first gate starts after H, not after the walking skeleton. Before then, decisions are journalled and scored, but not as sized plans. Moving H before E–G would start that clock sooner (see section 10).
+Paper trading starts once epic H lands, so H comes straight after the walking skeleton: every month it waits pushes the first gate back a month. Before then, decisions are journalled and scored, but not as sized plans. F, G and K land while the paper clock runs, so the system changes during it; the gate judges the procedure as a whole, and `get_performance` splits results per signal, so what each addition contributed stays visible. F comes first of the three: it's small, and the index against its 200-day average is the best-supported filter after trend. E comes after them, since the agent works from numbers and charts mostly help the operator check its work.
 
 ### Stories
 
@@ -218,7 +221,7 @@ Stories are written just in time, one epic at a time, as GitHub issues in the Us
 - **Crypto,** and any market outside Euronext and the US exchanges.
 - **Order book (L2) data.** It's expensive and of little value for holding periods of days to weeks. Revisit only if the journal shows a real hit rate.
 - **Intraday trading** and timeframes shorter than a day.
-- **News and sentiment signals, and agent-driven retraining.**
+- **Sentiment scores and agent-driven retraining.** Recent news headlines, read as evidence, are epic K.
 - **Short selling, options and leverage.**
 - **Unattended operation.** The agent runs in a session the operator starts. No order is placed without approval.
 - **Anyone but the operator.** No product, no customers, no selling signals.
@@ -244,7 +247,7 @@ Stories are written just in time, one epic at a time, as GitHub issues in the Us
 ## 10. Open Questions
 
 1. 🔵 **Benchmark:** VWCE or IWDA. Decided in epic C's design.
-2. 🔵 **Order of epics E–H.** Moving H (paper portfolio) before E–G starts the 3-month paper clock sooner. Decide at the walking-skeleton milestone.
+2. **Order of epics E–K.** Decided 2026-11-05 at the walking-skeleton milestone: H, F, G, K, E, I, J (section 7).
 3. 🔵 **Costs per exchange:** Saxo's commissions and currency conversion fee are known (section 6). Still open: transaction taxes outside Saxo's tariff (France's and Italy's financial transaction taxes on purchases), and whether 0.1% slippage per leg matches real fills.
 4. 🔵 **Horizon of a call:** fixed per call (chosen by the agent), or the plan's stop/target with a maximum holding period. Decided in epic C's design.
 5. 🔵 **Macro events** for step 1: which source, given that yfinance doesn't provide an economic calendar. Decided in epic F's design.
