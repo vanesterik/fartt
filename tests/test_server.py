@@ -294,6 +294,7 @@ async def test_the_tools_are_listed(tmp_path: Path) -> None:
         tools = (await client.list_tools()).tools
 
     assert sorted(tool.name for tool in tools) == [
+        "get_analysis_procedure",
         "get_candles",
         "get_decisions",
         "get_indicators",
@@ -1841,6 +1842,69 @@ async def test_analyze_ticker_refuses_what_isnt_a_stock_in_the_universe(
     assert "ASML.AS" in message
     assert ".AS" in message and ".OL" in message
     assert fake.history_calls == []
+
+
+@pytest.mark.anyio
+async def test_get_analysis_procedure_is_read_only_with_one_ticker_argument(
+    tmp_path: Path,
+) -> None:
+    cache = cache_for(provider([]), tmp_path)
+    async with Client(build_server(cache, journal_of(cache))) as client:
+        tools = (await client.list_tools()).tools
+
+    tool = next(t for t in tools if t.name == "get_analysis_procedure")
+    assert tool.description
+    assert tool.input_schema["required"] == ["ticker"]
+    assert list(tool.input_schema["properties"]) == ["ticker"]
+    assert tool.input_schema["properties"]["ticker"]["description"]
+    assert tool.annotations is not None
+    assert tool.annotations.read_only_hint is True
+    assert tool.annotations.open_world_hint is False
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("ticker", "normalised"),
+    [("ASML.AS", "ASML.AS"), ("AAPL", "AAPL"), (" asml.as ", "ASML.AS")],
+)
+async def test_get_analysis_procedure_returns_the_prompts_text(
+    tmp_path: Path, ticker: str, normalised: str
+) -> None:
+    fake = provider([])
+    fake.reachable = False
+    cache = cache_for(fake, tmp_path)
+    async with Client(build_server(cache, journal_of(cache))) as client:
+        result = await client.call_tool("get_analysis_procedure", {"ticker": ticker})
+        prompt = await client.get_prompt("analyze_ticker", {"ticker": ticker})
+
+    assert not result.is_error
+    assert result.structured_content == {
+        "ticker": normalised,
+        "procedure": prompt.messages[0].content.text,
+    }
+    assert result.structured_content["procedure"] == analysis_prompt(normalised)
+    assert fake.history_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("ticker", ["", "AS ML", "VOD.L", "EURUSD=X", " eurusd=x "])
+async def test_get_analysis_procedure_refuses_as_the_prompt_does(
+    tmp_path: Path, ticker: str
+) -> None:
+    fake = provider([])
+    cache = cache_for(fake, tmp_path)
+    async with Client(build_server(cache, journal_of(cache))) as client:
+        result = await client.call_tool("get_analysis_procedure", {"ticker": ticker})
+        with pytest.raises(MCPError) as raised:
+            await client.get_prompt("analyze_ticker", {"ticker": ticker})
+
+    assert result.is_error
+    # The SDK opens every tool error with "Error executing tool <name>: ".
+    assert result.content[0].text.endswith(f": {raised.value.message}")
+    assert raised.value.message.endswith(server_module.TICKER_FORMAT)
+    assert fake.history_calls == []
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.anyio
