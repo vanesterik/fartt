@@ -36,6 +36,7 @@ EXPECTED_TOOLS = [
     "get_decisions",
     "score_decisions",
     "get_performance",
+    "get_analysis_procedure",
 ]
 EXPECTED_PROMPTS = ["analyze_ticker"]
 # Per response; also the MCP client's read timeout, which defaults to none.
@@ -77,6 +78,16 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
         assert len(analysis.messages) == 1
         assert analysis.messages[0].content.type == "text"
         assert "ASML.AS" in analysis.messages[0].content.text
+
+        # @issue-141 @AC2
+        procedure = await client.call_tool(
+            "get_analysis_procedure", {"ticker": "ASML.AS"}
+        )
+        assert not procedure.is_error, procedure.content
+        assert procedure.structured_content == {
+            "ticker": "ASML.AS",
+            "procedure": analysis.messages[0].content.text,
+        }
 
         candles = await client.call_tool(
             "get_candles", {"ticker": "ASML.AS", "count": 5}

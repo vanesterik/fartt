@@ -392,7 +392,8 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
     get_decisions (#120) reads the journal back; it joins as a read-only tool.
     score_decisions (#121) appends score lines and never edits or removes one.
     get_performance (#122) reads the journal's scores; it joins as a read-only
-    tool.
+    tool. get_analysis_procedure (#141) returns the procedure's text and
+    writes nothing; it joins as a read-only tool.
     """
     async with _server(seeded_assets) as client:
         tools = (await client.list_tools()).tools
@@ -408,6 +409,7 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
             "get_decisions",
             "score_decisions",
             "get_performance",
+            "get_analysis_procedure",
         ]
     )
     record = next(tool for tool in tools if tool.name == "record_decision")
@@ -422,6 +424,9 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
     performance = next(tool for tool in tools if tool.name == "get_performance")
     assert performance.annotations is not None
     assert performance.annotations.read_only_hint is True
+    procedure = next(tool for tool in tools if tool.name == "get_analysis_procedure")
+    assert procedure.annotations is not None
+    assert procedure.annotations.read_only_hint is True
 
 
 async def test_should_normalise_the_ticker_and_keep_the_reasoning_as_sent(
