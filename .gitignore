@@ -1,6 +1,5 @@
 # Project-specific
-artifacts/*
-!artifacts/.gitkeep
+artifacts/
 assets/stocks/
 assets/journal/
 
