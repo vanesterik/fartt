@@ -115,8 +115,10 @@ INSTRUCTIONS = (
     "At the daily check-in, call score_decisions: it scores every call whose "
     "horizon has passed against IWDA.AS, in EUR. Read get_performance to see "
     "how the calls have done, overall, per signal and per ticker; they are "
-    "calls, not trades: no costs or position sizes. An analysis of a ticker "
-    "follows the analyze_ticker prompt: its steps in order, ending in a call."
+    "calls, not trades: no costs or position sizes. Before analysing a "
+    "ticker, call get_analysis_procedure with it, first, and follow what it "
+    "returns step by step, ending in a call; skip that only when the "
+    "analyze_ticker prompt already gave you the procedure."
 )
 
 # What a ticker the analyze_ticker prompt accepts looks like, closing every

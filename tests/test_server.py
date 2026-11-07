@@ -1372,6 +1372,16 @@ async def test_record_decision_refuses_an_fx_pair(tmp_path: Path) -> None:
     assert not journal_path(cache).exists()
 
 
+def test_the_instructions_send_an_analysis_to_get_analysis_procedure() -> None:
+    sentences = server_module.INSTRUCTIONS.split(". ")
+    sentence = next(
+        s
+        for s in sentences
+        if "Before analysing a ticker, call get_analysis_procedure" in s
+    )
+    assert "analyze_ticker" in sentence
+
+
 def test_the_instructions_say_to_record_every_call() -> None:
     assert "record_decision" in server_module.INSTRUCTIONS
 
