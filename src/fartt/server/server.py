@@ -127,6 +127,12 @@ TICKER_FORMAT = (
     "Euronext suffixes " + ", ".join(s for s in SUFFIX_CALENDARS if s) + "."
 )
 
+# The ticker argument of the analyze_ticker prompt and get_analysis_procedure.
+TICKER_ARGUMENT = (
+    "One stock in Yahoo's format: AAPL for a US listing, ASML.AS for "
+    "Euronext Amsterdam."
+)
+
 MIN_HORIZON = 5
 MAX_HORIZON = 60
 MAX_REASONING = 2000
@@ -479,6 +485,16 @@ class PerformanceResult(BaseModel):
     )
 
 
+class ProcedureResult(BaseModel):
+    ticker: str = Field(description="The ticker, normalised to Yahoo's format.")
+    procedure: str = Field(
+        description=(
+            "The analysis procedure for this ticker, the text the analyze_ticker "
+            "prompt gives: follow its steps in order and report in its sections."
+        )
+    )
+
+
 def _performance_note(scored: int, due: int, more_tickers: int) -> str | None:
     notes: list[str] = []
     if not scored:
@@ -727,13 +743,17 @@ def _current_close(tool: str, cache: StockCache, ticker: str) -> Snapshot:
     return snapshot
 
 
-def _prompt_ticker(ticker: str) -> str:
+class NotAnalysable(ValueError):
+    """A ticker the analysis procedure refuses; the message says why and what a ticker looks like."""
+
+
+def _analysable_ticker(ticker: str) -> str:
     """
-    The ticker normalised, checked offline as the tools check it, or an
-    `MCPError` (INVALID_PARAMS) saying what a valid ticker looks like: the
-    SDK passes an `MCPError` through prompt rendering as it is and turns
-    anything else into a bare "Error rendering prompt". Whether the ticker
-    is listed is left to the tools.
+    The ticker normalised, checked offline as the tools check it, or
+    `NotAnalysable` saying why not and what a valid ticker looks like. The
+    `analyze_ticker` prompt and `get_analysis_procedure` both check with it,
+    so they refuse the same tickers in the same words. Whether the ticker is
+    listed is left to the tools the procedure names.
 
     """
     try:
@@ -747,7 +767,20 @@ def _prompt_ticker(ticker: str) -> str:
         if not normalised.endswith(FX_SUFFIX):
             return normalised
         reason = f"{normalised} is an exchange rate, not a stock to make a call on."
-    raise MCPError(INVALID_PARAMS, f"{reason} {TICKER_FORMAT}")
+    raise NotAnalysable(f"{reason} {TICKER_FORMAT}")
+
+
+def _prompt_ticker(ticker: str) -> str:
+    """
+    `_analysable_ticker` for the prompt: a refusal is an `MCPError`
+    (INVALID_PARAMS), since the SDK passes one through prompt rendering as
+    it is and turns anything else into a bare "Error rendering prompt".
+
+    """
+    try:
+        return _analysable_ticker(ticker)
+    except NotAnalysable as error:
+        raise MCPError(INVALID_PARAMS, str(error)) from error
 
 
 def build_server(cache: StockCache, journal: Journal) -> MCPServer:
@@ -1437,6 +1470,24 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
             ),
         )
 
+    @server.tool(
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False)
+    )
+    def get_analysis_procedure(
+        ticker: Annotated[str, Field(description=TICKER_ARGUMENT)],
+    ) -> ProcedureResult:
+        """
+        Return fartt's analysis procedure for one ticker: the steps, the
+        decision rules and the report's sections. Call it before analysing
+        the ticker and follow it step by step, ending in a recorded call.
+        """
+        try:
+            normalised = _analysable_ticker(ticker)
+        except NotAnalysable as error:
+            raise ToolError(str(error)) from error
+        logger.info(f"get_analysis_procedure {normalised}")
+        return ProcedureResult(ticker=normalised, procedure=analysis_prompt(normalised))
+
     @server.prompt(
         name="analyze_ticker",
         title="Analyse a ticker",
@@ -1446,15 +1497,7 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
         ),
     )
     def analyze_ticker(
-        ticker: Annotated[
-            str,
-            Field(
-                description=(
-                    "One stock in Yahoo's format: AAPL for a US listing, "
-                    "ASML.AS for Euronext Amsterdam."
-                )
-            ),
-        ],
+        ticker: Annotated[str, Field(description=TICKER_ARGUMENT)],
     ) -> str:
         return analysis_prompt(_prompt_ticker(ticker))
 
