@@ -1,6 +1,8 @@
 # Project-specific
-artifacts/
-assets/
+artifacts/*
+!artifacts/.gitkeep
+assets/stocks/
+assets/journal/
 
 # Mac OS-specific storage files
 .DS_Store
