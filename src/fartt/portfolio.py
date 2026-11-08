@@ -725,7 +725,7 @@ def refuse_when_tripped(kill_switch: KillSwitch) -> None:
         f"peak (threshold {kill_switch.threshold}), so no new plan is made. "
         "Open positions and waiting plans run on. Only the operator can reset "
         "it, with `task reset-kill-switch` outside the analysis session; "
-        "record the call as a pass or without a plan meanwhile."
+        "meanwhile, record nothing for a buy and say why in the report."
     )
 
 
