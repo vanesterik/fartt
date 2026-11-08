@@ -395,7 +395,18 @@ async def test_should_fit_ten_of_the_largest_calls_with_a_plan_under_60000_chara
     """
     @issue-143 @AC11 Should return ten of the largest calls, each with a plan,
     in under 60,000 characters, listing at most 10.
+
+    Each waiting plan reserves its cash (#145), so eleven buys only fit a
+    portfolio whose position limit is a small share of a large capital: the
+    test's risk config is set to that, which also makes the plans' amounts
+    longer.
     """
+    risk_file = seeded_assets / "risk.toml"
+    risk_file.write_text(
+        risk_file.read_text()
+        .replace("starting_capital = 10000 ", "starting_capital = 1000000 ")
+        .replace("max_position_size = 0.20 ", "max_position_size = 0.05 ")
+    )
     signals = [
         {"name": name, "stance": "against", "note": "n" * 200} for name in SIGNAL_NAMES
     ]

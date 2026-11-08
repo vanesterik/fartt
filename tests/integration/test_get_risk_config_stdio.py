@@ -115,6 +115,7 @@ OTHER_CALLS: list[tuple[str, dict[str, Any]]] = [
         {"ticker": "ASML.AS", "entry": 1300.0, "stop": 1250.0, "target": 1450.0},
     ),
     ("settle_positions", {}),
+    ("get_portfolio", {}),
 ]
 
 INITIALIZE = (
