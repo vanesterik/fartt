@@ -51,6 +51,8 @@ PLAN_FIELDS = {
     "target",
     "valid_for",
     "rate",
+    "rate_session",
+    "warning",
     "shares",
     "position_value",
     "portfolio_value",
@@ -64,6 +66,20 @@ PLAN_FIELDS = {
     "costs",
     "limits",
     "tariff",
+}
+# The plan as get_decisions lists it (#143 v2): the full plan is in the journal,
+# record_decision's response and get_decisions(id=...).
+SUMMARY_FIELDS = {
+    "entry",
+    "stop",
+    "target",
+    "valid_for",
+    "shares",
+    "position_value",
+    "risk",
+    "reward_to_risk",
+    "sized_by",
+    "based_on",
 }
 SIGNALS = [{"name": "trend", "stance": "for"}]
 CALL: dict[str, Any] = {
@@ -81,12 +97,15 @@ def anyio_backend() -> str:
 
 
 @asynccontextmanager
-async def _server(assets_dir: Path, *, live: bool = False) -> AsyncIterator[Client]:
+async def _server(
+    assets_dir: Path, *, live: bool = False, now: str | None = None
+) -> AsyncIterator[Client]:
     server = json.loads((ROOT / ".mcp.json").read_text())["mcpServers"]["fartt"]
     env = {
         **os.environ,
         "FARTT_ASSETS_DIR": str(assets_dir),
         **({} if live else OFFLINE),
+        **({} if now is None else {"FARTT_NOW": now}),
     }
     params = StdioServerParameters(
         command=server["command"], args=server["args"], cwd=str(ROOT), env=env
@@ -134,6 +153,20 @@ async def _rate(client: Client) -> float:
     """EURUSD=X's newest cached close, as the server returns it."""
     candles = await _call(client, "get_candles", ticker="EURUSD=X", count=1)
     return candles["rows"][-1][4]
+
+
+async def _rate_row(client: Client) -> list[Any]:
+    """EURUSD=X's newest cached candle, as the server returns it."""
+    candles = await _call(client, "get_candles", ticker="EURUSD=X", count=1)
+    return candles["rows"][-1]
+
+
+def _drop_newest_rate(assets_dir: Path) -> str:
+    """Cut EURUSD=X's newest cached candle; return the session cut."""
+    candles = assets_dir / "stocks" / "EURUSD=X" / "candles.csv"
+    rows = candles.read_text().splitlines(keepends=True)
+    candles.write_text("".join(rows[:-1]))
+    return rows[-1].split(",")[0]
 
 
 def _leg_costs(
@@ -466,7 +499,7 @@ class TestPricesThatDontMakeALongPlan:
         self, seeded_assets: Path, field: str, value: str
     ) -> None:
         """
-        @issue-143 @AC6 @AC8 Should refuse a price that isn't a finite number,
+        @issue-143 @AC12 Should refuse a price that isn't a finite number,
         naming it, in plan_trade and in record_decision's plan, recording
         nothing.
         """
@@ -499,7 +532,7 @@ class TestPricesThatDontMakeALongPlan:
         self, seeded_assets: Path, ticker: str
     ) -> None:
         """
-        @issue-143 @AC6 @AC8 Should, for a finite target at the float maximum,
+        @issue-143 @AC12 Should, for a finite target at the float maximum,
         either refuse the plan naming the target or return and store only
         finite amounts, so get_decisions still reads the journal back.
         """
@@ -531,6 +564,52 @@ class TestPricesThatDontMakeALongPlan:
         assert _all_finite(decisions)
         if recorded.is_error:
             assert not _journal(seeded_assets).exists()
+
+    @pytest.mark.parametrize(
+        ("field", "prices"),
+        [
+            ("target", {"target": 1e308}),
+            ("target", {"target": sys.float_info.max}),
+            ("entry", {"entry": 1e-306, "stop": 1e-307, "target": 100.0}),
+        ],
+        ids=["target-1e308", "target-float-max", "entry-1e-306"],
+    )
+    async def test_should_refuse_a_price_whose_amounts_are_not_finite(
+        self, seeded_assets: Path, field: str, prices: dict[str, float]
+    ) -> None:
+        """
+        @issue-143 @AC12 Should refuse a price whose amounts don't come out
+        finite (AAPL sizes to several shares), naming the price, in plan_trade
+        and record_decision alike, recording nothing.
+        """
+        async with _server(seeded_assets) as client:
+            close, _atr = await _market(client, "AAPL")
+            entry = round(close * 0.98, 2)
+            plan_input = {
+                "entry": entry,
+                "stop": round(entry * 0.97, 2),
+                "target": round(entry * 1.12, 2),
+                **prices,
+            }
+            planned = await _error(client, "plan_trade", ticker="AAPL", **plan_input)
+            recorded = await _error(
+                client,
+                "record_decision",
+                ticker="AAPL",
+                direction="buy",
+                plan={**plan_input, "valid_for": 5},
+                **CALL,
+            )
+            read_back = await _call(client, "get_decisions")
+
+        for message in (planned, recorded):
+            assert f"The {field} ({plan_input[field]})" in message, message
+            assert "finite" in message
+            assert "Nothing was recorded" in message
+            assert "Error executing tool" not in message.split(": ", 1)[1]
+        assert recorded.split(": ", 1)[1] == planned.split(": ", 1)[1]
+        assert read_back["total"] == 0
+        assert not _journal(seeded_assets).exists()
 
     async def test_should_refuse_an_entry_more_than_one_atr_above_the_close(
         self, seeded_assets: Path
@@ -683,7 +762,8 @@ class TestRecordDecisionWithAPlan:
     ) -> None:
         """
         @issue-143 @AC8 Should store a passing plan's full calculation with the
-        buy, returned by record_decision and get_decisions.
+        buy, returned in full by record_decision and get_decisions(id=...) and
+        in summary in get_decisions' list.
         """
         async with _server(seeded_assets) as client:
             close, _atr = await _market(client, "AAPL")
@@ -704,13 +784,21 @@ class TestRecordDecisionWithAPlan:
                 **CALL,
             )
             read_back = await _call(client, "get_decisions")
+            one = await _call(client, "get_decisions", id=entry_["id"])
 
         assert entry_["plan"] == planned
         assert set(entry_["plan"]) >= PLAN_FIELDS
-        assert read_back["total"] == 1
-        assert read_back["decisions"][0]["plan"] == planned
         stored = json.loads(_journal(seeded_assets).read_text().splitlines()[0])
         assert stored["plan"] == planned
+        # The list: the summary only, its values those of the full plan.
+        assert read_back["total"] == 1
+        summary = read_back["decisions"][0]["plan"]
+        assert set(summary) == SUMMARY_FIELDS
+        assert summary == {field: planned[field] for field in SUMMARY_FIELDS}
+        # get_decisions(id=...): that one call with its full plan.
+        assert one["total"] == 1
+        assert [entry["id"] for entry in one["decisions"]] == [entry_["id"]]
+        assert one["decisions"][0]["plan"] == planned
 
     @pytest.mark.parametrize(
         ("stop_factor", "target_factor"),
@@ -852,3 +940,118 @@ class TestAStockNotInEur:
         assert plan["risk"] == pytest.approx(
             _risk(shares, entry, stop, rate, "XNYS"), abs=0.02
         )
+
+    async def test_should_give_the_rate_s_session_without_a_warning_when_current(
+        self, seeded_assets: Path
+    ) -> None:
+        """
+        @issue-143 @AC10 Should give the session of the EUR/USD rate used, with
+        no warning when it is the stock's own session, and neither for EUR.
+        """
+        async with _server(seeded_assets) as client:
+            session, *_prices = await _rate_row(client)
+            close, _atr = await _market(client, "AAPL")
+            entry = round(close * 0.98, 2)
+            plan = await _call(
+                client,
+                "plan_trade",
+                ticker="AAPL",
+                entry=entry,
+                stop=round(entry * 0.97, 2),
+                target=round(entry * 1.12, 2),
+            )
+            close, _atr = await _market(client, "ASML.AS")
+            entry = round(close * 0.98, 2)
+            in_eur = await _call(
+                client,
+                "plan_trade",
+                ticker="ASML.AS",
+                entry=entry,
+                stop=round(entry * 0.97, 2),
+                target=round(entry * 1.12, 2),
+            )
+
+        assert plan["rate_session"] == session == plan["based_on"]
+        assert plan["warning"] is None
+        assert (in_eur["rate"], in_eur["rate_session"], in_eur["warning"]) == (
+            None,
+            None,
+            None,
+        )
+
+    async def test_should_warn_when_the_rate_lags_and_store_the_warning(
+        self, seeded_assets: Path
+    ) -> None:
+        """
+        @issue-143 @AC10 Should, when the provider can't bring the rate up to
+        date, size on the older rate, give its session and a warning saying it
+        is from before the stock's last close, and store both with the call.
+        """
+        cut = _drop_newest_rate(seeded_assets)
+        async with _server(seeded_assets) as client:
+            session, _open, _high, _low, rate, _volume = await _rate_row(client)
+            close, _atr = await _market(client, "AAPL")
+            entry = round(close * 0.98, 2)
+            stop = round(entry * 0.97, 2)
+            plan_input = {
+                "entry": entry,
+                "stop": stop,
+                "target": round(entry * 1.12, 2),
+            }
+            plan = await _call(client, "plan_trade", ticker="AAPL", **plan_input)
+            recorded = await _call(
+                client,
+                "record_decision",
+                ticker="AAPL",
+                direction="buy",
+                plan={**plan_input, "valid_for": 5},
+                **CALL,
+            )
+            one = await _call(client, "get_decisions", id=recorded["id"])
+
+        assert session < cut == plan["based_on"]
+        assert plan["rate"] == pytest.approx(rate, abs=1e-6)
+        assert plan["rate_session"] == session
+        warning = plan["warning"]
+        assert warning is not None
+        assert session in warning and plan["based_on"] in warning
+        assert "couldn't bring it up to date" in warning
+        shares = plan["shares"]
+        assert plan["position_value"] == pytest.approx(shares * entry / rate, abs=0.01)
+        assert plan["risk"] == pytest.approx(
+            _risk(shares, entry, stop, rate, "XNYS"), abs=0.02
+        )
+        for stored in (recorded["plan"], one["decisions"][0]["plan"]):
+            assert (stored["rate_session"], stored["warning"]) == (session, warning)
+
+    async def test_should_warn_when_the_rate_s_session_has_not_closed_yet(
+        self, seeded_assets: Path
+    ) -> None:
+        """
+        @issue-143 @AC10 Should, for a plan made between the stock's close and
+        midnight UTC, size on the previous session's rate with a warning that
+        the rate's session hasn't closed yet.
+        """
+        cut = _drop_newest_rate(seeded_assets)
+        # After the US close of the snapshot's last session, before the rate's
+        # session closes at midnight UTC: the cut rate isn't due yet.
+        evening = f"{cut}T22:00:00+00:00"
+        async with _server(seeded_assets, now=evening) as client:
+            session, *_prices = await _rate_row(client)
+            close, _atr = await _market(client, "AAPL")
+            entry = round(close * 0.98, 2)
+            plan = await _call(
+                client,
+                "plan_trade",
+                ticker="AAPL",
+                entry=entry,
+                stop=round(entry * 0.97, 2),
+                target=round(entry * 1.12, 2),
+            )
+
+        assert plan["based_on"] == cut
+        assert plan["rate_session"] == session < cut
+        warning = plan["warning"]
+        assert warning is not None
+        assert session in warning and cut in warning
+        assert "hasn't closed yet" in warning

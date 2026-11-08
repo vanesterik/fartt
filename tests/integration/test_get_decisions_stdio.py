@@ -1,15 +1,16 @@
 """
-Integration tests for `get_decisions` (#120), driven the way Claude Code
-drives the server: started from `.mcp.json` over stdio, with
-`FARTT_ASSETS_DIR` set to a temporary folder holding the snapshot, its clock
-pinned to the snapshot's moment and Yahoo out of reach (`snapshot.OFFLINE`).
+Integration tests for `get_decisions` (#120; the plan summary and `id` of
+#143), driven the way Claude Code drives the server: started from `.mcp.json`
+over stdio, with `FARTT_ASSETS_DIR` set to a temporary folder holding the
+snapshot, its clock pinned to the snapshot's moment and Yahoo out of reach
+(`snapshot.OFFLINE`).
 
-Each test's docstring starts with its tags: `@issue-120` and the acceptance
-criteria it verifies. Expectations come from the issue's criteria. Calls are
-recorded through `record_decision`, so they are the entries the server itself
-stores. The `horizon_passed` test rewrites a recorded entry's `horizon_ends`
-to sessions either side of the exchange's newest closed session at the
-pinned clock.
+Each test's docstring starts with its tags: `@issue-120` or `@issue-143` and
+the acceptance criteria it verifies. Expectations come from the issues'
+criteria. Calls are recorded through `record_decision`, so they are the
+entries the server itself stores. The `horizon_passed` test rewrites a
+recorded entry's `horizon_ends` to sessions either side of the exchange's
+newest closed session at the pinned clock.
 """
 
 import datetime as dt
@@ -352,3 +353,123 @@ async def test_should_fit_ten_of_the_largest_calls_under_60000_characters(
     assert all(len(entry["reasoning"]) == 2000 for entry in content["decisions"])
     assert all(len(entry["signals"]) == 8 for entry in content["decisions"])
     assert len(json.dumps(content)) < 60_000
+
+
+async def _record_with_plan(
+    client: Client,
+    *,
+    reasoning: str,
+    signals: list[dict[str, Any]],
+    horizon: int = 60,
+) -> dict[str, Any]:
+    """A buy on ASML.AS with a passing plan whose prices have many digits."""
+    indicators = await client.call_tool("get_indicators", {"ticker": "ASML.AS"})
+    assert indicators.structured_content is not None
+    close = indicators.structured_content["close"]
+    entry = close * 0.9812345678912345
+    result = await client.call_tool(
+        "record_decision",
+        {
+            "ticker": "ASML.AS",
+            "direction": "buy",
+            "horizon": horizon,
+            "reasoning": reasoning,
+            "signals": signals,
+            "plan": {
+                "entry": entry,
+                "stop": entry * 0.9912345678912345,
+                "target": entry * 1.1012345678912345,
+                "valid_for": 10,
+            },
+        },
+    )
+    assert not result.is_error, result.content
+    entry_ = result.structured_content
+    assert entry_ is not None
+    assert entry_["plan"] is not None
+    return entry_
+
+
+async def test_should_fit_ten_of_the_largest_calls_with_a_plan_under_60000_characters(
+    seeded_assets: Path,
+) -> None:
+    """
+    @issue-143 @AC11 Should return ten of the largest calls, each with a plan,
+    in under 60,000 characters, listing at most 10.
+    """
+    signals = [
+        {"name": name, "stance": "against", "note": "n" * 200} for name in SIGNAL_NAMES
+    ]
+    async with _server(seeded_assets) as client:
+        for _ in range(11):
+            await _record_with_plan(client, reasoning="x" * 2000, signals=signals)
+        result = await client.call_tool("get_decisions", {})
+
+    content = result.structured_content
+    assert content is not None
+    assert len(content["decisions"]) == 10
+    assert content["total"] == 11
+    assert all(entry["plan"] is not None for entry in content["decisions"])
+    assert all(len(entry["reasoning"]) == 2000 for entry in content["decisions"])
+    assert len(json.dumps(content)) < 60_000
+    # What the agent reads: the tool result's text, as the server sends it.
+    assert len(_text(result)) < 60_000
+
+
+async def test_should_return_one_call_with_its_full_plan_by_id(
+    seeded_assets: Path,
+) -> None:
+    """
+    @issue-143 @AC11 Should return just the call get_decisions(id=...) names,
+    with its full plan as recorded.
+    """
+    signals = [{"name": "trend", "stance": "for"}]
+    async with _server(seeded_assets) as client:
+        recorded = [
+            await _record_with_plan(client, reasoning=f"Call {n}.", signals=signals)
+            for n in range(3)
+        ]
+        one = await _decisions(client, id=recorded[1]["id"])
+        listed = await _decisions(client)
+
+    assert one["total"] == 1
+    assert _ids(one) == [recorded[1]["id"]]
+    assert _stored(one["decisions"][0]) == recorded[1]
+    assert one["decisions"][0]["plan"] == recorded[1]["plan"]
+    assert {"costs", "limits", "tariff"} <= set(one["decisions"][0]["plan"])
+    # The list holds a summary, not the full plan.
+    assert all("costs" not in entry["plan"] for entry in listed["decisions"])
+
+
+async def test_should_return_an_empty_list_with_a_note_for_an_unknown_id(
+    seeded_assets: Path,
+) -> None:
+    """@issue-143 @AC11 Should return an empty list, total 0 and a note for an unknown id."""
+    async with _server(seeded_assets) as client:
+        await _record(client)
+        before = _journal(seeded_assets).read_bytes()
+        content = await _decisions(client, id=99)
+
+    assert content["decisions"] == []
+    assert content["total"] == 0
+    assert content["note"]
+    assert "99" in content["note"]
+    assert _journal(seeded_assets).read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "other",
+    [{"status": "open"}, {"status": "all"}, {"ticker": "ASML.AS"}, {"limit": 10}],
+    ids=["status-open", "status-all", "ticker", "limit"],
+)
+async def test_should_refuse_an_id_with_another_filter(
+    seeded_assets: Path, other: dict[str, Any]
+) -> None:
+    """@issue-143 @AC11 Should refuse id together with status, ticker or limit."""
+    async with _server(seeded_assets) as client:
+        await _record(client)
+        message = await _error(client, id=1, **other)
+
+    (name,) = other
+    assert "id" in message
+    assert name in message

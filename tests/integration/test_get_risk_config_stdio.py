@@ -80,6 +80,7 @@ NOT_RISK_ARGUMENTS = {
     "signals",
     "status",
     "limit",  # how many decisions get_decisions returns, not a risk limit
+    "id",  # the one call get_decisions returns (#143 v2), not a risk limit
     # plan_trade's (#143) and record_decision's trade plan: prices and an
     # order's validity, checked against the limits, never setting one.
     "entry",
