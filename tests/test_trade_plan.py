@@ -89,6 +89,8 @@ def plan(**changes: Any) -> TradePlan:
         "target": 70.0,
         "valid_for": 5,
         "rate": None,
+        "rate_session": None,
+        "rate_is_current": True,
         "portfolio_value": LIMITS.starting_capital,
         "limits": LIMITS,
         "costs": COSTS,
@@ -199,6 +201,7 @@ def test_a_us_plan_converts_at_the_rate() -> None:
         currency="USD",
         exchange_code="XNYS",
         rate=1.16,
+        rate_session=date(2026, 11, 4),
         entry=100.0,
         stop=95.0,
         target=115.0,
@@ -211,6 +214,55 @@ def test_a_us_plan_converts_at_the_rate() -> None:
     assert result.rate == 1.16
     assert result.position_value == round(2300 / 1.16, 2)
     assert result.costs.buy.conversion > 0
+
+
+def us_plan(**changes: Any) -> TradePlan:
+    arguments: dict[str, Any] = {
+        "currency": "USD",
+        "exchange_code": "XNYS",
+        "rate": 1.16,
+        "rate_session": date(2026, 11, 4),
+        "entry": 100.0,
+        "stop": 95.0,
+        "target": 115.0,
+        "last_close": 101.0,
+        "atr": 3.0,
+    }
+    return plan(**(arguments | changes))
+
+
+def test_a_rate_of_the_stocks_session_is_reported_without_a_warning() -> None:
+    # @AC10
+    result = us_plan()
+
+    assert result.rate_session == date(2026, 11, 4)
+    assert result.warning is None
+
+
+def test_a_euro_plan_has_no_rate_session() -> None:
+    result = plan()
+
+    assert (result.rate, result.rate_session, result.warning) == (None, None, None)
+
+
+def test_a_rate_whose_session_has_not_closed_yet_comes_with_a_warning() -> None:
+    # @AC10: the stock closed on 4 November; the rate closes at midnight UTC.
+    result = us_plan(rate_session=date(2026, 11, 3))
+
+    assert result.rate_session == date(2026, 11, 3)
+    assert result.warning is not None
+    assert "2026-11-03" in result.warning
+    assert "2026-11-04" in result.warning
+    assert "midnight UTC" in result.warning
+
+
+def test_a_rate_the_provider_could_not_update_comes_with_a_warning() -> None:
+    # @AC10
+    result = us_plan(rate_session=date(2026, 10, 30), rate_is_current=False)
+
+    assert result.warning is not None
+    assert "2026-10-30" in result.warning
+    assert "couldn't bring it up to date" in result.warning
 
 
 def test_a_reward_to_risk_below_the_minimum_is_refused() -> None:

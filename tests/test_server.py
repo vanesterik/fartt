@@ -1770,6 +1770,8 @@ def largest_plan() -> TradePlan:
         target=1456.7891,
         valid_for=10,
         rate=1.162345,
+        rate_session=date(2026, 10, 27),
+        rate_is_current=False,
         portfolio_value=RISK_CONFIG.limits.starting_capital,
         limits=RISK_CONFIG.limits,
         costs=RISK_CONFIG.costs,

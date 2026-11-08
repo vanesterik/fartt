@@ -33,13 +33,17 @@ def fx_history(days: list[date]) -> History:
     return History([Candle(day, RATE, RATE, RATE, RATE, 0.0) for day in days], [], [])
 
 
-def provider(asml_last: date = date(2026, 10, 29), count: int = 30) -> FakeProvider:
+def provider(
+    asml_last: date = date(2026, 10, 29),
+    count: int = 30,
+    rate_last: date = date(2026, 10, 28),
+) -> FakeProvider:
     return FakeProvider(
         histories={
             "ASML.AS": history(sessions("XAMS", count, last=asml_last)),
             "AAPL": history(sessions("XNYS", 30)),
             "IWDA.AS": history(sessions("XAMS", 30), first=50.0),
-            "EURUSD=X": fx_history(sessions("24/5", 30, last=date(2026, 10, 28))),
+            "EURUSD=X": fx_history(sessions("24/5", 30, last=rate_last)),
         },
         listings={"ASML.AS": ASML, "AAPL": AAPL, "IWDA.AS": IWDA, "EURUSD=X": EURUSD},
         now=AFTER_CLOSE,
@@ -122,6 +126,9 @@ async def test_a_us_plan_is_converted_at_the_cached_rate(tmp_path: Path) -> None
     assert not result.is_error, result.content
     content = result.structured_content
     assert content["rate"] == RATE
+    # At 21:00 UTC on 29 October the rate's 29 October session hasn't closed.
+    assert content["rate_session"] == "2026-10-28"
+    assert "midnight UTC" in content["warning"]
     # 2,000 EUR is 2,320 USD: 18 shares of 128.
     assert content["shares"] == 18
     assert content["position_value"] == round(18 * 128 / RATE, 2)
@@ -131,6 +138,34 @@ async def test_a_us_plan_is_converted_at_the_cached_rate(tmp_path: Path) -> None
         + content["costs"]["buy"]["total"]
         + content["costs"]["sell_at_stop"]["total"],
         2,
+    )
+
+
+@pytest.mark.anyio
+async def test_a_rate_behind_its_newest_session_comes_with_a_warning(
+    tmp_path: Path,
+) -> None:
+    # @AC10
+    cache = cache_for(provider(rate_last=date(2026, 10, 26)), tmp_path)
+
+    result = await plan_trade(cache, ticker="AAPL")
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert content["rate_session"] == "2026-10-26"
+    assert "couldn't bring it up to date" in content["warning"]
+
+
+@pytest.mark.anyio
+async def test_a_euro_plan_has_no_rate_session_or_warning(tmp_path: Path) -> None:
+    cache = cache_for(provider(), tmp_path)
+
+    content = (await plan_trade(cache)).structured_content
+
+    assert (content["rate"], content["rate_session"], content["warning"]) == (
+        None,
+        None,
+        None,
     )
 
 

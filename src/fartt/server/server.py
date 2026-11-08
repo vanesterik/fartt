@@ -904,10 +904,12 @@ def _plan_on(
     listing, candles = snapshot.listing, snapshot.candles
     ticker = listing.ticker
     atr = calculate_indicators(candles).atr
-    rate = None
+    rate, rate_session, rate_is_current = None, None, True
     pair = fx_pair(listing.currency)
     if pair is not None:
-        rate = round(_snapshot(tool, cache, pair, 1).candles[-1].close, RATE_DECIMALS)
+        fx = _snapshot(tool, cache, pair, 1)
+        rate = round(fx.candles[-1].close, RATE_DECIMALS)
+        rate_session, rate_is_current = fx.candles[-1].date, fx.is_current
     try:
         return calculate_plan(
             ticker=ticker,
@@ -921,6 +923,8 @@ def _plan_on(
             target=request.target,
             valid_for=request.valid_for,
             rate=rate,
+            rate_session=rate_session,
+            rate_is_current=rate_is_current,
             portfolio_value=_portfolio_value(risk_config),
             limits=risk_config.limits,
             costs=risk_config.costs,
