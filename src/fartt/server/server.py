@@ -44,6 +44,7 @@ from fartt.journal import (
     Expiry,
     Fill,
     Journal,
+    Positions,
     Score,
     Signal,
 )
@@ -55,7 +56,13 @@ from fartt.performance import (
     TickerPerformance,
     calculate_performance,
 )
-from fartt.positions import Blocked, order_window, settle_plan
+from fartt.positions import (
+    Blocked,
+    Position,
+    order_window,
+    position_state,
+    settle_plan,
+)
 from fartt.procedure import analysis_prompt
 from fartt.risk_config import (
     RISK_FILE,
@@ -97,12 +104,12 @@ from fartt.trade_plan import (
 # well under that, and the agent needs recent context, not years of history.
 MAX_CANDLES = 200
 # A worst-case journal entry in get_decisions' list (2,000 characters of
-# reasoning, every signal with a 200-character note, its score and a buy's
-# plan in summary) is about 5,100 characters of JSON, so ten are about
-# 51,000, under MAX_DECISIONS_CHARS. That bound, 60,000 characters (#143 v3),
-# is about 20,000 tokens at one token per three characters, the pessimistic
-# rate for numbers: under the limit above, and it leaves #144 about 900
-# characters an entry for its position. Narrowing by ticker or status reaches
+# reasoning, every signal with a 200-character note, its score, a buy's plan
+# in summary and its closed paper position, fill and exit, #144) is about
+# 5,900 characters of JSON, so ten are about 58,700, under
+# MAX_DECISIONS_CHARS. That bound, 60,000 characters (#143 v3), is about
+# 20,000 tokens at one token per three characters, the pessimistic rate for
+# numbers: under the limit above. Narrowing by ticker or status reaches
 # older calls; get_decisions(id=...) returns one call with its full plan.
 MAX_DECISIONS = 10
 MAX_DECISIONS_CHARS = 60_000
@@ -407,6 +414,14 @@ class JournalEntry(Decision):
         description=(
             "A buy's trade plan: in full when one call is asked for by id, "
             "in summary in a list; null without a plan."
+        ),
+    )
+    position: Position | None = Field(
+        default=None,
+        description=(
+            "The plan's paper position as settle_positions last settled it: "
+            "its state and its fill, exit or expiry (null until written); "
+            "null without a plan. Reading doesn't settle."
         ),
     )
 
@@ -723,8 +738,25 @@ def _no_match_note(status: StatusFilter, ticker: str | None, any_scored: bool) -
     return note
 
 
+def _position(decision: Decision, positions: Positions) -> Position | None:
+    """A call's paper position as stored; `None` without a plan."""
+    if decision.plan is None:
+        return None
+    fill = positions.fills.get(decision.id)
+    expiry = positions.expiries.get(decision.id)
+    exit = positions.exits.get(decision.id)
+    return Position(
+        state=position_state(fill, expiry, exit), fill=fill, exit=exit, expiry=expiry
+    )
+
+
 def _entry(
-    decision: Decision, scores: Mapping[int, Score], now: datetime, *, brief: bool
+    decision: Decision,
+    scores: Mapping[int, Score],
+    positions: Positions,
+    now: datetime,
+    *,
+    brief: bool,
 ) -> JournalEntry:
     """A call with its state now; its plan in summary when `brief`."""
     plan = decision.plan
@@ -734,6 +766,7 @@ def _entry(
         horizon_passed=_horizon_passed(decision, now),
         score=scores.get(decision.id),
         plan=PlanSummary.of(plan) if brief and plan is not None else plan,
+        position=_position(decision, positions),
     )
 
 
@@ -744,6 +777,7 @@ def _one_decision(
     try:
         decisions = journal.decisions()
         scores = journal.scores()
+        positions = journal.positions()
     except CACHE_ERRORS as error:
         raise _journal_unreadable("get_decisions", journal.path, error) from error
     found = [decision for decision in decisions if decision.id == decision_id]
@@ -758,7 +792,7 @@ def _one_decision(
             decisions=[], total=0, note=f"No call has id {decision_id}; {known}."
         )
     return DecisionsResult(
-        decisions=[_entry(found[0], scores, cache.clock(), brief=False)],
+        decisions=[_entry(found[0], scores, positions, cache.clock(), brief=False)],
         total=1,
     )
 
@@ -1742,7 +1776,9 @@ def build_server(
         score_decisions scores it; horizon_passed says whether it's due. A
         scored call carries its score. A buy's trade plan is listed in
         summary; ask for the call by id for the whole plan, costs and
-        limits included.
+        limits included. A call with a plan carries its paper position
+        (waiting, open, closed or expired, with its fill, exit or expiry) as
+        settle_positions last settled it; reading doesn't settle.
         """
         if id is not None:
             given = [
@@ -1770,12 +1806,13 @@ def build_server(
         try:
             decisions = journal.decisions()
             scores = journal.scores()
+            positions = journal.positions()
         except CACHE_ERRORS as error:
             raise _journal_unreadable("get_decisions", journal.path, error) from error
 
         now = cache.clock()
         matching = [
-            _entry(decision, scores, now, brief=True)
+            _entry(decision, scores, positions, now, brief=True)
             for decision in reversed(decisions)
             if (ticker is None or decision.ticker == ticker)
             and (status == "all" or _status(decision, scores) == status)

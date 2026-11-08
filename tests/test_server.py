@@ -17,18 +17,28 @@ from fartt.data import (
     exchange_calendar,
     session_after,
 )
-from fartt.journal import SIGNALS, Decision, DecisionDraft, Journal, Signal
+from fartt.journal import (
+    SIGNALS,
+    Decision,
+    DecisionDraft,
+    Exit,
+    Fill,
+    Journal,
+    Signal,
+)
 from fartt.procedure import analysis_prompt, procedure_tools
 from fartt.risk_config import RISK_FILE, Costs, ExchangeCosts, Limits, RiskConfig
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
-from fartt.trade_plan import TradePlan, calculate_plan
+from fartt.trade_plan import LegCosts, TradePlan, calculate_plan
 from tests.fakes import (
     RISK_CONFIG,
     FakeProvider,
     decision_draft,
     decision_score,
+    exit_line,
+    fill_line,
     stock_candle,
 )
 
@@ -1486,7 +1496,9 @@ async def get_decisions(cache: StockCache, **arguments: Any) -> Any:
 def without_read_fields(entry: dict[str, Any]) -> dict[str, Any]:
     """An entry as get_decisions returns it, less what it adds to the stored call."""
     return {
-        k: v for k, v in entry.items() if k not in ("status", "horizon_passed", "score")
+        k: v
+        for k, v in entry.items()
+        if k not in ("status", "horizon_passed", "score", "position")
     }
 
 
@@ -1779,6 +1791,30 @@ def largest_plan() -> TradePlan:
     )
 
 
+# Every number at its longest: many digits, a rate, costs on every item.
+LARGEST_COSTS = LegCosts(
+    commission=12345.67, slippage=12345.67, conversion=12345.67,
+    tax=12345.67, fee=12345.67, total=123456.78,
+)  # fmt: skip
+
+
+def largest_fill(decision_id: int) -> Fill:
+    return fill_line(
+        decision_id, settled_at=datetime(2026, 11, 3, 21, 0, 59, tzinfo=UTC),
+        price=1234.5678, at_open=True, shares=123456, rate=1.162345,
+        value=123456789.12, costs=LARGEST_COSTS,
+    )  # fmt: skip
+
+
+def largest_exit(decision_id: int) -> Exit:
+    return exit_line(
+        decision_id, settled_at=datetime(2026, 11, 3, 21, 0, 59, tzinfo=UTC),
+        reason="horizon", price=1187.6543, at_open=True, slippage=123.4567,
+        rate=1.162345, value=123456789.12, costs=LARGEST_COSTS,
+        dividends=123456.78, pnl=-123456789.12,
+    )  # fmt: skip
+
+
 @pytest.mark.anyio
 async def test_ten_of_the_largest_calls_fit_within_max_decisions_chars(
     tmp_path: Path,
@@ -1793,12 +1829,18 @@ async def test_ten_of_the_largest_calls_fit_within_max_decisions_chars(
     seed(cache, *(largest for _ in range(12)))
     for decision_id in range(1, 13):
         journal_of(cache).append_score(decision_score(decision_id))
+        journal_of(cache).append_fill(largest_fill(decision_id))
+        journal_of(cache).append_exit(largest_exit(decision_id))
 
     result = await get_decisions(cache)
 
     assert all(entry["score"] for entry in result.structured_content["decisions"])
 
     assert all(entry["plan"] for entry in result.structured_content["decisions"])
+    assert all(
+        entry["position"]["state"] == "closed"
+        for entry in result.structured_content["decisions"]
+    )
     assert len(result.structured_content["decisions"]) == 10
     assert (
         len(json.dumps(result.structured_content)) < server_module.MAX_DECISIONS_CHARS
