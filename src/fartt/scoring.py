@@ -14,7 +14,15 @@ Only what was known after the decision counts: closes come from the cached
 candles of those exact sessions (split-adjusted, so a split inside the
 horizon rescales both ends alike), and nothing after `horizon_ends` is read.
 A `buy` is right when the excess return is above 0, a `pass` when it's 0 or
-below. Pure functions, no I/O.
+below.
+
+A closed paper position is scored as a trade: its return is the exit's P&L
+(EUR, after both legs' costs, dividends included) over what went in, the
+fill's value plus the buy leg's costs. The benchmark runs from its close on
+its last session before the fill session (the fill happened during that
+session) to its last session on or before the exit session. A hit closed at
+its target; realised R is the P&L over the plan's risk. Pure functions, no
+I/O.
 
 """
 
@@ -27,8 +35,18 @@ from fartt.data import (
     Dividend,
     calendar_for,
     session_on_or_before,
+    sessions_in_range,
 )
-from fartt.journal import BENCHMARK, BenchmarkScore, Decision, Leg, Score
+from fartt.journal import (
+    BENCHMARK,
+    BenchmarkScore,
+    Decision,
+    Exit,
+    Fill,
+    Leg,
+    PlanScore,
+    Score,
+)
 
 # How far back a rate may come from when Yahoo has no FX candle on the day.
 RATE_LOOKBACK_DAYS = 5
@@ -102,6 +120,50 @@ def score_call(
         ),
         excess_return=excess,
         right=excess > 0 if decision.direction == "buy" else excess <= 0,
+    )
+
+
+def score_plan(
+    decision: Decision,
+    fill: Fill,
+    exit: Exit,
+    benchmark: Sequence[Candle],
+    scored_at: datetime,
+) -> PlanScore:
+    """
+    Score `decision`'s closed position from its `fill` and `exit` lines and
+    the benchmark's cached candles. Raises `Unscorable` naming the benchmark
+    when one of its closes is missing.
+
+    """
+    plan = decision.plan
+    if plan is None:
+        raise ValueError(f"call #{decision.id} has no plan to score")
+    calendar = calendar_for(BENCHMARK)
+    start = session_on_or_before(calendar, fill.session - timedelta(days=1))
+    end = session_on_or_before(calendar, exit.session)
+    start_close = _close(BENCHMARK, benchmark, start)
+    end_close = _close(BENCHMARK, benchmark, end)
+
+    trade_return = round(exit.pnl / (fill.value + fill.costs.total), RETURN_DECIMALS)
+    benchmark_return = round(end_close / start_close - 1, RETURN_DECIMALS)
+    return PlanScore(
+        decision_id=decision.id,
+        scored_at=scored_at,
+        return_=trade_return,
+        benchmark=BenchmarkScore(
+            ticker=BENCHMARK,
+            start=Leg(session=start, close=start_close),
+            end=Leg(session=end, close=end_close),
+            return_=benchmark_return,
+        ),
+        excess_return=round(trade_return - benchmark_return, RETURN_DECIMALS),
+        hit=exit.reason == "target",
+        realised_r=round(exit.pnl / plan.risk, RETURN_DECIMALS),
+        reason=exit.reason,
+        holding_sessions=len(
+            sessions_in_range(decision.exchange, fill.session, exit.session)
+        ),
     )
 
 

@@ -5,8 +5,8 @@ import pytest
 
 from fartt.data import Candle, Dividend
 from fartt.journal import BenchmarkClose, Decision
-from fartt.scoring import Unscorable, score_call
-from tests.fakes import decision_draft, stock_candle
+from fartt.scoring import Unscorable, score_call, score_plan
+from tests.fakes import buy_plan, decision_draft, exit_line, fill_line, stock_candle
 
 START = date(2026, 9, 1)
 END = date(2026, 9, 29)
@@ -226,3 +226,101 @@ def test_unscorable_reasons(
         score_call(call, stock, [], benchmark, rates, SCORED_AT)
 
     assert str(raised.value) == reason
+
+
+# A plan made on 2026-10-29 that filled at 600 on 2026-10-30 (Friday).
+FILLED = date(2026, 10, 30)
+
+
+def planned(**changes: Any) -> Decision:
+    draft = decision_draft(plan=buy_plan(), **changes)
+    return Decision(id=1, **draft.model_dump())
+
+
+def test_a_plan_closed_at_its_target_is_a_hit() -> None:
+    # @AC1
+    call = planned()
+    exit = exit_line(
+        1,
+        session=date(2026, 11, 4),
+        reason="target",
+        price=680.0,
+        value=1360.0,
+        pnl=152.8,
+    )
+    benchmark = candles(
+        {date(2026, 10, 29): 101.25, FILLED: 101.5, date(2026, 11, 4): 104.0}
+    )
+
+    score = score_plan(call, fill_line(1), exit, benchmark, SCORED_AT)
+
+    assert call.plan is not None
+    stock = round(152.8 / (1200.0 + 3.6), 6)
+    assert score.decision_id == 1
+    assert score.scored_at == SCORED_AT
+    assert score.return_ == stock
+    assert score.benchmark.ticker == "IWDA.AS"
+    assert score.benchmark.start.session == date(2026, 10, 29)
+    assert score.benchmark.start.close == 101.25
+    assert score.benchmark.end.session == date(2026, 11, 4)
+    assert score.benchmark.end.close == 104.0
+    assert score.benchmark.return_ == round(104.0 / 101.25 - 1, 6)
+    assert score.excess_return == round(stock - round(104.0 / 101.25 - 1, 6), 6)
+    assert score.hit is True
+    assert score.realised_r == round(152.8 / call.plan.risk, 6)
+    assert score.reason == "target"
+    assert score.holding_sessions == 4
+
+
+@pytest.mark.parametrize(("reason", "pnl"), [("stop", -47.2), ("horizon", 12.5)])
+def test_a_stop_and_a_horizon_exit_are_misses(reason: str, pnl: float) -> None:
+    # @AC2 @AC7
+    call = planned()
+    benchmark = candles({date(2026, 10, 29): 101.25, date(2026, 11, 2): 102.0})
+
+    score = score_plan(
+        call, fill_line(1), exit_line(1, reason=reason, pnl=pnl), benchmark, SCORED_AT
+    )
+
+    assert call.plan is not None
+    assert score.hit is False
+    assert score.reason == reason
+    assert score.return_ == round(pnl / 1203.6, 6)
+    assert score.realised_r == round(pnl / call.plan.risk, 6)
+    assert score.holding_sessions == 2
+
+
+def test_the_benchmark_starts_on_the_last_amsterdam_session_before_the_fill() -> None:
+    # 2027-03-26 (Good Friday) and 2027-03-29 (Easter Monday): Euronext is
+    # closed, so a US fill on Tuesday 2027-03-30 starts from Thursday's close.
+    call = planned(ticker="AAPL", currency="USD", exchange="XNYS")
+    fill = fill_line(1, session=date(2027, 3, 30))
+    exit = exit_line(1, session=date(2027, 4, 1))
+    benchmark = candles({date(2027, 3, 25): 50.0, date(2027, 4, 1): 51.0})
+
+    score = score_plan(call, fill, exit, benchmark, SCORED_AT)
+
+    assert score.benchmark.start.session == date(2027, 3, 25)
+    assert score.benchmark.end.session == date(2027, 4, 1)
+    assert score.benchmark.return_ == 0.02
+    assert score.holding_sessions == 3
+
+
+def test_benchmark_closes_are_rounded_before_the_return() -> None:
+    benchmark = candles({date(2026, 10, 29): 100.00004, date(2026, 11, 2): 101.00004})
+
+    score = score_plan(planned(), fill_line(1), exit_line(1), benchmark, SCORED_AT)
+
+    assert score.benchmark.start.close == 100.0
+    assert score.benchmark.return_ == 0.01
+
+
+def test_a_missing_benchmark_close_is_unscorable() -> None:
+    # @AC3
+    benchmark = candles({date(2026, 10, 29): 101.25})
+
+    with pytest.raises(Unscorable) as raised:
+        score_plan(planned(), fill_line(1), exit_line(1), benchmark, SCORED_AT)
+
+    assert raised.value.ticker == "IWDA.AS"
+    assert str(raised.value) == "IWDA.AS's close for 2026-11-02 isn't available yet"
