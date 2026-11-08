@@ -82,7 +82,7 @@ from fartt.positions import (
     position_state,
     settle_plan,
 )
-from fartt.procedure import analysis_prompt
+from fartt.procedure import analysis_prompt, checkin_prompt
 from fartt.risk_config import (
     RISK_FILE,
     Costs,
@@ -167,10 +167,9 @@ INSTRUCTIONS = (
     "signals: weigh them together. get_support_resistance's signs say which "
     "way each points (holding or breaking); they aren't summed into a verdict. "
     "Record every call, buy or pass, with record_decision when it's made; "
-    "entries can't be changed afterwards. Before a daily check-in or a "
-    "re-analysis of a ticker, read the earlier calls with get_decisions. "
-    "At the daily check-in, call score_decisions: it scores every call whose "
-    "horizon has passed against IWDA.AS, in EUR, and every closed plan, as "
+    "entries can't be changed afterwards. Before a re-analysis of a "
+    "ticker, read the earlier calls with get_decisions. "
+    "score_decisions scores every call whose horizon has passed against IWDA.AS, in EUR, and every closed plan, as "
     "a trade after costs against IWDA.AS over its holding period. Read "
     "get_performance to see how the calls have done, overall, per signal "
     "and per ticker; they are calls, not trades: no costs or position "
@@ -184,9 +183,11 @@ INSTRUCTIONS = (
     "them after costs, and record_decision takes the plan with the buy. "
     "settle_positions paper trades the recorded plans on the closed daily "
     "candles, filling, closing and expiring them. "
-    "At the daily check-in, call get_portfolio, which settles the plans "
-    "first and then shows cash, open positions against their plans, waiting "
-    "plans and the P&L after costs, and call score_decisions."
+    "get_portfolio settles the plans first and then shows cash, open "
+    "positions against their plans, waiting plans and the P&L after costs. "
+    "Before a daily check-in, call get_checkin_procedure, first, and follow "
+    "what it returns step by step; skip that only when the daily_checkin "
+    "prompt already gave you the procedure."
 )
 
 # What a ticker the analyze_ticker prompt accepts looks like, closing every
@@ -792,6 +793,15 @@ class PerformanceResult(BaseModel):
     )
     note: str | None = Field(
         default=None, description="What to know first about the figures, if anything."
+    )
+
+
+class CheckinProcedureResult(BaseModel):
+    procedure: str = Field(
+        description=(
+            "The daily check-in procedure, the text the daily_checkin prompt "
+            "gives: follow its steps in order and report in its sections."
+        )
     )
 
 
@@ -2647,6 +2657,18 @@ def build_server(
     @server.tool(
         annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False)
     )
+    def get_checkin_procedure() -> CheckinProcedureResult:
+        """
+        Return fartt's daily check-in procedure: the tools to call in order
+        and the report's sections. Call it before a daily check-in and
+        follow it step by step; a check-in makes no new calls or plans.
+        """
+        logger.info("get_checkin_procedure")
+        return CheckinProcedureResult(procedure=checkin_prompt())
+
+    @server.tool(
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False)
+    )
     def get_risk_config() -> RiskConfigResult:
         """
         Return the operator's risk limits and trading costs, as the server
@@ -2669,6 +2691,18 @@ def build_server(
         ticker: Annotated[str, Field(description=TICKER_ARGUMENT)],
     ) -> str:
         return analysis_prompt(_prompt_ticker(ticker))
+
+    @server.prompt(
+        name="daily_checkin",
+        title="Daily check-in",
+        description=(
+            "Settle and read the paper portfolio, score the calls and plans "
+            "that are due, and report positions against their plans, the new "
+            "scores and the stage 1 gate."
+        ),
+    )
+    def daily_checkin() -> str:
+        return checkin_prompt()
 
     return server
 
