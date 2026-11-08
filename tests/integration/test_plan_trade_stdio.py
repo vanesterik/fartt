@@ -17,6 +17,7 @@ import json
 import math
 import os
 import re
+import sys
 import tomllib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -110,6 +111,17 @@ async def _error(client: Client, tool: str, **arguments: Any) -> str:
 
 def _journal(assets_dir: Path) -> Path:
     return assets_dir / "journal" / "decisions.jsonl"
+
+
+def _all_finite(value: Any) -> bool:
+    """Whether every number anywhere in `value` is finite (no NaN or infinity)."""
+    if isinstance(value, dict):
+        return all(_all_finite(v) for v in value.values())
+    if isinstance(value, list):
+        return all(_all_finite(v) for v in value)
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return True
 
 
 async def _market(client: Client, ticker: str) -> tuple[float, float]:
@@ -481,6 +493,44 @@ class TestPricesThatDontMakeALongPlan:
             assert field in message
             assert "finite" in message
         assert written(seeded_assets) == ["stocks"]
+
+    @pytest.mark.parametrize("ticker", ["AAPL", "ASML.AS"])
+    async def test_should_never_store_a_plan_whose_amounts_overflow(
+        self, seeded_assets: Path, ticker: str
+    ) -> None:
+        """
+        @issue-143 @AC6 @AC8 Should, for a finite target at the float maximum,
+        either refuse the plan naming the target or return and store only
+        finite amounts, so get_decisions still reads the journal back.
+        """
+        target = sys.float_info.max
+        async with _server(seeded_assets) as client:
+            close, _atr = await _market(client, ticker)
+            entry = round(close, 2)
+            prices = {"entry": entry, "stop": round(entry * 0.97, 2), "target": target}
+            planned = await client.call_tool("plan_trade", {"ticker": ticker, **prices})
+            recorded = await client.call_tool(
+                "record_decision",
+                {
+                    "ticker": ticker,
+                    "direction": "buy",
+                    **CALL,
+                    "plan": {**prices, "valid_for": 5},
+                },
+            )
+            decisions = await _call(client, "get_decisions")
+
+        for result in (planned, recorded):
+            if result.is_error:
+                message = " ".join(getattr(c, "text", "") for c in result.content)
+                assert "target" in message
+                assert "Nothing was recorded" in message
+            else:
+                assert _all_finite(result.structured_content)
+        assert decisions["total"] == (0 if recorded.is_error else 1)
+        assert _all_finite(decisions)
+        if recorded.is_error:
+            assert not _journal(seeded_assets).exists()
 
     async def test_should_refuse_an_entry_more_than_one_atr_above_the_close(
         self, seeded_assets: Path
