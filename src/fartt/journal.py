@@ -11,8 +11,8 @@ never returned to the agent), which the next append cuts first.
 A call's score is a line with `"kind": "score"` and its `decision_id`,
 written once its horizon has passed. A decision has at most one, and it
 comes after the decision's line. A buy may carry its trade plan in the
-decision line's `plan`. `kind` lets later stories add their own lines to the same file without rewriting one; readers skip
-the kinds they don't know.
+decision line's `plan`. `kind` lets later stories add their own lines to the
+same file without rewriting one; readers skip the kinds they don't know.
 
 """
 
