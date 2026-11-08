@@ -9,7 +9,7 @@ from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
 from fartt.trade_plan import leg_costs
-from tests.fakes import RISK_CONFIG, fill_line
+from tests.fakes import RISK_CONFIG, exit_line, fill_line, reset_line
 from tests.test_server import cache_for, call, journal_of, seed
 from tests.test_settle_positions import (
     DAYS,
@@ -225,3 +225,95 @@ def test_the_instructions_name_get_portfolio_at_the_check_in() -> None:
     ]
     assert "check-in" in sentence
     assert "score_decisions" in sentence
+
+
+@pytest.mark.anyio
+async def test_get_portfolio_shows_the_limit_and_the_kill_switch(
+    tmp_path: Path,
+) -> None:
+    # @AC8
+    cache = cache_for(fake(FILLED), tmp_path)
+    seed(cache, planned_call(B), planned_call(DAYS[-3]), planned_call(DAYS[-3]))
+
+    content = await get_portfolio(cache)
+
+    assert content["limits"] == {
+        "max_open_positions": 8,
+        "open_positions": 1,
+        "waiting_plans": 2,
+        "room": 5,
+    }
+    assert content["kill_switch"] == {
+        "tripped": False,
+        "tripped_on": None,
+        "drawdown_at_trip": None,
+        "threshold": 0.16,
+        "drawdown": content["totals"]["drawdown"],
+        "last_reset": None,
+    }
+
+
+# Call 1 fills 50 at 102 and exits through a gap at 60 two sessions later:
+# the portfolio closes that session 21% below its peak of 10,000.
+LOSS_FILLED, LOSS_EXIT = DAYS[-27], DAYS[-26]
+LOSS_VALUE = round(CAPITAL - 5103.6 + 3000.0 - 3.6, 2)
+
+
+def lose(cache: StockCache) -> None:
+    journal = journal_of(cache)
+    journal.append_fill(
+        fill_line(1, session=LOSS_FILLED, price=102.0, shares=50, value=5100.0)
+    )
+    journal.append_exit(
+        exit_line(1, session=LOSS_EXIT, price=60.0, value=3000.0, pnl=-2107.2)
+    )
+
+
+@pytest.mark.anyio
+async def test_a_tripped_switch_shows_and_open_positions_still_close(
+    tmp_path: Path,
+) -> None:
+    # @AC2 @AC4
+    stopped = {**FILLED, DAYS[-1]: (98.0, 99.0, 94.0, 96.0)}
+    cache = cache_for(fake(stopped), tmp_path)
+    seed(cache, planned_call(DAYS[-30]), planned_call(B))
+    lose(cache)
+
+    content = await get_portfolio(cache)
+
+    switch = content["kill_switch"]
+    assert (switch["tripped"], switch["tripped_on"]) == (True, LOSS_EXIT.isoformat())
+    assert switch["drawdown_at_trip"] == round((CAPITAL - LOSS_VALUE) / CAPITAL, 4)
+    # Call 2 filled and hit its stop after the trip, settled as ever.
+    assert [f["id"] for f in content["settled"]["filled"]] == [2]
+    assert [(c["id"], c["reason"]) for c in content["settled"]["closed"]] == [
+        (2, "stop")
+    ]
+
+
+@pytest.mark.anyio
+async def test_get_portfolio_shows_the_reset_and_measures_from_it(
+    tmp_path: Path,
+) -> None:
+    # @AC5
+    cache = cache_for(fake(), tmp_path)
+    seed(cache, planned_call(DAYS[-30]))
+    lose(cache)
+    reset = reset_line(session=LOSS_EXIT, total_value=LOSS_VALUE, drawdown=0.2107)
+    journal_of(cache).append_reset(reset)
+
+    content = await get_portfolio(cache)
+
+    switch, totals = content["kill_switch"], content["totals"]
+    assert switch["tripped"] is False
+    assert switch["last_reset"] == {
+        "reset_at": reset.reset_at.isoformat().replace("+00:00", "Z"),
+        "session": LOSS_EXIT.isoformat(),
+        "drawdown": 0.2107,
+        "note": reset.note,
+    }
+    assert (totals["peak"], totals["peak_session"]) == (
+        LOSS_VALUE,
+        LOSS_EXIT.isoformat(),
+    )
+    assert totals["drawdown"] == switch["drawdown"] == 0

@@ -17,6 +17,7 @@ from tests.fakes import (
     decision_draft,
     exit_line,
     fill_line,
+    reset_line,
 )
 from tests.test_server import (
     AAPL,
@@ -622,3 +623,117 @@ async def test_plan_trade_settles_first_so_it_is_not_read_only(
     assert tool.annotations is not None
     assert tool.annotations.read_only_hint is False
     assert tool.annotations.idempotent_hint is True
+
+
+# A fill of 50 at 127 on 2026-10-27 and a gap down to an exit at 80 on
+# 2026-10-28: the portfolio closes 10-28 at 7,642.80, 23.57% below 10,000.
+TRIPPED_VALUE = 7642.8
+
+
+def trip(cache: StockCache) -> None:
+    seed(cache, decision_draft(plan=buy_plan()))
+    journal = journal_of(cache)
+    journal.append_fill(
+        fill_line(1, session=date(2026, 10, 27), price=127.0, shares=50, value=6350.0)
+    )
+    journal.append_exit(
+        exit_line(1, session=date(2026, 10, 28), price=80.0, value=4000.0, pnl=-2357.2)
+    )
+
+
+def small_waiting_calls(count: int) -> list[DecisionDraft]:
+    """Buys on ASML.AS of 1 share at 600, waiting from 2026-10-30 on."""
+    return [decision_draft(plan=buy_plan(portfolio_value=3100.0)) for _ in range(count)]
+
+
+@pytest.mark.anyio
+async def test_plan_trade_is_refused_while_the_kill_switch_is_tripped(
+    tmp_path: Path,
+) -> None:
+    # @AC3
+    cache = cache_for(provider(), tmp_path)
+    trip(cache)
+
+    result = await plan_trade(cache)
+
+    assert result.is_error
+    text = result.content[0].text
+    assert "kill switch tripped on 2026-10-28 at a drawdown of 0.2357" in text
+    assert "threshold 0.16" in text
+    assert "Only the operator can reset it" in text
+    assert text.endswith("Nothing was recorded.")
+
+
+@pytest.mark.anyio
+async def test_record_decision_with_a_plan_is_refused_while_tripped_but_a_pass_is_recorded(
+    tmp_path: Path,
+) -> None:
+    # @AC3
+    cache = cache_for(provider(), tmp_path)
+    trip(cache)
+
+    refused = await record(cache, plan=PLAN)
+    passed = await record(cache, direction="pass")
+    bare_buy = await record(cache)
+
+    assert refused.is_error
+    assert "kill switch tripped on 2026-10-28" in refused.content[0].text
+    assert not passed.is_error, passed.content
+    assert not bare_buy.is_error, bare_buy.content
+    assert [d.direction for d in journal_of(cache).decisions()] == [
+        "buy",
+        "pass",
+        "buy",
+    ]
+
+
+@pytest.mark.anyio
+async def test_after_a_reset_plan_trade_accepts_plans_again(tmp_path: Path) -> None:
+    # @AC5
+    cache = cache_for(provider(), tmp_path)
+    trip(cache)
+    journal_of(cache).append_reset(
+        reset_line(session=date(2026, 10, 28), total_value=TRIPPED_VALUE)
+    )
+
+    result = await plan_trade(cache)
+
+    assert not result.is_error, result.content
+    assert result.structured_content["portfolio_value"] == TRIPPED_VALUE
+
+
+@pytest.mark.anyio
+async def test_plan_trade_is_refused_at_eight_open_and_waiting_and_seven_fit(
+    tmp_path: Path,
+) -> None:
+    # @AC1
+    cache = cache_for(provider(), tmp_path)
+    seed(cache, *small_waiting_calls(7))
+    fits = await plan_trade(cache)
+    seed(cache, *small_waiting_calls(1))
+
+    refused = await plan_trade(cache)
+
+    assert not fits.is_error, fits.content
+    assert refused.is_error
+    text = refused.content[0].text
+    assert "open-position limit of 8 is reached" in text
+    assert "0 positions are open and 8 plans wait for their entry" in text
+    assert text.endswith("Nothing was recorded.")
+
+
+@pytest.mark.anyio
+async def test_record_decision_with_a_plan_is_refused_at_eight(
+    tmp_path: Path,
+) -> None:
+    # @AC1
+    cache = cache_for(provider(), tmp_path)
+    seed(cache, *small_waiting_calls(7))
+    accepted = await record(cache, plan=PLAN)
+
+    refused = await record(cache, plan=PLAN)
+
+    assert not accepted.is_error, accepted.content
+    assert refused.is_error
+    assert "open-position limit of 8 is reached" in refused.content[0].text
+    assert len(journal_of(cache).decisions()) == 8

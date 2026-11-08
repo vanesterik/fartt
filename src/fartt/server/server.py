@@ -1,6 +1,7 @@
 import os
 import sys
 from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Set as AbstractSet
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated, Literal, NamedTuple
@@ -59,12 +60,16 @@ from fartt.performance import (
 from fartt.portfolio import (
     ClosedSummary,
     Holding,
+    KillSwitch,
     Market,
     Portfolio,
+    PositionLimit,
     Totals,
     WaitingPlan,
     calculate_portfolio,
     refuse_beyond_free_cash,
+    refuse_beyond_open_positions,
+    refuse_when_tripped,
 )
 from fartt.positions import (
     Blocked,
@@ -645,6 +650,15 @@ class PortfolioResult(BaseModel):
         )
     )
     closed: ClosedSummary = Field(description="The closed positions, summarised.")
+    kill_switch: KillSwitch = Field(
+        description=(
+            "Whether new plans are blocked for a drawdown beyond the "
+            "operator's threshold, since the operator's last reset."
+        )
+    )
+    limits: PositionLimit = Field(
+        description="The open-position limit: open positions and waiting plans count."
+    )
     note: str | None = Field(
         default=None,
         description="What to know first: no plans yet, stale data, skipped days, negative cash.",
@@ -1239,9 +1253,31 @@ def _portfolio(
 
     """
     settlement = _settle(tool, cache, journal, risk_config)
+    portfolio, any_plans = portfolio_on_cache(
+        tool, cache, journal, risk_config, settlement.reader, settlement.not_updated
+    )
+    return settlement, portfolio, any_plans
+
+
+def portfolio_on_cache(
+    tool: str,
+    cache: StockCache,
+    journal: Journal,
+    risk_config: RiskConfig,
+    reader: _CachedReader | None = None,
+    not_updated: AbstractSet[str] = frozenset(),
+) -> tuple[Portfolio, bool]:
+    """
+    The portfolio on the journal and the cached data as they stand, without
+    settling or calling the provider, from the latest kill switch reset;
+    and whether any call has a plan. A journal or cache it can't read is a
+    ToolError.
+
+    """
     try:
         decisions = journal.decisions()
         positions = journal.positions()
+        resets = journal.resets()
     except CACHE_ERRORS as error:
         raise _journal_unreadable(tool, journal.path, error) from error
     by_id = {decision.id: decision for decision in decisions}
@@ -1254,7 +1290,7 @@ def _portfolio(
         )
         if ticker is not None
     )
-    reader = settlement.reader
+    reader = reader or _CachedReader(tool, cache)
     market = Market(
         {ticker: reader.candles(ticker) for ticker in tickers},
         {ticker: reader.dividends(ticker) for ticker in tickers},
@@ -1266,10 +1302,11 @@ def _portfolio(
         risk_config.costs,
         risk_config.limits,
         cache.clock(),
-        settlement.not_updated,
+        not_updated,
+        resets[-1] if resets else None,
     )
     any_plans = any(decision.plan is not None for decision in decisions)
-    return settlement, portfolio, any_plans
+    return portfolio, any_plans
 
 
 def _no_history_error(listing: Listing, newest: date) -> ToolError:
@@ -1439,7 +1476,7 @@ def _trade_plan(
 
     """
     _refuse_exchange_rate(ticker, "Plan trades")
-    totals = _portfolio(tool, cache, journal, risk_config)[1].totals
+    portfolio = _portfolio(tool, cache, journal, risk_config)[1]
     snapshot = _snapshot(tool, cache, ticker, sys.maxsize)
     if not snapshot.is_current:
         ticker = snapshot.listing.ticker
@@ -1449,7 +1486,7 @@ def _trade_plan(
             "yet, so the plan can't be made on the price of the moment. Try "
             "again later."
         )
-    return _plan_on(tool, cache, snapshot, request, risk_config, totals)
+    return _plan_on(tool, cache, snapshot, request, risk_config, portfolio)
 
 
 def _plan_on(
@@ -1458,18 +1495,21 @@ def _plan_on(
     snapshot: Snapshot,
     request: PlanRequest,
     risk_config: RiskConfig,
-    totals: Totals,
+    portfolio: Portfolio,
 ) -> TradePlan:
     """
     The plan for `request` on a current snapshot of the stock's whole
     history, sized on the portfolio's total value, or a ToolError saying
-    which check or limit it breaks, or that it doesn't fit the free cash.
+    which check or limit it breaks, that the kill switch has tripped, that
+    the open-position limit is reached, or that it doesn't fit the free
+    cash, in that order.
     record_decision plans on the snapshot it stamps the call with, so the
     call and its plan are one session.
 
     """
     listing, candles = snapshot.listing, snapshot.candles
     ticker = listing.ticker
+    totals = portfolio.totals
     atr = calculate_indicators(candles).atr
     rate, rate_session, rate_is_current = None, None, True
     pair = fx_pair(listing.currency)
@@ -1496,6 +1536,8 @@ def _plan_on(
             limits=risk_config.limits,
             costs=risk_config.costs,
         )
+        refuse_when_tripped(portfolio.kill_switch)
+        refuse_beyond_open_positions(portfolio.limits)
         refuse_beyond_free_cash(plan, totals)
     except PlanRefused as error:
         raise ToolError(f"{error} Nothing was recorded.") from error
@@ -1872,6 +1914,9 @@ def build_server(
         limits are shares of the paper portfolio's total value, settled
         first; a plan that breaks a check or limit, or whose position value
         plus buy costs is more than the free cash, is refused saying which.
+        While the kill switch has tripped, or the open positions and waiting
+        plans together reach the open-position limit, every plan is refused;
+        only the operator can reset the switch.
         No call is recorded: try prices as often as needed, then pass the
         plan to record_decision with the buy.
         """
@@ -1978,10 +2023,9 @@ def build_server(
             )
 
         # A plan is sized on the portfolio, settled first.
-        totals = None
+        portfolio = None
         if plan is not None:
             _, portfolio, _ = _portfolio("record_decision", cache, journal, risk_config)
-            totals = portfolio.totals
         # A plan needs the whole history (for its ATR); one read serves the
         # call's close and the plan, so both are the same session.
         count = 1 if plan is None else sys.maxsize
@@ -1989,9 +2033,9 @@ def build_server(
         benchmark = _current_close("record_decision", cache, BENCHMARK)
         candle = stock.candles[-1]
         trade_plan = None
-        if plan is not None and totals is not None:
+        if plan is not None and portfolio is not None:
             trade_plan = _plan_on(
-                "record_decision", cache, stock, plan, risk_config, totals
+                "record_decision", cache, stock, plan, risk_config, portfolio
             )
         try:
             horizon_ends = session_after(stock.listing.exchange, candle.date, horizon)
@@ -2308,7 +2352,9 @@ def build_server(
         positions' value after the costs to close, total value, realised
         and unrealised P&L, peak and drawdown, open risk), each open
         position against its plan with its distance to stop and target, the
-        plans waiting for their entry, and the closed positions in summary.
+        plans waiting for their entry, the closed positions in summary, the
+        kill switch (tripped or not, since the operator's last reset) and
+        the open-position limit with how many more plans fit.
         A stale ticker is valued on its newest cached close and says so.
         """
         settlement, portfolio, any_plans = _portfolio(
@@ -2333,6 +2379,8 @@ def build_server(
             open=portfolio.open,
             waiting=portfolio.waiting[:MAX_SCORED],
             closed=portfolio.closed,
+            kill_switch=portfolio.kill_switch,
+            limits=portfolio.limits,
             note=_portfolio_note(portfolio, any_plans),
         )
 
