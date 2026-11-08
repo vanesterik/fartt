@@ -88,7 +88,7 @@ from fartt.risk_config import (
     RiskConfigError,
     load_risk_config,
 )
-from fartt.scoring import RATE_DECIMALS, Unscorable, score_call
+from fartt.scoring import RATE_DECIMALS, Unscorable, score_call, score_plan
 from fartt.stock_cache import NoHistory, StockCache, UpdateResult
 from fartt.technical import (
     DECIMALS,
@@ -128,8 +128,9 @@ MAX_CANDLES = 200
 # older calls; get_decisions(id=...) returns one call with its full plan.
 MAX_DECISIONS = 10
 MAX_DECISIONS_CHARS = 60_000
-# A scored call is about 200 characters and a call not scored about 150, so
-# 50 of each stay well under the limit. Every score is stored either way.
+# A scored call or plan is about 200 characters and one not scored about
+# 150, so 50 of each stay well under the limit. Every score is stored either
+# way.
 MAX_SCORED = 50
 
 COLUMNS = ["date", "open", "high", "low", "close", "volume"]
@@ -165,9 +166,12 @@ INSTRUCTIONS = (
     "entries can't be changed afterwards. Before a daily check-in or a "
     "re-analysis of a ticker, read the earlier calls with get_decisions. "
     "At the daily check-in, call score_decisions: it scores every call whose "
-    "horizon has passed against IWDA.AS, in EUR. Read get_performance to see "
-    "how the calls have done, overall, per signal and per ticker; they are "
-    "calls, not trades: no costs or position sizes. Before analysing a "
+    "horizon has passed against IWDA.AS, in EUR, and every closed plan, as "
+    "a trade after costs against IWDA.AS over its holding period. Read "
+    "get_performance to see how the calls have done, overall, per signal "
+    "and per ticker; they are calls, not trades: no costs or position "
+    "sizes. Its plans block reports the closed plans after costs, and its "
+    "gate whether the stage 1 gate is met. Before analysing a "
     "ticker, call get_analysis_procedure with it, first, and follow what it "
     "returns step by step, ending in a call; skip that only when the "
     "analyze_ticker prompt already gave you the procedure. "
@@ -489,6 +493,46 @@ class NotScoredCall(BaseModel):
     reason: str = Field(description="What's missing; a later run scores it.")
 
 
+class ScoredPlan(BaseModel):
+    """A closed position this run scored, in brief."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: int = Field(description="The call's id.")
+    ticker: str = Field(description="The stock.")
+    fill_session: date = Field(description="The session the plan filled on.")
+    exit_session: date = Field(description="The session the position closed on.")
+    reason: ExitReason = Field(description="stop, target or horizon.")
+    return_: float = Field(
+        validation_alias="return",
+        serialization_alias="return",
+        description=(
+            "The P&L over the fill's value plus the buy's costs, in EUR after "
+            "all costs, dividends included: 0.004 means 0.4%."
+        ),
+    )
+    benchmark_return: float = Field(
+        description=(
+            "IWDA.AS's return, in EUR, from its close before the fill session "
+            "to its close on the exit session."
+        )
+    )
+    excess_return: float = Field(description="return minus benchmark_return.")
+    hit: bool = Field(description="True when it closed at its target.")
+    realised_r: float = Field(
+        description="The P&L over the plan's risk, both in EUR after costs."
+    )
+
+
+class NotScoredPlan(BaseModel):
+    """A closed position that can't be scored yet."""
+
+    id: int = Field(description="The call's id.")
+    ticker: str = Field(description="The stock.")
+    exit_session: date = Field(description="The session the position closed on.")
+    reason: str = Field(description="What's missing; a later run scores it.")
+
+
 class ScoreResult(BaseModel):
     scored: list[ScoredCall] = Field(
         description=f"The calls this run scored, oldest first, at most {MAX_SCORED}."
@@ -504,6 +548,21 @@ class ScoreResult(BaseModel):
     )
     already_scored: int = Field(
         description="How many calls were scored before this run."
+    )
+    plans_scored: list[ScoredPlan] = Field(
+        description=(
+            f"The closed positions this run scored, oldest exit first, at most "
+            f"{MAX_SCORED}."
+        )
+    )
+    plans_not_scored: list[NotScoredPlan] = Field(
+        description=(
+            "Closed positions that can't be scored yet, oldest exit first, at "
+            f"most {MAX_SCORED}, each with the reason."
+        )
+    )
+    plans_already_scored: int = Field(
+        description="How many closed positions were scored before this run."
     )
     note: str | None = Field(
         default=None,
@@ -876,7 +935,12 @@ def _journal_unreadable(tool: str, path: Path, error: Exception) -> ToolError:
 
 
 def _score_note(
-    due: int, running: int, more_scored: int, more_not_scored: int
+    due: int,
+    running: int,
+    more_scored: int,
+    more_not_scored: int,
+    more_plans_scored: int = 0,
+    more_plans_not_scored: int = 0,
 ) -> str | None:
     notes: list[str] = []
     if not due:
@@ -895,6 +959,17 @@ def _score_note(
         notes.append(
             f"Showing the first {MAX_SCORED} calls not scored; {more_not_scored} "
             f"more {calls} scored."
+        )
+    if more_plans_scored:
+        notes.append(
+            f"Showing the first {MAX_SCORED} plans scored; {more_plans_scored} "
+            f"more {'was' if more_plans_scored == 1 else 'were'} scored."
+        )
+    if more_plans_not_scored:
+        plans = "plan wasn't" if more_plans_not_scored == 1 else "plans weren't"
+        notes.append(
+            f"Showing the first {MAX_SCORED} plans not scored; "
+            f"{more_plans_not_scored} more {plans} scored."
         )
     return " ".join(notes) or None
 
@@ -2207,12 +2282,19 @@ def build_server(
         the benchmark's over the same span. A price in another currency is
         converted at that day's EUR exchange-rate close (Yahoo's EURUSD=X),
         which closes at midnight UTC, so a US call is scored the day after
-        its horizon ends. A score is stored once; calls that can't be scored
-        yet stay open with the reason, for a later run.
+        its horizon ends. It also scores every closed paper position, as a
+        trade: its P&L after both legs' costs (dividends included) over the
+        fill's value plus the buy's costs, against IWDA.AS from its close
+        before the fill session to the exit session; a hit closed at its
+        target, and realised R is the P&L over the plan's risk. A score is
+        stored once; calls and plans that can't be scored yet stay open with
+        the reason, for a later run.
         """
         try:
             decisions = journal.decisions()
             scores = journal.scores()
+            positions = journal.positions()
+            plan_scores = journal.plan_scores()
         except CACHE_ERRORS as error:
             raise _journal_unreadable("score_decisions", journal.path, error) from error
 
@@ -2220,14 +2302,22 @@ def build_server(
         still_open = [d for d in decisions if d.id not in scores]
         due = [d for d in still_open if _horizon_passed(d, now)]
         running = len(still_open) - len(due)
+        by_id = {decision.id: decision for decision in decisions}
+        unscored_exits = sorted(
+            (e for e in positions.exits.values() if e.decision_id not in plan_scores),
+            key=lambda e: (e.session, e.decision_id),
+        )
 
-        # Each ticker the due calls need is brought up to date once per run.
+        # Each ticker the due calls need is brought up to date once per run;
+        # a closed position needs the benchmark only.
         needed = dict.fromkeys(
             ticker
             for decision in due
             for ticker in (decision.ticker, BENCHMARK, fx_pair(decision.currency))
             if ticker is not None
         )
+        if unscored_exits:
+            needed[BENCHMARK] = None
         unreachable, unlisted = _update_all("score_decisions", cache, needed)
         # Each ticker's candles and dividends are read once per run too.
         reader = _CachedReader("score_decisions", cache)
@@ -2294,20 +2384,86 @@ def build_server(
                 )
             )
 
+        plans_scored: list[ScoredPlan] = []
+        plans_not_scored: list[NotScoredPlan] = []
+        plans_raced = 0
+        for exit in unscored_exits:
+            decision = by_id[exit.decision_id]
+            fill = positions.fills[exit.decision_id]
+            reason = unlisted.get(BENCHMARK)
+            if reason is None:
+                try:
+                    plan_score = score_plan(
+                        decision,
+                        fill,
+                        exit,
+                        candles(BENCHMARK),
+                        cache.clock().replace(microsecond=0),
+                    )
+                except Unscorable as error:
+                    reason = str(error)
+                    if error.ticker in unreachable:
+                        reason += " (the provider is unreachable)"
+                else:
+                    try:
+                        stored_plan = journal.append_plan_score(plan_score)
+                    except CACHE_ERRORS as error:
+                        logger.error(f"score_decisions #{decision.id}: {error}")
+                        raise ToolError(
+                            f"The journal at {journal.path} can't be read or "
+                            f"written: {error}. Scores stored before this call "
+                            "stay stored. The operator must fix the file; the "
+                            "server never rewrites it."
+                        ) from error
+                    if stored_plan is None:
+                        plans_raced += 1  # Another run scored it in the meantime.
+                    else:
+                        plans_scored.append(
+                            ScoredPlan(
+                                id=decision.id,
+                                ticker=decision.ticker,
+                                fill_session=fill.session,
+                                exit_session=exit.session,
+                                reason=exit.reason,
+                                return_=stored_plan.return_,
+                                benchmark_return=stored_plan.benchmark.return_,
+                                excess_return=stored_plan.excess_return,
+                                hit=stored_plan.hit,
+                                realised_r=stored_plan.realised_r,
+                            )
+                        )
+                    continue
+            logger.warning(f"score_decisions plan #{decision.id}: {reason}")
+            plans_not_scored.append(
+                NotScoredPlan(
+                    id=decision.id,
+                    ticker=decision.ticker,
+                    exit_session=exit.session,
+                    reason=reason,
+                )
+            )
+
         logger.info(
             f"score_decisions: {len(scored)} scored, {len(not_scored)} not scored, "
-            f"{running} running, {len(scores) + raced} already scored"
+            f"{running} running, {len(scores) + raced} already scored; plans: "
+            f"{len(plans_scored)} scored, {len(plans_not_scored)} not scored, "
+            f"{len(plan_scores) + plans_raced} already scored"
         )
         return ScoreResult(
             scored=scored[:MAX_SCORED],
             not_scored=not_scored[:MAX_SCORED],
             running=running,
             already_scored=len(scores) + raced,
+            plans_scored=plans_scored[:MAX_SCORED],
+            plans_not_scored=plans_not_scored[:MAX_SCORED],
+            plans_already_scored=len(plan_scores) + plans_raced,
             note=_score_note(
                 len(due),
                 running,
                 max(len(scored) - MAX_SCORED, 0),
                 max(len(not_scored) - MAX_SCORED, 0),
+                max(len(plans_scored) - MAX_SCORED, 0),
+                max(len(plans_not_scored) - MAX_SCORED, 0),
             ),
         )
 

@@ -7,11 +7,18 @@ import pytest
 from mcp import Client
 
 from fartt.data import Candle, Dividend, History, Listing
-from fartt.journal import BenchmarkClose, DecisionDraft, Journal, Score
+from fartt.journal import BenchmarkClose, DecisionDraft, Journal, PlanScore, Score
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
-from tests.fakes import RISK_CONFIG, FakeProvider, decision_draft
+from tests.fakes import (
+    RISK_CONFIG,
+    FakeProvider,
+    buy_plan,
+    decision_draft,
+    exit_line,
+    fill_line,
+)
 from tests.test_server import (
     AAPL,
     AFTER_CLOSE,
@@ -503,3 +510,220 @@ async def test_the_read_tools_take_an_fx_pair(tmp_path: Path, tool: str) -> None
         assert rows[-1][0] == last.date.isoformat() == "2026-10-28"
         assert rows[-1][4] == last.close
         assert result.structured_content["exchange"] == "24/5"
+
+
+# A plan filled on 2026-09-02 and closed on 2026-09-10, with its call still
+# running (its horizon ends on 2026-11-26), so only the plan is due.
+FILLED = date(2026, 9, 2)
+CLOSED = date(2026, 9, 10)
+
+
+def closed_plan(cache: StockCache, **exit: Any) -> int:
+    journal = journal_of(cache)
+    (decision,) = seed(cache, decision_draft(plan=buy_plan()))
+    journal.append_fill(fill_line(decision.id, session=FILLED))
+    journal.append_exit(exit_line(decision.id, session=CLOSED, **exit))
+    return decision.id
+
+
+def plan_score_lines(cache: StockCache) -> list[dict[str, Any]]:
+    path = journal_of(cache).path
+    lines = [json.loads(line) for line in path.read_text().splitlines()]
+    return [line for line in lines if line["kind"] == "plan_score"]
+
+
+@pytest.mark.anyio
+async def test_a_position_closed_at_its_target_is_scored_and_stored(
+    tmp_path: Path,
+) -> None:
+    # @AC1
+    provider = fake()
+    cache = cache_for(provider, tmp_path)
+    closed_plan(cache, reason="target", price=680.0, value=1360.0, pnl=152.8)
+
+    result = await score_decisions(cache)
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    plan = buy_plan()
+    trade = round(152.8 / 1203.6, 6)
+    benchmark = round(
+        close_on(provider, "IWDA.AS", CLOSED)
+        / close_on(provider, "IWDA.AS", date(2026, 9, 1))
+        - 1,
+        6,
+    )
+    assert content["plans_scored"] == [
+        {
+            "id": 1,
+            "ticker": "ASML.AS",
+            "fill_session": "2026-09-02",
+            "exit_session": "2026-09-10",
+            "reason": "target",
+            "return": trade,
+            "benchmark_return": benchmark,
+            "excess_return": round(trade - benchmark, 6),
+            "hit": True,
+            "realised_r": round(152.8 / plan.risk, 6),
+        }
+    ]
+    assert content["plans_not_scored"] == []
+    assert content["plans_already_scored"] == 0
+    assert content["scored"] == []
+    assert content["running"] == 1
+    (line,) = plan_score_lines(cache)
+    assert line["decision_id"] == 1
+    assert line["return"] == trade
+    assert line["hit"] is True
+    assert line["benchmark"]["start"]["session"] == "2026-09-01"
+    assert line["holding_sessions"] == 7
+
+
+@pytest.mark.anyio
+async def test_a_position_stopped_out_is_a_miss(tmp_path: Path) -> None:
+    # @AC2
+    cache = cache_for(fake(), tmp_path)
+    closed_plan(cache)  # at the 580 stop, pnl -47.2
+
+    result = await score_decisions(cache)
+
+    (scored,) = result.structured_content["plans_scored"]
+    assert scored["reason"] == "stop"
+    assert scored["hit"] is False
+    assert scored["return"] == round(-47.2 / 1203.6, 6)
+    assert scored["realised_r"] == round(-47.2 / buy_plan().risk, 6)
+
+
+@pytest.mark.anyio
+async def test_a_position_without_the_benchmark_close_waits(tmp_path: Path) -> None:
+    # @AC3
+    provider = fake()
+    provider.reachable = False
+    cache = cache_for(provider, tmp_path)
+    closed_plan(cache)
+    before = journal_of(cache).path.read_bytes()
+
+    result = await score_decisions(cache)
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert content["plans_scored"] == []
+    assert content["plans_not_scored"] == [
+        {
+            "id": 1,
+            "ticker": "ASML.AS",
+            "exit_session": "2026-09-10",
+            "reason": "IWDA.AS's close for 2026-09-01 isn't available yet "
+            "(the provider is unreachable)",
+        }
+    ]
+    assert journal_of(cache).path.read_bytes() == before
+
+    provider.reachable = True
+    later = await score_decisions(cache)
+
+    assert [p["id"] for p in later.structured_content["plans_scored"]] == [1]
+
+
+@pytest.mark.anyio
+async def test_scoring_plans_twice_writes_nothing(tmp_path: Path) -> None:
+    # @AC4
+    cache = cache_for(fake(), tmp_path)
+    closed_plan(cache)
+    await score_decisions(cache)
+    before = journal_of(cache).path.read_bytes()
+
+    result = await score_decisions(cache)
+
+    content = result.structured_content
+    assert content["plans_scored"] == content["plans_not_scored"] == []
+    assert content["plans_already_scored"] == 1
+    assert journal_of(cache).path.read_bytes() == before
+
+
+@pytest.mark.anyio
+async def test_a_plan_score_written_by_another_run_counts_as_already_scored(
+    tmp_path: Path,
+) -> None:
+    # @AC4
+    class RacedJournal(Journal):
+        def append_plan_score(self, score: PlanScore) -> PlanScore | None:
+            super().append_plan_score(score)
+            return None
+
+    cache = cache_for(fake(), tmp_path)
+    closed_plan(cache)
+    journal = RacedJournal(journal_of(cache).directory)
+
+    async with Client(build_server(cache, journal, RISK_CONFIG)) as client:
+        result = await client.call_tool("score_decisions", {})
+
+    assert result.structured_content["plans_scored"] == []
+    assert result.structured_content["plans_already_scored"] == 1
+    assert len(plan_score_lines(cache)) == 1
+
+
+@pytest.mark.anyio
+async def test_waiting_and_open_positions_are_not_scored(tmp_path: Path) -> None:
+    provider = fake()
+    cache = cache_for(provider, tmp_path)
+    seed(cache, decision_draft(plan=buy_plan()), decision_draft(plan=buy_plan()))
+    journal_of(cache).append_fill(fill_line(2, session=FILLED))
+
+    result = await score_decisions(cache)
+
+    assert result.structured_content["plans_scored"] == []
+    assert plan_score_lines(cache) == []
+    assert provider.history_calls == []
+
+
+@pytest.mark.anyio
+async def test_calls_only_score_as_before(tmp_path: Path) -> None:
+    # @AC8
+    cache = cache_for(fake(), tmp_path)
+    seed(cache, past_call())
+
+    result = await score_decisions(cache)
+
+    content = result.structured_content
+    assert [c["id"] for c in content["scored"]] == [1]
+    assert content["plans_scored"] == content["plans_not_scored"] == []
+    assert content["plans_already_scored"] == 0
+    assert content["note"] is None
+
+
+@pytest.mark.anyio
+async def test_a_call_and_its_plan_are_both_scored(tmp_path: Path) -> None:
+    provider = fake()
+    cache = cache_for(provider, tmp_path)
+    (decision,) = seed(cache, past_call(plan=buy_plan()))
+    journal_of(cache).append_fill(fill_line(decision.id, session=FILLED))
+    journal_of(cache).append_exit(exit_line(decision.id, session=CLOSED))
+
+    result = await score_decisions(cache)
+
+    content = result.structured_content
+    assert [c["id"] for c in content["scored"]] == [1]
+    assert [p["id"] for p in content["plans_scored"]] == [1]
+    assert [t for t, _ in provider.history_calls].count("IWDA.AS") == 1
+
+
+@pytest.mark.anyio
+async def test_plans_are_listed_oldest_exit_first_and_capped(tmp_path: Path) -> None:
+    cache = cache_for(fake(), tmp_path)
+    closed_plan(cache)
+    for _ in range(50):
+        decision_id = closed_plan(cache)
+    journal = journal_of(cache)
+    (late,) = seed(cache, decision_draft(plan=buy_plan()))
+    journal.append_fill(fill_line(late.id, session=FILLED))
+    journal.append_exit(exit_line(late.id, session=date(2026, 9, 3)))
+
+    result = await score_decisions(cache)
+
+    content = result.structured_content
+    ids = [p["id"] for p in content["plans_scored"]]
+    assert ids == [late.id, *range(1, 50)]
+    assert decision_id == 51
+    assert "Showing the first 50 plans scored; 2 more were scored." in content["note"]
+    assert len(plan_score_lines(cache)) == 52
