@@ -395,7 +395,8 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
     tool. get_analysis_procedure (#141) returns the procedure's text and
     writes nothing; it joins as a read-only tool. get_risk_config (#149) reads
     the operator's risk config and takes no arguments; it joins as a read-only
-    tool.
+    tool. plan_trade (#143) calculates a trade plan and records nothing; it
+    joins as a tool that writes no entry.
     """
     async with _server(seeded_assets) as client:
         tools = (await client.list_tools()).tools
@@ -413,6 +414,7 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
             "get_performance",
             "get_analysis_procedure",
             "get_risk_config",
+            "plan_trade",
         ]
     )
     record = next(tool for tool in tools if tool.name == "record_decision")
