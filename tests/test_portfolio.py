@@ -2,12 +2,20 @@ from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from typing import Any
 
+import pytest
+
 from fartt.data import Candle, Dividend, sessions_in_range
 from fartt.journal import Decision, Exit, Expiry, Fill, Positions
-from fartt.portfolio import MAX_RECENT, Market, Portfolio, calculate_portfolio
+from fartt.portfolio import (
+    MAX_RECENT,
+    Market,
+    Portfolio,
+    calculate_portfolio,
+    refuse_beyond_free_cash,
+)
 from fartt.positions import order_window
 from fartt.technical import calculate_indicators
-from fartt.trade_plan import leg_costs
+from fartt.trade_plan import PlanRefused, leg_costs
 from tests.fakes import (
     RISK_CONFIG,
     buy_plan,
@@ -385,3 +393,22 @@ def test_a_session_whose_close_isnt_cached_is_skipped() -> None:
     result = portfolio([call(1)], fills=[fill_line(1)], candles=candles)
 
     assert result.skipped_days == 1
+
+
+def test_a_plan_beyond_the_free_cash_is_refused() -> None:
+    # @AC6
+    plan = buy_plan()
+    each = round(plan.position_value + plan.costs.buy.total, 2)
+    fits = portfolio([call(i) for i in range(1, 5)]).totals
+    short = portfolio([call(i) for i in range(1, 6)]).totals
+    need = round(plan.position_value + plan.costs.buy.total, 2)
+    free = round(CAPITAL - 5 * each, 2)
+
+    refuse_beyond_free_cash(plan, fits)
+    with pytest.raises(PlanRefused) as refused:
+        refuse_beyond_free_cash(plan, short)
+
+    message = str(refused.value)
+    assert f"free cash of €{free:,.2f}" in message
+    assert f"€{5 * each:,.2f} reserved" in message
+    assert f"misses by €{round(need - free, 2):,.2f}" in message

@@ -3,11 +3,21 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from mcp import Client
 
 from fartt.data import Candle, History, Listing
+from fartt.journal import DecisionDraft
+from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
-from tests.fakes import RISK_CONFIG, FakeProvider
+from tests.fakes import (
+    RISK_CONFIG,
+    FakeProvider,
+    buy_plan,
+    decision_draft,
+    exit_line,
+    fill_line,
+)
 from tests.test_server import (
     AAPL,
     AFTER_CLOSE,
@@ -17,6 +27,7 @@ from tests.test_server import (
     call,
     history,
     journal_of,
+    seed,
     sessions,
 )
 
@@ -525,3 +536,89 @@ async def test_an_id_with_another_filter_is_refused(
     text = read.content[0].text
     assert "id" in text
     assert next(iter(other)) in text
+
+
+@pytest.mark.anyio
+async def test_plan_trade_returns_the_free_cash(tmp_path: Path) -> None:
+    # @AC6
+    content = (await plan_trade(cache_for(provider(), tmp_path))).structured_content
+
+    assert content["free_cash"] == 10000.0
+
+
+@pytest.mark.anyio
+async def test_plan_trade_sizes_on_the_total_value_after_a_realised_loss(
+    tmp_path: Path,
+) -> None:
+    # @AC7
+    cache = cache_for(provider(), tmp_path)
+    seed(cache, decision_draft(plan=buy_plan()))
+    journal = journal_of(cache)
+    journal.append_fill(fill_line(1, session=date(2026, 10, 27)))
+    journal.append_exit(exit_line(1, session=date(2026, 10, 28)))  # P&L -47.20
+
+    content = (await plan_trade(cache)).structured_content
+
+    assert content["portfolio_value"] == 9952.8
+    assert content["position_share"] == round(1920.0 / 9952.8, 4)
+    assert content["free_cash"] == 9952.8
+
+
+def waiting_calls(count: int) -> list[DecisionDraft]:
+    """Buys on ASML.AS whose plans (entry 600) wait from 2026-10-30 on."""
+    return [decision_draft(plan=buy_plan()) for _ in range(count)]
+
+
+def reserved_each() -> float:
+    plan = buy_plan()
+    return round(plan.position_value + plan.costs.buy.total, 2)
+
+
+@pytest.mark.anyio
+async def test_plan_trade_refuses_a_plan_beyond_the_free_cash(tmp_path: Path) -> None:
+    # @AC6
+    cache = cache_for(provider(), tmp_path)
+    seed(cache, *waiting_calls(5))
+    free = round(10000.0 - 5 * reserved_each(), 2)
+
+    result = await plan_trade(cache)
+
+    assert result.is_error
+    text = result.content[0].text
+    assert f"free cash of €{free:,.2f}" in text
+    assert f"misses by €{round(1920.0 + 3.92 - free, 2):,.2f}" in text
+    assert text.endswith("Nothing was recorded.")
+
+
+@pytest.mark.anyio
+async def test_record_decision_refuses_a_plan_beyond_the_free_cash(
+    tmp_path: Path,
+) -> None:
+    # @AC6
+    cache = cache_for(provider(), tmp_path)
+    seed(cache, *waiting_calls(5))
+    refused = await plan_trade(cache)
+
+    result = await record(cache, plan=PLAN)
+
+    assert result.is_error
+    # The same words, after the SDK's "Error executing tool <name>: ".
+    assert (
+        result.content[0].text.split(": ", 1)[1]
+        == refused.content[0].text.split(": ", 1)[1]
+    )
+    assert len(journal_of(cache).decisions()) == 5
+
+
+@pytest.mark.anyio
+async def test_plan_trade_settles_first_so_it_is_not_read_only(
+    tmp_path: Path,
+) -> None:
+    cache = cache_for(provider(), tmp_path)
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
+        tools = (await client.list_tools()).tools
+    (tool,) = [t for t in tools if t.name == "plan_trade"]
+
+    assert tool.annotations is not None
+    assert tool.annotations.read_only_hint is False
+    assert tool.annotations.idempotent_hint is True

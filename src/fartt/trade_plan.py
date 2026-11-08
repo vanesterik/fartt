@@ -112,8 +112,20 @@ class TradePlan(BaseModel):
     )
     shares: int = Field(description="Whole shares to buy.")
     position_value: float = Field(description="shares × entry, in EUR.")
+    # Default for plans stored before the portfolio (#145).
+    free_cash: float | None = Field(
+        default=None,
+        description=(
+            "The portfolio's free cash when the plan was made (cash less what "
+            "waiting plans reserve), in EUR; the plan's position value plus "
+            "buy costs fit within it."
+        ),
+    )
     portfolio_value: float = Field(
-        description="The portfolio value the limits are shares of, in EUR."
+        description=(
+            "The portfolio's total value the limits are shares of, in EUR: "
+            "cash plus the open positions after the costs to close."
+        )
     )
     position_share: float = Field(description="position_value / portfolio_value.")
     risk: float = Field(

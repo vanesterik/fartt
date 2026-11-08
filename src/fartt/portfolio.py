@@ -36,7 +36,7 @@ from fartt.positions import order_window
 from fartt.risk_config import Costs
 from fartt.scoring import PRICE_DECIMALS, RATE_DECIMALS, Unscorable, rate_on
 from fartt.technical import calculate_indicators
-from fartt.trade_plan import CENTS, TradePlan, leg_costs
+from fartt.trade_plan import CENTS, PlanRefused, TradePlan, leg_costs
 
 # How many of the most recent exits the portfolio lists.
 MAX_RECENT = 5
@@ -557,4 +557,26 @@ def calculate_portfolio(
         closed=closed,
         stale=list(dict.fromkeys(h.ticker for h in holdings if not h.is_current)),
         skipped_days=skipped,
+    )
+
+
+def refuse_beyond_free_cash(plan: TradePlan, totals: Totals) -> None:
+    """
+    `PlanRefused` when the plan's position value plus buy costs is more
+    than the free cash, naming the free cash, the reservations and by how
+    much it misses.
+
+    """
+    buy = plan.costs.buy.total
+    need = _cents(plan.position_value + buy)
+    if need <= totals.free_cash:
+        return
+    raise PlanRefused(
+        f"The plan needs €{need:,.2f} (€{plan.position_value:,.2f} of shares "
+        f"plus €{buy:,.2f} buy costs), more than the free cash of "
+        f"€{totals.free_cash:,.2f} (cash €{totals.cash:,.2f} less "
+        f"€{totals.reserved:,.2f} reserved for {totals.waiting_plans} waiting "
+        f"plan{'s' if totals.waiting_plans != 1 else ''}): it misses by "
+        f"€{_cents(need - totals.free_cash):,.2f}. Wait for a waiting plan to "
+        "fill or expire, or a position to close."
     )
