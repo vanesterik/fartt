@@ -1317,14 +1317,30 @@ def build_server(
                 ),
             ),
         ],
+        plan: Annotated[
+            PlanRequest | None,
+            Field(
+                description=(
+                    "With a buy only: the trade plan's entry, stop, target and "
+                    "valid_for, as given to plan_trade. The server works the "
+                    "plan out again on current data and stores it with the "
+                    "call; a plan that breaks a limit records nothing."
+                )
+            ),
+        ] = None,
     ) -> Decision:
         """
         Record a call (buy or pass) in the journal at the moment it's made,
         stamped with the stock's and the benchmark's last closes, so it can
         be scored later against what the market did. Record every call.
         Entries can't be changed or removed afterwards: a correction is a
-        new call.
+        new call. A buy can carry its trade plan (see plan_trade).
         """
+        if plan is not None and direction == "pass":
+            raise ToolError(
+                "A pass has no trade plan: give a plan with a buy only, or "
+                "record the pass without one. Nothing was recorded."
+            )
         reasoning = reasoning.strip()
         if not 1 <= len(reasoning) <= MAX_REASONING:
             raise ToolError(
@@ -1347,6 +1363,11 @@ def build_server(
         stock = _current_close("record_decision", cache, ticker)
         benchmark = _current_close("record_decision", cache, BENCHMARK)
         candle = stock.candles[-1]
+        trade_plan = None
+        if plan is not None:
+            trade_plan = _trade_plan(
+                "record_decision", cache, ticker, plan, risk_config
+            )
         try:
             horizon_ends = session_after(stock.listing.exchange, candle.date, horizon)
         except ValueError as error:
@@ -1376,6 +1397,7 @@ def build_server(
                 session=benchmark.candles[-1].date,
                 close=round(benchmark.candles[-1].close, DECIMALS),
             ),
+            plan=trade_plan,
         )
         try:
             recorded = journal.append(draft)

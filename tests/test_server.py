@@ -1198,6 +1198,7 @@ async def test_record_decision_returns_the_stored_entry(tmp_path: Path) -> None:
             "session": "2026-10-29",
             "close": 52.0,
         },
+        "plan": None,
     }
 
 

@@ -10,8 +10,8 @@ never returned to the agent), which the next append cuts first.
 
 A call's score is a line with `"kind": "score"` and its `decision_id`,
 written once its horizon has passed. A decision has at most one, and it
-comes after the decision's line. `kind` lets later stories (trade plans)
-add their own lines to the same file without rewriting one; readers skip
+comes after the decision's line. A buy may carry its trade plan in the
+decision line's `plan`. `kind` lets later stories add their own lines to the same file without rewriting one; readers skip
 the kinds they don't know.
 
 """
@@ -28,6 +28,7 @@ from typing import Any, Literal, cast, get_args
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from fartt.data import SUFFIX_CALENDARS
+from fartt.trade_plan import TradePlan
 
 # The index every call is measured against: iShares Core MSCI World
 # (accumulating, EUR) on Euronext Amsterdam.
@@ -96,6 +97,14 @@ class DecisionDraft(BaseModel):
     horizon_ends: date = Field(description="The session the horizon ends on.")
     benchmark: BenchmarkClose = Field(
         description="The benchmark's last close when the call was recorded."
+    )
+    # Absent from lines written before plans existed, which read as null.
+    plan: TradePlan | None = Field(
+        default=None,
+        description=(
+            "The trade plan recorded with a buy, as plan_trade worked it out "
+            "when the call was recorded; null without one."
+        ),
     )
 
     @field_validator("exchange")
