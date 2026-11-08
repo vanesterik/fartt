@@ -98,6 +98,18 @@ class TradePlan(BaseModel):
             "The EUR/CCY rate used (units of the currency per euro); null for EUR."
         )
     )
+    # Defaults for plans stored before these fields existed.
+    rate_session: date | None = Field(
+        default=None,
+        description="The session of the rate's close; null for EUR.",
+    )
+    warning: str | None = Field(
+        default=None,
+        description=(
+            "Set when the rate is from a session before based_on, saying why. "
+            "The plan is still sized on it."
+        ),
+    )
     shares: int = Field(description="Whole shares to buy.")
     position_value: float = Field(description="shares × entry, in EUR.")
     portfolio_value: float = Field(
@@ -232,6 +244,25 @@ def _check_finite_at(target: float, *amounts: float) -> None:
         )
 
 
+def _rate_warning(
+    rate_session: date | None, rate_is_current: bool, based_on: date
+) -> str | None:
+    """Why the rate is from a session before the stock's, if it is."""
+    if rate_session is None or rate_session >= based_on:
+        return None
+    why = (
+        "the data provider couldn't bring it up to date"
+        if not rate_is_current
+        else f"the rate's {based_on.isoformat()} session hasn't closed yet "
+        "(exchange rates close at midnight UTC)"
+    )
+    return (
+        f"The exchange rate is from {rate_session.isoformat()}, before the "
+        f"stock's last close ({based_on.isoformat()}): {why}. The plan is "
+        "sized on it."
+    )
+
+
 def _largest(fits: Callable[[int], bool], high: int) -> int:
     """The largest `n` in 0..`high` with `fits(n)`, for `fits` true up to a point."""
     low = 0
@@ -257,6 +288,8 @@ def calculate_plan(
     target: float,
     valid_for: int,
     rate: float | None,
+    rate_session: date | None,
+    rate_is_current: bool,
     portfolio_value: float,
     limits: Limits,
     costs: Costs,
@@ -264,7 +297,8 @@ def calculate_plan(
     """
     Size and check a long plan, or raise `PlanRefused` saying which check
     or limit it breaks. Prices are in the stock's `currency`; `rate` is
-    EUR/`currency` (`None` for EUR).
+    EUR/`currency` (`None` for EUR), the close of `rate_session`, and
+    `rate_is_current` says whether that is the pair's newest closed session.
 
     """
     atr = _check_prices(entry, stop, target, valid_for, last_close, atr)
@@ -359,6 +393,8 @@ def calculate_plan(
         target=target,
         valid_for=valid_for,
         rate=rate,
+        rate_session=rate_session,
+        warning=_rate_warning(rate_session, rate_is_current, based_on),
         shares=shares,
         position_value=position_value,
         portfolio_value=portfolio_value,

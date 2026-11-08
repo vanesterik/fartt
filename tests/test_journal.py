@@ -234,6 +234,8 @@ def test_a_plan_is_stored_with_its_call(tmp_path: Path) -> None:
         target=680.0,
         valid_for=5,
         rate=None,
+        rate_session=None,
+        rate_is_current=True,
         portfolio_value=RISK_CONFIG.limits.starting_capital,
         limits=RISK_CONFIG.limits,
         costs=RISK_CONFIG.costs,
