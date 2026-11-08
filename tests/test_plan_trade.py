@@ -212,3 +212,82 @@ async def test_a_history_too_short_for_an_atr_is_refused(tmp_path: Path) -> None
 
 def test_the_instructions_name_plan_trade() -> None:
     assert "plan_trade" in server_module.INSTRUCTIONS
+
+
+async def record(cache: StockCache, **changes: Any) -> Any:
+    arguments: dict[str, Any] = {
+        "ticker": "ASML.AS",
+        "direction": "buy",
+        "horizon": 20,
+        "reasoning": "Trend up, support holding.",
+        "signals": [{"name": "trend", "stance": "for"}],
+    }
+    return await call(cache, arguments | changes, "record_decision")
+
+
+PLAN = {"entry": 128.0, "stop": 120.0, "target": 150.0, "valid_for": 3}
+
+
+@pytest.mark.anyio
+async def test_a_buy_is_recorded_with_its_plan(tmp_path: Path) -> None:
+    # @AC8
+    cache = cache_for(provider(), tmp_path)
+    planned = (await plan_trade(cache, valid_for=3)).structured_content
+
+    result = await record(cache, plan=PLAN)
+
+    assert not result.is_error, result.content
+    assert result.structured_content["plan"] == planned
+    stored = journal_of(cache).decisions()[0]
+    assert stored.plan is not None
+    assert stored.plan.model_dump(mode="json") == planned
+    read = await call(cache, {}, "get_decisions")
+    assert read.structured_content["decisions"][0]["plan"] == planned
+
+
+@pytest.mark.anyio
+async def test_a_buy_whose_plan_breaks_a_limit_records_nothing(
+    tmp_path: Path,
+) -> None:
+    # @AC8
+    cache = cache_for(provider(), tmp_path)
+    refused = await plan_trade(cache, target=130.0)
+
+    result = await record(cache, plan=PLAN | {"target": 130.0})
+
+    assert result.is_error
+    # The same words, after the SDK's "Error executing tool <name>: ".
+    assert (
+        result.content[0].text.split(": ", 1)[1]
+        == (refused.content[0].text.split(": ", 1)[1])
+    )
+    assert not journal_of(cache).path.exists()
+
+
+@pytest.mark.anyio
+async def test_a_pass_with_a_plan_is_refused(tmp_path: Path) -> None:
+    # @AC9
+    cache = cache_for(provider(), tmp_path)
+
+    result = await record(cache, direction="pass", plan=PLAN)
+
+    assert result.is_error
+    text = result.content[0].text
+    assert "pass" in text
+    assert "plan" in text
+    assert not journal_of(cache).path.exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("direction", ["buy", "pass"])
+async def test_a_call_without_a_plan_is_recorded_with_plan_null(
+    tmp_path: Path, direction: str
+) -> None:
+    # @AC9
+    cache = cache_for(provider(), tmp_path)
+
+    result = await record(cache, direction=direction)
+
+    assert not result.is_error, result.content
+    assert result.structured_content["plan"] is None
+    assert journal_of(cache).decisions()[0].plan is None

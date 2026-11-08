@@ -1,10 +1,12 @@
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 from fartt.journal import Journal
-from tests.fakes import decision_draft
+from fartt.trade_plan import calculate_plan
+from tests.fakes import RISK_CONFIG, decision_draft
 from tests.fakes import decision_score as score
 
 
@@ -207,3 +209,38 @@ def test_a_torn_line_is_cut_before_a_score(tmp_path: Path) -> None:
     assert len(lines) == 2
     assert lines[0] == first_line
     assert json.loads(lines[1])["kind"] == "score"
+
+
+def test_a_line_from_before_plans_reads_without_one(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    journal.append(decision_draft())
+    entry = json.loads(journal_file(tmp_path).read_text(encoding="utf-8"))
+    del entry["plan"]
+    journal_file(tmp_path).write_text(json.dumps(entry) + "\n", encoding="utf-8")
+
+    assert journal.decisions()[0].plan is None
+
+
+def test_a_plan_is_stored_with_its_call(tmp_path: Path) -> None:
+    plan = calculate_plan(
+        ticker="ASML.AS",
+        currency="EUR",
+        exchange_code="XAMS",
+        based_on=date(2026, 10, 29),
+        last_close=612.4,
+        atr=15.0,
+        entry=600.0,
+        stop=580.0,
+        target=680.0,
+        valid_for=5,
+        rate=None,
+        portfolio_value=RISK_CONFIG.limits.starting_capital,
+        limits=RISK_CONFIG.limits,
+        costs=RISK_CONFIG.costs,
+    )
+    journal = Journal(tmp_path)
+
+    stored = journal.append(decision_draft(plan=plan))
+
+    assert stored.plan == plan
+    assert Journal(tmp_path).decisions()[0].plan == plan
