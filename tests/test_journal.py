@@ -13,6 +13,7 @@ from tests.fakes import (
     exit_line,
     expiry_line,
     fill_line,
+    plan_score_line,
     reset_line,
 )
 from tests.fakes import decision_score as score
@@ -442,3 +443,77 @@ def test_a_reset_on_a_damaged_journal_writes_nothing(tmp_path: Path) -> None:
 def test_a_reset_note_is_at_most_200_characters() -> None:
     with pytest.raises(ValueError):
         reset_line(note="x" * 201)
+
+
+def closed(journal: Journal) -> None:
+    with_plan(journal)
+    journal.append_fill(fill_line(1))
+    journal.append_exit(exit_line(1))
+
+
+def test_a_plan_score_round_trips(tmp_path: Path) -> None:
+    # @AC1
+    journal = Journal(tmp_path)
+    closed(journal)
+
+    assert journal.append_plan_score(plan_score_line(1)) == plan_score_line(1)
+
+    assert Journal(tmp_path).plan_scores() == {1: plan_score_line(1)}
+    last = json.loads(journal_file(tmp_path).read_text().splitlines()[-1])
+    assert last["kind"] == "plan_score"
+    assert last["return"] == -0.03924
+    assert last["benchmark"]["return"] == 0.007407
+    assert last["realised_r"] == -0.988
+    assert last["hit"] is False
+
+
+def test_a_plan_is_scored_once(tmp_path: Path) -> None:
+    # @AC4
+    journal = Journal(tmp_path)
+    closed(journal)
+    journal.append_plan_score(plan_score_line(1))
+    before = journal_file(tmp_path).read_bytes()
+
+    assert journal.append_plan_score(plan_score_line(1, hit=True)) is None
+
+    assert journal_file(tmp_path).read_bytes() == before
+    assert not journal.plan_scores()[1].hit
+
+
+def test_a_plan_score_without_an_exit_is_refused(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    with_plan(journal)
+    journal.append_fill(fill_line(1))
+    before = journal_file(tmp_path).read_bytes()
+
+    with pytest.raises(ValueError, match="#1"):
+        journal.append_plan_score(plan_score_line(1))
+
+    assert journal_file(tmp_path).read_bytes() == before
+
+
+def test_a_plan_score_line_before_its_exit_is_a_damaged_line(tmp_path: Path) -> None:
+    other = Journal(tmp_path / "other")
+    closed(other)
+    other.append_plan_score(plan_score_line(1))
+    lines = journal_file(tmp_path / "other").read_text().splitlines(keepends=True)
+    journal_file(tmp_path).write_text(lines[0] + lines[1] + lines[3] + lines[2])
+
+    with pytest.raises(ValueError, match="line 3"):
+        Journal(tmp_path).plan_scores()
+
+
+def test_a_second_plan_score_line_is_a_damaged_line(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    closed(journal)
+    journal.append_plan_score(plan_score_line(1))
+    last = journal_file(tmp_path).read_text().splitlines(keepends=True)[-1]
+    with journal_file(tmp_path).open("a") as file:
+        file.write(last)
+
+    with pytest.raises(ValueError, match="line 5"):
+        journal.decisions()
+
+
+def test_without_a_journal_there_are_no_plan_scores(tmp_path: Path) -> None:
+    assert Journal(tmp_path / "none").plan_scores() == {}
