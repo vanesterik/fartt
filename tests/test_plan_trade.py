@@ -167,6 +167,20 @@ async def test_a_plan_breaking_a_check_is_refused(
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-inf"])
+async def test_a_target_that_is_not_a_number_is_refused(
+    tmp_path: Path, value: str
+) -> None:
+    # @AC6
+    cache = cache_for(provider(), tmp_path)
+
+    result = await plan_trade(cache, target=value)
+
+    assert result.is_error
+    assert "target must be a finite number" in result.content[0].text
+
+
+@pytest.mark.anyio
 async def test_a_ticker_without_its_newest_close_is_refused(tmp_path: Path) -> None:
     # @AC7
     cache = cache_for(provider(asml_last=date(2026, 10, 28)), tmp_path)
@@ -261,6 +275,21 @@ async def test_a_buy_whose_plan_breaks_a_limit_records_nothing(
         result.content[0].text.split(": ", 1)[1]
         == (refused.content[0].text.split(": ", 1)[1])
     )
+    assert not journal_of(cache).path.exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("value", ["NaN", "Infinity"])
+async def test_a_buy_whose_target_is_not_a_number_records_nothing(
+    tmp_path: Path, value: str
+) -> None:
+    # @AC8
+    cache = cache_for(provider(), tmp_path)
+
+    result = await record(cache, plan=PLAN | {"target": value})
+
+    assert result.is_error
+    assert "target must be a finite number" in result.content[0].text
     assert not journal_of(cache).path.exists()
 
 

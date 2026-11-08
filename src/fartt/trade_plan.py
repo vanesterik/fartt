@@ -184,6 +184,9 @@ def _check_prices(
 ) -> float:
     """The ATR, once the prices make a long plan; else `PlanRefused`."""
     for name, price in (("entry", entry), ("stop", stop), ("target", target)):
+        # NaN and infinity pass every comparison below unnoticed.
+        if not math.isfinite(price):
+            raise PlanRefused(f"{name} must be a finite number; it is {price}.")
         if price <= 0:
             raise PlanRefused(f"{name} must be above 0; it is {price}.")
     if not 1 <= valid_for <= MAX_VALID_FOR:
