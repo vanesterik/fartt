@@ -41,6 +41,7 @@ EXPECTED_TOOLS = [
     "get_risk_config",
     "plan_trade",
     "settle_positions",
+    "get_portfolio",
 ]
 EXPECTED_PROMPTS = ["analyze_ticker"]
 # Per response; also the MCP client's read timeout, which defaults to none.
@@ -218,6 +219,14 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
         assert sized["ticker"] == "ASML.AS"
         assert sized["shares"] >= 1
         assert sized["risk"] <= 0.02 * config["limits"]["starting_capital"]
+
+        # @issue-145 @AC1
+        portfolio = await client.call_tool("get_portfolio", {})
+        assert not portfolio.is_error, portfolio.content
+        held = portfolio.structured_content
+        capital = config["limits"]["starting_capital"]
+        assert held["totals"]["total_value"] == held["totals"]["cash"] == capital
+        assert held["open"] == held["waiting"] == []
 
     assert (tmp_path / "stocks" / "ASML.AS" / "candles.csv").exists()
     assert (tmp_path / "journal" / "decisions.jsonl").exists()
