@@ -1,3 +1,4 @@
+import math
 from datetime import date
 from typing import Any
 
@@ -271,6 +272,13 @@ def test_prices_that_do_not_make_a_long_plan_are_refused(
 ) -> None:
     with pytest.raises(PlanRefused, match=named):
         plan(**changes)
+
+
+@pytest.mark.parametrize("name", ["entry", "stop", "target"])
+@pytest.mark.parametrize("value", [math.nan, math.inf, -math.inf])
+def test_a_price_that_is_not_a_number_is_refused(name: str, value: float) -> None:
+    with pytest.raises(PlanRefused, match=f"{name} must be a finite number"):
+        plan(**{name: value})
 
 
 def test_an_entry_exactly_1_atr_above_the_close_is_allowed() -> None:
