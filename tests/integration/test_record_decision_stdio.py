@@ -393,7 +393,9 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
     score_decisions (#121) appends score lines and never edits or removes one.
     get_performance (#122) reads the journal's scores; it joins as a read-only
     tool. get_analysis_procedure (#141) returns the procedure's text and
-    writes nothing; it joins as a read-only tool.
+    writes nothing; it joins as a read-only tool. get_risk_config (#149) reads
+    the operator's risk config and takes no arguments; it joins as a read-only
+    tool.
     """
     async with _server(seeded_assets) as client:
         tools = (await client.list_tools()).tools
@@ -410,6 +412,7 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
             "score_decisions",
             "get_performance",
             "get_analysis_procedure",
+            "get_risk_config",
         ]
     )
     record = next(tool for tool in tools if tool.name == "record_decision")

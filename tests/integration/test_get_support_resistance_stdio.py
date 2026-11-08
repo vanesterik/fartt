@@ -33,6 +33,7 @@ from fartt.journal import Journal
 from fartt.server import build_server
 from fartt.stock_cache import StockCache
 from tests.fakes import FakeProvider
+from tests.integration.risk import checked_in_risk_config, copy_risk_config
 from tests.integration.snapshot import OFFLINE, SNAPSHOT_NOW
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -110,7 +111,9 @@ async def _levels_in_memory(assets_dir: Path, ticker: str) -> dict[str, Any]:
     unreachable = FakeProvider({}, {}, now=SNAPSHOT_NOW)
     unreachable.reachable = False
     cache = StockCache(unreachable, assets_dir, clock=lambda: SNAPSHOT_NOW)
-    async with Client(build_server(cache, Journal(assets_dir / "journal"))) as client:
+    async with Client(
+        build_server(cache, Journal(assets_dir / "journal"), checked_in_risk_config())
+    ) as client:
         return await _call(client, "get_support_resistance", ticker=ticker)
 
 
@@ -143,8 +146,12 @@ def _cached(assets_dir: Path, ticker: str) -> list[dict[str, Any]]:
 
 
 def _cut_history(source: Path, target: Path, ticker: str, through: str) -> None:
-    """Copy a ticker's cache, keeping the sessions up to `through`."""
+    """
+    Copy a ticker's cache, keeping the sessions up to `through`, and the
+    checked-in risk config the server needs to start.
+    """
     shutil.copytree(source / "stocks" / ticker, target / "stocks" / ticker)
+    copy_risk_config(target)
     path = target / "stocks" / ticker / "candles.csv"
     header, *rows = path.read_text().splitlines(keepends=True)
     kept = [row for row in rows if row.split(",")[0] <= through]
@@ -388,10 +395,10 @@ async def test_should_serve_a_stale_cache_when_the_provider_is_unreachable(
 
 @pytest.mark.network
 async def test_should_say_what_to_do_for_a_ticker_it_cannot_serve(
-    tmp_path: Path,
+    empty_assets: Path,
 ) -> None:
     """@issue-109 @AC9 Should say what to do for a ticker it can't serve."""
-    async with _server(tmp_path, live=True) as client:
+    async with _server(empty_assets, live=True) as client:
         for ticker in ("ZZZQXQ", "VOD.L"):
             levels_error = await _error(client, "get_support_resistance", ticker=ticker)
             candles_error = await _error(client, "get_candles", ticker=ticker)

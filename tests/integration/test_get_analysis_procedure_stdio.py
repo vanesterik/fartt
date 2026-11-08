@@ -22,6 +22,7 @@ from mcp import Client, StdioServerParameters
 from mcp.shared.exceptions import MCPError
 from mcp.types import CallToolResult
 
+from tests.integration.risk import written
 from tests.integration.snapshot import OFFLINE
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -77,10 +78,10 @@ def _error_text(result: CallToolResult) -> str:
 
 class TestListing:
     async def test_tool_is_listed_with_one_required_ticker(
-        self, tmp_path: Path
+        self, empty_assets: Path
     ) -> None:
         """@issue-141 @AC1 Should list get_analysis_procedure, read-only, with one required ticker."""
-        async with _server(tmp_path) as client:
+        async with _server(empty_assets) as client:
             tools = {tool.name: tool for tool in (await client.list_tools()).tools}
 
         assert TOOL in tools
@@ -92,20 +93,20 @@ class TestListing:
         assert tool.annotations is not None
         assert tool.annotations.read_only_hint is True
 
-    async def test_missing_ticker_is_an_error(self, tmp_path: Path) -> None:
+    async def test_missing_ticker_is_an_error(self, empty_assets: Path) -> None:
         """@issue-141 @AC1 Should refuse a call without a ticker."""
-        async with _server(tmp_path) as client:
+        async with _server(empty_assets) as client:
             result = await client.call_tool(TOOL, {})
 
         assert result.is_error
         assert "ticker" in _error_text(result)
-        assert not any(tmp_path.iterdir())
+        assert written(empty_assets) == []
 
 
 class TestProcedure:
-    async def test_procedure_is_the_prompt_text(self, tmp_path: Path) -> None:
+    async def test_procedure_is_the_prompt_text(self, empty_assets: Path) -> None:
         """@issue-141 @AC2 @AC4 Should return the prompt's text for the normalised ticker, offline, writing nothing."""
-        async with _server(tmp_path) as client:
+        async with _server(empty_assets) as client:
             for given, normalised in ACCEPTED.items():
                 result = await client.call_tool(TOOL, {"ticker": given})
                 assert not result.is_error, (given, result.content)
@@ -116,14 +117,14 @@ class TestProcedure:
                 assert normalised in content["procedure"], given
 
         # Yahoo was out of reach and nothing was written: no journal, no stock.
-        assert not any(tmp_path.iterdir())
+        assert written(empty_assets) == []
 
     @pytest.mark.parametrize("ticker", REFUSED)
     async def test_refusal_matches_the_prompt(
-        self, tmp_path: Path, ticker: str
+        self, empty_assets: Path, ticker: str
     ) -> None:
         """@issue-141 @AC3 @AC4 Should refuse a ticker that can't be analysed with the prompt's message."""
-        async with _server(tmp_path) as client:
+        async with _server(empty_assets) as client:
             result = await client.call_tool(TOOL, {"ticker": ticker})
             with pytest.raises(MCPError) as refused:
                 await client.get_prompt(PROMPT, {"ticker": ticker})
@@ -134,13 +135,13 @@ class TestProcedure:
         # Ends in what a valid ticker looks like.
         assert "Give one stock in Yahoo's format" in prompt_message
         assert "ASML.AS" in prompt_message and "AAPL" in prompt_message
-        assert not any(tmp_path.iterdir())
+        assert written(empty_assets) == []
 
 
 class TestInstructions:
-    async def test_instructions_point_to_the_tool(self, tmp_path: Path) -> None:
+    async def test_instructions_point_to_the_tool(self, empty_assets: Path) -> None:
         """@issue-141 @AC5 Should tell the agent to call get_analysis_procedure before analysing, unless the prompt gave it."""
-        async with _server(tmp_path) as client:
+        async with _server(empty_assets) as client:
             instructions = client.instructions
 
         assert instructions is not None
