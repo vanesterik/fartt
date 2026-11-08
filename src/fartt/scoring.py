@@ -73,8 +73,8 @@ def score_call(
     benchmark_end_close = _close(BENCHMARK, benchmark, benchmark_end)
     start_rate = end_rate = None
     if rates is not None:
-        start_rate = _rate(decision.currency, rates, start)
-        end_rate = _rate(decision.currency, rates, end)
+        start_rate = rate_on(decision.currency, rates, start)
+        end_rate = rate_on(decision.currency, rates, end)
 
     paid = round(
         sum(d.amount for d in dividends if start < d.date <= end), PRICE_DECIMALS
@@ -114,7 +114,7 @@ def _close(ticker: str, candles: Sequence[Candle], day: date) -> float:
     )
 
 
-def _rate(currency: str, rates: Sequence[Candle], day: date) -> float:
+def rate_on(currency: str, rates: Sequence[Candle], day: date) -> float:
     """
     The rate's close on `day`, or the latest in the `RATE_LOOKBACK_DAYS`
     before it when Yahoo has none on the day, once the rate's candles have
