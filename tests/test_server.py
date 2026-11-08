@@ -314,6 +314,7 @@ async def test_the_tools_are_listed(tmp_path: Path) -> None:
         "plan_trade",
         "record_decision",
         "score_decisions",
+        "settle_positions",
     ]
 
 

@@ -1,6 +1,6 @@
 import os
 import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Annotated, Literal, NamedTuple
@@ -20,6 +20,7 @@ from fartt.data import (
     Dividend,
     Listing,
     ProviderUnavailable,
+    Split,
     UnknownTicker,
     UnsupportedExchange,
     YFinanceProvider,
@@ -38,6 +39,10 @@ from fartt.journal import (
     Decision,
     DecisionDraft,
     Direction,
+    Exit,
+    ExitReason,
+    Expiry,
+    Fill,
     Journal,
     Score,
     Signal,
@@ -50,6 +55,7 @@ from fartt.performance import (
     TickerPerformance,
     calculate_performance,
 )
+from fartt.positions import Blocked, order_window, settle_plan
 from fartt.procedure import analysis_prompt
 from fartt.risk_config import (
     RISK_FILE,
@@ -79,6 +85,7 @@ from fartt.technical import (
 from fartt.trade_plan import (
     DEFAULT_VALID_FOR,
     MAX_VALID_FOR,
+    LegCosts,
     PlanRefused,
     PlanSummary,
     TradePlan,
@@ -144,7 +151,10 @@ INSTRUCTIONS = (
     "analyze_ticker prompt already gave you the procedure. "
     "The risk limits and trading costs are the operator's: read them with "
     "get_risk_config; you can't change them. plan_trade sizes a buy against "
-    "them after costs, and record_decision takes the plan with the buy."
+    "them after costs, and record_decision takes the plan with the buy. "
+    "At the daily check-in, call settle_positions, before reading the "
+    "portfolio: it paper trades the recorded plans on the closed daily "
+    "candles, filling, closing and expiring them."
 )
 
 # What a ticker the analyze_ticker prompt accepts looks like, closing every
@@ -469,6 +479,107 @@ class ScoreResult(BaseModel):
     )
 
 
+class FilledPosition(BaseModel):
+    """A plan whose limit buy this run filled."""
+
+    id: int = Field(description="The call's id.")
+    ticker: str = Field(description="The stock.")
+    session: date = Field(description="The session it filled on.")
+    price: float = Field(description="The fill price, in the stock's currency.")
+    at_open: bool = Field(description="True when filled at the session's open.")
+    shares: int = Field(description="The plan's shares.")
+    rate: float | None = Field(description="The session's EUR rate; null for EUR.")
+    value: float = Field(description="shares × price, in EUR.")
+    costs: LegCosts = Field(description="The buy leg's costs, itemised, in EUR.")
+
+
+class ExpiredOrder(BaseModel):
+    """A plan whose limit buy this run expired unfilled."""
+
+    id: int = Field(description="The call's id.")
+    ticker: str = Field(description="The stock.")
+    session: date = Field(description="The window's last session.")
+
+
+class ClosedPosition(BaseModel):
+    """A position this run closed."""
+
+    id: int = Field(description="The call's id.")
+    ticker: str = Field(description="The stock.")
+    session: date = Field(description="The session it closed on.")
+    reason: ExitReason = Field(description="stop, target or horizon.")
+    price: float = Field(description="The exit price, in the stock's currency.")
+    at_open: bool = Field(description="True when closed at the session's open.")
+    slippage: float = Field(
+        description="How far below the stop a gap closed it; else 0."
+    )
+    rate: float | None = Field(description="The session's EUR rate; null for EUR.")
+    value: float = Field(description="shares × price, in EUR.")
+    costs: LegCosts = Field(description="The sell leg's costs, itemised, in EUR.")
+    dividends: float = Field(description="Dividends while held, gross, in EUR.")
+    pnl: float = Field(description="The realised P&L after both legs' costs, in EUR.")
+
+
+class OpenPosition(BaseModel):
+    """A filled position still running."""
+
+    id: int = Field(description="The call's id.")
+    ticker: str = Field(description="The stock.")
+    since: date = Field(description="The session it filled on.")
+    stop: float = Field(description="The plan's stop.")
+    target: float = Field(description="The plan's target.")
+    horizon_ends: date = Field(
+        description="The session it closes on at the latest, at its close."
+    )
+
+
+class WaitingOrder(BaseModel):
+    """A limit buy still live, not filled."""
+
+    id: int = Field(description="The call's id.")
+    ticker: str = Field(description="The stock.")
+    entry: float = Field(description="The limit price.")
+    until: date = Field(description="The window's last session.")
+
+
+class NotSettled(BaseModel):
+    """A plan that couldn't advance as far as the closed sessions go."""
+
+    id: int = Field(description="The call's id.")
+    ticker: str = Field(description="The stock.")
+    reason: str = Field(
+        description="What's missing; a later run settles it once it's there."
+    )
+
+
+class SettleResult(BaseModel):
+    filled: list[FilledPosition] = Field(
+        description=f"The orders this run filled, oldest call first, at most {MAX_SCORED}."
+    )
+    expired: list[ExpiredOrder] = Field(
+        description=f"The orders this run expired, at most {MAX_SCORED}."
+    )
+    closed: list[ClosedPosition] = Field(
+        description=f"The positions this run closed, at most {MAX_SCORED}."
+    )
+    open: list[OpenPosition] = Field(
+        description=f"The positions still open, at most {MAX_SCORED}."
+    )
+    waiting: list[WaitingOrder] = Field(
+        description=f"The orders still waiting for their entry, at most {MAX_SCORED}."
+    )
+    not_settled: list[NotSettled] = Field(
+        description=(
+            "Plans that couldn't be settled as far as the closed sessions go, "
+            f"each with the reason, at most {MAX_SCORED}."
+        )
+    )
+    note: str | None = Field(
+        default=None,
+        description="Why there was nothing to settle, or what the lists leave out.",
+    )
+
+
 BASIS = (
     "These are calls, not trades: each return is in EUR against IWDA.AS, "
     "without costs or position sizes. Calls whose horizons overlap aren't "
@@ -684,6 +795,25 @@ def _score_note(
     return " ".join(notes) or None
 
 
+def _settle_note(
+    plans: int, closed: int, expired: int, cut: Mapping[str, int]
+) -> str | None:
+    notes: list[str] = []
+    if not plans:
+        notes.append("No call has a trade plan to settle.")
+    elif closed + expired == plans:
+        notes.append(
+            f"No plan is waiting or open: {closed} closed, {expired} expired. "
+            "Nothing to settle."
+        )
+    notes.extend(
+        f"Showing the first {MAX_SCORED} of {MAX_SCORED + more} {name}."
+        for name, more in cut.items()
+        if more
+    )
+    return " ".join(notes) or None
+
+
 def _rounded(value: float | None, decimals: int = DECIMALS) -> float | None:
     return round(value, decimals) if value is not None else None
 
@@ -748,6 +878,66 @@ def _update(
         return ticker, None
     except CACHE_ERRORS as error:
         raise _cache_error(tool, ticker, error) from error
+
+
+def _update_all(
+    tool: str, cache: StockCache, tickers: Iterable[str]
+) -> tuple[set[str], dict[str, str]]:
+    """
+    Bring each ticker up to date: the ones the provider couldn't reach, and
+    why each ticker it can't serve at all can't be used. A cache it can't
+    read or write is a ToolError.
+
+    """
+    unreachable: set[str] = set()
+    unlisted: dict[str, str] = {}
+    for ticker in tickers:
+        try:
+            cache.update(ticker)
+        except ProviderUnavailable as error:
+            logger.warning(f"{tool} {ticker}: {error}")
+            unreachable.add(ticker)
+        except UnknownTicker:
+            unlisted[ticker] = f"Yahoo no longer lists {ticker}"
+        except NoHistory:
+            unlisted[ticker] = f"Yahoo has no daily history for {ticker}"
+        except UnsupportedExchange as error:
+            unlisted[ticker] = str(error)
+        except CACHE_ERRORS as error:
+            raise _cache_error(tool, ticker, error) from error
+    return unreachable, unlisted
+
+
+class _CachedReader:
+    """Each ticker's cached candles and events, read once per run."""
+
+    def __init__(self, tool: str, cache: StockCache) -> None:
+        self.tool = tool
+        self.cache = cache
+        self.read: dict[str, list[Candle]] = {}
+        self.events: dict[str, tuple[list[Dividend], list[Split]]] = {}
+
+    def candles(self, ticker: str) -> list[Candle]:
+        if ticker not in self.read:
+            try:
+                self.read[ticker] = self.cache.latest(ticker, sys.maxsize)
+            except CACHE_ERRORS as error:
+                raise _cache_error(self.tool, ticker, error) from error
+        return self.read[ticker]
+
+    def dividends(self, ticker: str) -> list[Dividend]:
+        return self._events(ticker)[0]
+
+    def splits(self, ticker: str) -> list[Split]:
+        return self._events(ticker)[1]
+
+    def _events(self, ticker: str) -> tuple[list[Dividend], list[Split]]:
+        if ticker not in self.events:
+            try:
+                self.events[ticker] = self.cache.events(ticker)
+            except CACHE_ERRORS as error:
+                raise _cache_error(self.tool, ticker, error) from error
+        return self.events[ticker]
 
 
 def _no_history_error(listing: Listing, newest: date) -> ToolError:
@@ -1643,42 +1833,10 @@ def build_server(
             for ticker in (decision.ticker, BENCHMARK, fx_pair(decision.currency))
             if ticker is not None
         )
-        unreachable: set[str] = set()
-        unlisted: dict[str, str] = {}
-        for ticker in needed:
-            try:
-                cache.update(ticker)
-            except ProviderUnavailable as error:
-                logger.warning(f"score_decisions {ticker}: {error}")
-                unreachable.add(ticker)
-            except UnknownTicker:
-                unlisted[ticker] = f"Yahoo no longer lists {ticker}"
-            except NoHistory:
-                unlisted[ticker] = f"Yahoo has no daily history for {ticker}"
-            except UnsupportedExchange as error:
-                unlisted[ticker] = str(error)
-            except CACHE_ERRORS as error:
-                raise _cache_error("score_decisions", ticker, error) from error
-
+        unreachable, unlisted = _update_all("score_decisions", cache, needed)
         # Each ticker's candles and dividends are read once per run too.
-        read: dict[str, list[Candle]] = {}
-        paid: dict[str, list[Dividend]] = {}
-
-        def candles(ticker: str) -> list[Candle]:
-            if ticker not in read:
-                try:
-                    read[ticker] = cache.latest(ticker, sys.maxsize)
-                except CACHE_ERRORS as error:
-                    raise _cache_error("score_decisions", ticker, error) from error
-            return read[ticker]
-
-        def dividends(ticker: str) -> list[Dividend]:
-            if ticker not in paid:
-                try:
-                    paid[ticker], _ = cache.events(ticker)
-                except CACHE_ERRORS as error:
-                    raise _cache_error("score_decisions", ticker, error) from error
-            return paid[ticker]
+        reader = _CachedReader("score_decisions", cache)
+        candles, dividends = reader.candles, reader.dividends
 
         scored: list[ScoredCall] = []
         not_scored: list[NotScoredCall] = []
@@ -1755,6 +1913,188 @@ def build_server(
                 running,
                 max(len(scored) - MAX_SCORED, 0),
                 max(len(not_scored) - MAX_SCORED, 0),
+            ),
+        )
+
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        )
+    )
+    def settle_positions() -> SettleResult:
+        """
+        Paper trade every recorded plan on the closed daily candles, at the
+        daily check-in, and store what happened in the journal. A plan is a
+        limit buy at its entry, live for valid_for sessions after the plan's
+        session (never past the call's horizon): the first session whose low
+        reaches the entry fills it, at the open when the session opened
+        below it. A position closes at its stop (at the open when it gapped
+        below, with the slippage), at its target (at the open when it gapped
+        above; a session reaching both counts as the stop), or at the close
+        of the call's horizon_ends. Each leg pays its costs and converts at
+        its own session's EUR rate, so a US leg settles the day after its
+        session. A fill, expiry or exit is stored once; a plan that can't
+        advance yet is listed with the reason, for a later run.
+        """
+        try:
+            decisions = journal.decisions()
+            fills, expiries, exits = journal.positions()
+        except CACHE_ERRORS as error:
+            raise _journal_unreadable(
+                "settle_positions", journal.path, error
+            ) from error
+
+        planned = [d for d in decisions if d.plan is not None]
+        running = [d for d in planned if d.id not in exits and d.id not in expiries]
+        needed = dict.fromkeys(
+            ticker
+            for decision in running
+            for ticker in (decision.ticker, fx_pair(decision.currency))
+            if ticker is not None
+        )
+        unreachable, unlisted = _update_all("settle_positions", cache, needed)
+        reader = _CachedReader("settle_positions", cache)
+
+        now = cache.clock()
+        settled_at = now.replace(microsecond=0)
+        filled: list[FilledPosition] = []
+        expired: list[ExpiredOrder] = []
+        closed: list[ClosedPosition] = []
+        still_open: list[OpenPosition] = []
+        waiting: list[WaitingOrder] = []
+        not_settled: list[NotSettled] = []
+
+        def store[L: (Fill, Expiry, Exit)](
+            append: Callable[[L], L | None], line: L
+        ) -> bool:
+            """Write `line`; False when another run wrote it in the meantime."""
+            try:
+                return append(line) is not None
+            except CACHE_ERRORS as error:
+                logger.error(f"settle_positions #{line.decision_id}: {error}")
+                raise ToolError(
+                    f"The journal at {journal.path} can't be read or written: "
+                    f"{error}. Lines stored before this call stay stored. The "
+                    "operator must fix the file; the server never rewrites it."
+                ) from error
+
+        for decision in running:
+            plan = decision.plan
+            assert plan is not None
+            fill = fills.get(decision.id)
+            pair = fx_pair(decision.currency)
+            tickers = [decision.ticker] + ([pair] if pair else [])
+            reason = next((unlisted[t] for t in tickers if t in unlisted), None)
+            blocked = Blocked(decision.ticker, reason) if reason else None
+            if blocked is None:
+                result = settle_plan(
+                    decision,
+                    plan,
+                    fill,
+                    reader.candles(decision.ticker),
+                    reader.dividends(decision.ticker),
+                    reader.splits(decision.ticker),
+                    reader.candles(pair) if pair else None,
+                    risk_config.costs,
+                    newest_closed_session(decision.exchange, now),
+                    settled_at,
+                )
+                blocked = result.blocked
+                if result.fill is not None:
+                    fill = result.fill
+                    if store(journal.append_fill, result.fill):
+                        filled.append(
+                            FilledPosition(
+                                id=decision.id,
+                                ticker=decision.ticker,
+                                **result.fill.model_dump(
+                                    exclude={"decision_id", "settled_at"}
+                                ),
+                            )
+                        )
+                if result.expiry is not None:
+                    if store(journal.append_expiry, result.expiry):
+                        expired.append(
+                            ExpiredOrder(
+                                id=decision.id,
+                                ticker=decision.ticker,
+                                session=result.expiry.session,
+                            )
+                        )
+                    continue
+                if result.exit is not None:
+                    if store(journal.append_exit, result.exit):
+                        closed.append(
+                            ClosedPosition(
+                                id=decision.id,
+                                ticker=decision.ticker,
+                                **result.exit.model_dump(
+                                    exclude={"decision_id", "settled_at"}
+                                ),
+                            )
+                        )
+                    continue
+            if blocked is not None:
+                reason = blocked.reason
+                if blocked.ticker in unreachable:
+                    reason += " (the provider is unreachable)"
+                logger.warning(
+                    f"settle_positions #{decision.id} {decision.ticker}: {reason}"
+                )
+                not_settled.append(
+                    NotSettled(id=decision.id, ticker=decision.ticker, reason=reason)
+                )
+            elif fill is not None:
+                still_open.append(
+                    OpenPosition(
+                        id=decision.id,
+                        ticker=decision.ticker,
+                        since=fill.session,
+                        stop=plan.stop,
+                        target=plan.target,
+                        horizon_ends=decision.horizon_ends,
+                    )
+                )
+            else:
+                waiting.append(
+                    WaitingOrder(
+                        id=decision.id,
+                        ticker=decision.ticker,
+                        entry=plan.entry,
+                        until=order_window(decision, plan)[1],
+                    )
+                )
+
+        lists = {
+            "filled": filled,
+            "expired": expired,
+            "closed": closed,
+            "open positions": still_open,
+            "waiting orders": waiting,
+            "plans not settled": not_settled,
+        }
+        logger.info(
+            "settle_positions: "
+            + ", ".join(f"{len(items)} {name}" for name, items in lists.items())
+        )
+        return SettleResult(
+            filled=filled[:MAX_SCORED],
+            expired=expired[:MAX_SCORED],
+            closed=closed[:MAX_SCORED],
+            open=still_open[:MAX_SCORED],
+            waiting=waiting[:MAX_SCORED],
+            not_settled=not_settled[:MAX_SCORED],
+            note=_settle_note(
+                len(planned),
+                len(exits) + len(closed),
+                len(expiries) + len(expired),
+                {
+                    name: max(len(items) - MAX_SCORED, 0)
+                    for name, items in lists.items()
+                },
             ),
         )
 
