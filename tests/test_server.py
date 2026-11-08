@@ -317,6 +317,7 @@ async def test_the_tools_are_listed(tmp_path: Path) -> None:
         "get_decisions",
         "get_indicators",
         "get_performance",
+        "get_portfolio",
         "get_quote",
         "get_risk_config",
         "get_support_resistance",
