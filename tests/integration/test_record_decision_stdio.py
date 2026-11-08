@@ -50,9 +50,11 @@ SIGNALS = [
     {"name": "trend", "stance": "for", "note": "daily and weekly up"},
     {"name": "rsi", "stance": "against"},
 ]
+# A pass: since #148 a buy needs a plan, which the plan stories' tests cover;
+# these tests are about the journal, which a pass exercises the same way.
 CALL: dict[str, Any] = {
     "ticker": "ASML.AS",
-    "direction": "buy",
+    "direction": "pass",
     "horizon": 20,
     "reasoning": "Trend up on both timeframes; RSI stretched.",
     "signals": SIGNALS,
@@ -155,7 +157,7 @@ async def test_should_return_the_stored_entry(seeded_assets: Path) -> None:
         "EUR",
         "XAMS",
     )
-    assert (entry["direction"], entry["horizon"]) == ("buy", 20)
+    assert (entry["direction"], entry["horizon"]) == ("pass", 20)
     assert entry["reasoning"] == CALL["reasoning"]
     assert [(s["name"], s["stance"]) for s in entry["signals"]] == [
         ("trend", "for"),
@@ -399,6 +401,8 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
     joins as a tool that writes no entry. settle_positions (#144) appends
     fill, expiry and exit lines and never edits or removes one. get_portfolio
     (#145) settles as settle_positions does and otherwise only reads.
+    get_checkin_procedure (#148) returns the check-in's text and writes
+    nothing; it joins as a read-only tool.
     """
     async with _server(seeded_assets) as client:
         tools = (await client.list_tools()).tools
@@ -419,6 +423,7 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
             "plan_trade",
             "settle_positions",
             "get_portfolio",
+            "get_checkin_procedure",
         ]
     )
     record = next(tool for tool in tools if tool.name == "record_decision")

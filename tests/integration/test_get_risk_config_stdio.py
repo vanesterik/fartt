@@ -116,6 +116,7 @@ OTHER_CALLS: list[tuple[str, dict[str, Any]]] = [
     ),
     ("settle_positions", {}),
     ("get_portfolio", {}),
+    ("get_checkin_procedure", {}),
 ]
 
 INITIALIZE = (

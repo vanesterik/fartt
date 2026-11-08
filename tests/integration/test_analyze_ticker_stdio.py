@@ -58,8 +58,8 @@ SKIPPED = {
     "sector selection": "F",
     "screening": "G",
     "fundamental analysis": "G",
-    "trade plan and risk": "H",
 }
+# Steps 6 and 7 name their tools since #148 (test_procedure_148_stdio.py).
 SIGNALS = [
     "trend",
     "support_resistance",

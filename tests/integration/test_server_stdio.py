@@ -42,8 +42,9 @@ EXPECTED_TOOLS = [
     "plan_trade",
     "settle_positions",
     "get_portfolio",
+    "get_checkin_procedure",
 ]
-EXPECTED_PROMPTS = ["analyze_ticker"]
+EXPECTED_PROMPTS = ["analyze_ticker", "daily_checkin"]
 # Per response; also the MCP client's read timeout, which defaults to none.
 RESPONSE_TIMEOUT_S = 120
 
@@ -95,6 +96,16 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
             "procedure": analysis.messages[0].content.text,
         }
 
+        # @issue-148 @AC5
+        checkin = await client.get_prompt("daily_checkin", {})
+        assert len(checkin.messages) == 1
+        assert checkin.messages[0].content.type == "text"
+        checkin_procedure = await client.call_tool("get_checkin_procedure", {})
+        assert not checkin_procedure.is_error, checkin_procedure.content
+        assert checkin_procedure.structured_content == {
+            "procedure": checkin.messages[0].content.text
+        }
+
         candles = await client.call_tool(
             "get_candles", {"ticker": "ASML.AS", "count": 5}
         )
@@ -135,15 +146,15 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
         assert zones["support"] or zones["resistance"]
         assert len(json.dumps(zones)) < 3500
 
-        # @issue-119 @AC9
+        # @issue-119 @AC9 (a pass: a buy needs a plan since #148)
         decision = await client.call_tool(
             "record_decision",
             {
                 "ticker": "ASML.AS",
-                "direction": "buy",
+                "direction": "pass",
                 "horizon": 20,
                 "reasoning": "Integration check over stdio.",
-                "signals": [{"name": "trend", "stance": "for"}],
+                "signals": [{"name": "trend", "stance": "against"}],
             },
         )
         assert not decision.is_error, decision.content
@@ -347,7 +358,7 @@ def _check_stdout(
     assert set(responses) == {1, 2, 3, 4, 5}
     assert "error" not in responses[3]
     assert responses[3]["result"].get("isError") is not True
-    # @issue-131 @AC10
+    # @issue-131 @AC10 @issue-148 @AC5
     assert [p["name"] for p in responses[4]["result"]["prompts"]] == EXPECTED_PROMPTS
     assert "error" not in responses[5]
     assert len(responses[5]["result"]["messages"]) == 1
