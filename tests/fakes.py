@@ -20,6 +20,7 @@ from fartt.journal import (
     Expiry,
     Fill,
     Leg,
+    Reset,
     Score,
     Signal,
 )
@@ -214,3 +215,17 @@ def exit_line(decision_id: int, **changes: Any) -> Exit:
         "pnl": -47.2,
     }
     return Exit(**(fields | changes))
+
+
+def reset_line(**changes: Any) -> Reset:
+    """A reset after 2026-11-05's close, of a switch that tripped on 2026-11-03."""
+    fields: dict[str, Any] = {
+        "reset_at": datetime(2026, 11, 5, 22, 0, tzinfo=UTC),
+        "session": date(2026, 11, 5),
+        "total_value": 8300.0,
+        "peak": 10000.0,
+        "drawdown": 0.17,
+        "tripped_on": date(2026, 11, 3),
+        "note": "gap on ASML",
+    }
+    return Reset(**(fields | changes))
