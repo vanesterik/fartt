@@ -3,8 +3,15 @@ from datetime import date
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
-from fartt.trade_plan import PlanRefused, TradePlan, calculate_plan, leg_costs
+from fartt.trade_plan import (
+    LegCosts,
+    PlanRefused,
+    TradePlan,
+    calculate_plan,
+    leg_costs,
+)
 from tests.fakes import RISK_CONFIG
 
 COSTS = RISK_CONFIG.costs
@@ -289,6 +296,30 @@ def test_prices_that_do_not_make_a_long_plan_are_refused(
 def test_a_price_that_is_not_a_number_is_refused(name: str, value: float) -> None:
     with pytest.raises(PlanRefused, match=f"{name} must be a finite number"):
         plan(**{name: value})
+
+
+@pytest.mark.parametrize("target", [1e308, 1.7e308])
+def test_a_target_too_large_to_work_out_is_refused(target: float) -> None:
+    # Finite, but the amounts at it overflow to infinity and NaN.
+    with pytest.raises(PlanRefused, match=r"target \(.*\) is too large"):
+        plan(target=target)
+
+
+@pytest.mark.parametrize("field", ["reward", "risk", "reward_to_risk"])
+@pytest.mark.parametrize("value", [math.nan, math.inf])
+def test_a_plan_with_an_amount_that_is_not_a_number_is_invalid(
+    field: str, value: float
+) -> None:
+    with pytest.raises(ValidationError):
+        TradePlan.model_validate(plan().model_dump() | {field: value})
+
+
+@pytest.mark.parametrize("value", [math.nan, math.inf])
+def test_leg_costs_that_are_not_a_number_are_invalid(value: float) -> None:
+    leg = plan().costs.sell_at_target.model_dump()
+
+    with pytest.raises(ValidationError):
+        LegCosts.model_validate(leg | {"total": value})
 
 
 def test_an_entry_exactly_1_atr_above_the_close_is_allowed() -> None:

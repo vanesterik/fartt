@@ -20,7 +20,7 @@ from collections.abc import Callable
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from fartt.risk_config import Costs, ExchangeCosts, Limits
 
@@ -45,6 +45,9 @@ class PlanRefused(ValueError):
 
 class LegCosts(BaseModel):
     """What one trade costs, in EUR, each to the cent."""
+
+    # The journal can't hold a NaN or infinity its readers could return.
+    model_config = ConfigDict(allow_inf_nan=False)
 
     commission: float = Field(description="The broker's commission.")
     slippage: float = Field(description="The assumed slippage on the fill.")
@@ -76,6 +79,8 @@ class Tariff(BaseModel):
 
 
 class TradePlan(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False)
+
     ticker: str = Field(description="The ticker, in Yahoo's format.")
     currency: str = Field(description="The currency the prices are in.")
     exchange: str = Field(description="The exchange's calendar code, e.g. XAMS.")
@@ -218,6 +223,15 @@ def _check_prices(
     return atr
 
 
+def _check_finite_at(target: float, *amounts: float) -> None:
+    """`PlanRefused` unless every amount worked out at `target` is finite."""
+    if not all(math.isfinite(amount) for amount in amounts):
+        raise PlanRefused(
+            f"The target ({target}) is too large: the plan's amounts at it "
+            "aren't finite numbers. Set the target where the price can go."
+        )
+
+
 def _largest(fits: Callable[[int], bool], high: int) -> int:
     """The largest `n` in 0..`high` with `fits(n)`, for `fits` true up to a point."""
     low = 0
@@ -301,9 +315,15 @@ def calculate_plan(
 
     buy = leg(entry, shares, "buy")
     at_stop = leg(stop, shares, "sell")
+    # The entry and stop are bounded by the last close; a finite target near
+    # the float maximum isn't, and its amounts overflow to infinity and NaN,
+    # which would pass the comparison below unnoticed.
+    _check_finite_at(target, shares * target / r)
     at_target = leg(target, shares, "sell")
     loss = _cents(shares * (entry - stop) / r + buy.total + at_stop.total)
     gain = _cents(shares * (target - entry) / r - buy.total - at_target.total)
+    before_costs = (target - entry) / (entry - stop)
+    _check_finite_at(target, gain, gain / loss, before_costs)
     # Compared unrounded: the limit is the operator's, rounding is for display.
     # The refusal shows more decimals, so a ratio just short doesn't read as
     # the limit itself.
@@ -339,9 +359,7 @@ def calculate_plan(
         risk_share=round(loss / portfolio_value, SHARE_DECIMALS),
         reward=gain,
         reward_to_risk=round(ratio, SHARE_DECIMALS),
-        reward_to_risk_before_costs=round(
-            (target - entry) / (entry - stop), SHARE_DECIMALS
-        ),
+        reward_to_risk_before_costs=round(before_costs, SHARE_DECIMALS),
         sized_by=sized_by,
         costs=PlanCosts(buy=buy, sell_at_stop=at_stop, sell_at_target=at_target),
         limits=limits,

@@ -181,6 +181,17 @@ async def test_a_target_that_is_not_a_number_is_refused(
 
 
 @pytest.mark.anyio
+async def test_a_target_too_large_to_work_out_is_refused(tmp_path: Path) -> None:
+    # @AC6
+    cache = cache_for(provider(), tmp_path)
+
+    result = await plan_trade(cache, target=1e308)
+
+    assert result.is_error
+    assert "target (1e+308) is too large" in result.content[0].text
+
+
+@pytest.mark.anyio
 async def test_a_ticker_without_its_newest_close_is_refused(tmp_path: Path) -> None:
     # @AC7
     cache = cache_for(provider(asml_last=date(2026, 10, 28)), tmp_path)
@@ -290,6 +301,20 @@ async def test_a_buy_whose_target_is_not_a_number_records_nothing(
 
     assert result.is_error
     assert "target must be a finite number" in result.content[0].text
+    assert not journal_of(cache).path.exists()
+
+
+@pytest.mark.anyio
+async def test_a_buy_whose_target_is_too_large_records_nothing(
+    tmp_path: Path,
+) -> None:
+    # @AC8
+    cache = cache_for(provider(), tmp_path)
+
+    result = await record(cache, plan=PLAN | {"target": 1e308})
+
+    assert result.is_error
+    assert "target (1e+308) is too large" in result.content[0].text
     assert not journal_of(cache).path.exists()
 
 
