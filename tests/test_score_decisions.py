@@ -11,7 +11,7 @@ from fartt.journal import BenchmarkClose, DecisionDraft, Journal, Score
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
-from tests.fakes import FakeProvider, decision_draft
+from tests.fakes import RISK_CONFIG, FakeProvider, decision_draft
 from tests.test_server import (
     AAPL,
     AFTER_CLOSE,
@@ -398,7 +398,7 @@ async def test_a_score_written_by_another_run_counts_as_already_scored(
     seed(cache, past_call())
     journal = RacedJournal(journal_of(cache).directory)
 
-    async with Client(build_server(cache, journal)) as client:
+    async with Client(build_server(cache, journal, RISK_CONFIG)) as client:
         result = await client.call_tool("score_decisions", {})
 
     assert result.structured_content["scored"] == []

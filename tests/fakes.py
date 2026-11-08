@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from pathlib import Path
 from typing import Any
 
 from fartt.data import (
@@ -18,6 +19,12 @@ from fartt.journal import (
     Leg,
     Score,
     Signal,
+)
+from fartt.risk_config import RISK_FILE, load_risk_config
+
+# The checked-in risk config, which every server under test is built on.
+RISK_CONFIG = load_risk_config(
+    Path(__file__).resolve().parents[1] / "assets" / RISK_FILE
 )
 
 

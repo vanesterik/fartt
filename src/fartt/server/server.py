@@ -51,6 +51,15 @@ from fartt.performance import (
     calculate_performance,
 )
 from fartt.procedure import analysis_prompt
+from fartt.risk_config import (
+    RISK_FILE,
+    Costs,
+    ExchangeCosts,
+    Limits,
+    RiskConfig,
+    RiskConfigError,
+    load_risk_config,
+)
 from fartt.scoring import RATE_DECIMALS, Unscorable, score_call
 from fartt.stock_cache import NoHistory, StockCache, UpdateResult
 from fartt.technical import (
@@ -118,7 +127,9 @@ INSTRUCTIONS = (
     "calls, not trades: no costs or position sizes. Before analysing a "
     "ticker, call get_analysis_procedure with it, first, and follow what it "
     "returns step by step, ending in a call; skip that only when the "
-    "analyze_ticker prompt already gave you the procedure."
+    "analyze_ticker prompt already gave you the procedure. "
+    "The risk limits and trading costs are the operator's: read them with "
+    "get_risk_config; you can't change them."
 )
 
 # What a ticker the analyze_ticker prompt accepts looks like, closing every
@@ -497,6 +508,47 @@ class ProcedureResult(BaseModel):
     )
 
 
+class ExchangeCostsResult(ExchangeCosts):
+    suffixes: list[str] = Field(
+        description="The ticker suffixes on this exchange's calendar ('' is no suffix)."
+    )
+
+
+class CostsResult(BaseModel):
+    tariff: str
+    currency_conversion: float
+    slippage_per_leg: float
+    exchanges: dict[str, ExchangeCostsResult]
+
+
+class RiskConfigResult(BaseModel):
+    source: str = Field(description="The file the server read them from.")
+    limits: Limits
+    costs: CostsResult
+
+
+def _risk_config_result(config: RiskConfig) -> RiskConfigResult:
+    """The config with each exchange's suffixes, in the universe's order."""
+    costs: Costs = config.costs
+    exchanges = {
+        code: ExchangeCostsResult(
+            **costs.exchanges[code].model_dump(),
+            suffixes=[s for s, c in SUFFIX_CALENDARS.items() if c == code],
+        )
+        for code in dict.fromkeys(SUFFIX_CALENDARS.values())
+    }
+    return RiskConfigResult(
+        source=str(config.source),
+        limits=config.limits,
+        costs=CostsResult(
+            tariff=costs.tariff,
+            currency_conversion=costs.currency_conversion,
+            slippage_per_leg=costs.slippage_per_leg,
+            exchanges=exchanges,
+        ),
+    )
+
+
 def _performance_note(scored: int, due: int, more_tickers: int) -> str | None:
     notes: list[str] = []
     if not scored:
@@ -785,11 +837,14 @@ def _prompt_ticker(ticker: str) -> str:
         raise MCPError(INVALID_PARAMS, str(error)) from error
 
 
-def build_server(cache: StockCache, journal: Journal) -> MCPServer:
+def build_server(
+    cache: StockCache, journal: Journal, risk_config: RiskConfig
+) -> MCPServer:
     """
     Build the MCP server on `cache`, which also supplies the provider (for
     quotes) and the clock (for market hours and the time a call is
-    recorded), and `journal`, where calls are recorded.
+    recorded), `journal`, where calls are recorded, and `risk_config`, the
+    operator's limits and costs, read once at start.
 
     A factory rather than a module-level server, so tests can pass a cache
     over an in-memory provider and connect with the SDK's in-memory client.
@@ -1490,6 +1545,19 @@ def build_server(cache: StockCache, journal: Journal) -> MCPServer:
         logger.info(f"get_analysis_procedure {normalised}")
         return ProcedureResult(ticker=normalised, procedure=analysis_prompt(normalised))
 
+    @server.tool(
+        annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False)
+    )
+    def get_risk_config() -> RiskConfigResult:
+        """
+        Return the operator's risk limits and trading costs, as the server
+        read them from its config file at start: every trade plan is held to
+        them. Fractions throughout (0.02 means 2%). Only the operator can
+        change them, in the file, and a change takes effect on restart.
+        """
+        logger.info(f"get_risk_config from {risk_config.source}")
+        return _risk_config_result(risk_config)
+
     @server.prompt(
         name="analyze_ticker",
         title="Analyse a ticker",
@@ -1542,8 +1610,13 @@ def main() -> None:
     )
     assets_dir = ROOT / setting if setting else DEFAULT_ASSETS_DIR
     clock = _clock()
+    try:
+        risk_config = load_risk_config(assets_dir / RISK_FILE)
+    except RiskConfigError as error:
+        raise SystemExit(str(error)) from error
     logger.info(f"Serving stocks cached in {assets_dir} over stdio")
     build_server(
         StockCache(YFinanceProvider(clock=clock), assets_dir, clock=clock),
         Journal(assets_dir / "journal"),
+        risk_config,
     ).run()
