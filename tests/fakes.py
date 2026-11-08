@@ -20,6 +20,7 @@ from fartt.journal import (
     Expiry,
     Fill,
     Leg,
+    PlanScore,
     Reset,
     Score,
     Signal,
@@ -229,3 +230,24 @@ def reset_line(**changes: Any) -> Reset:
         "note": "gap on ASML",
     }
     return Reset(**(fields | changes))
+
+
+def plan_score_line(decision_id: int, **changes: Any) -> PlanScore:
+    """A score of call `decision_id`'s position, stopped out on 2026-11-02."""
+    fields: dict[str, Any] = {
+        "decision_id": decision_id,
+        "scored_at": datetime(2026, 11, 3, 9, 0, tzinfo=UTC),
+        "return_": -0.03924,
+        "benchmark": BenchmarkScore(
+            ticker="IWDA.AS",
+            start=Leg(session=date(2026, 10, 29), close=101.25),
+            end=Leg(session=date(2026, 11, 2), close=102.0),
+            return_=0.007407,
+        ),
+        "excess_return": -0.046647,
+        "hit": False,
+        "realised_r": -0.988,
+        "reason": "stop",
+        "holding_sessions": 2,
+    }
+    return PlanScore(**(fields | changes))

@@ -20,6 +20,9 @@ fills, then a `"kind": "exit"` line when the position closes, or a
 is written at most once; an expiry never goes with a fill, and an exit only
 follows a fill. A line breaking these rules is a damaged line.
 
+A closed position's score is a line with `"kind": "plan_score"` and its
+`decision_id`, written once, after the call's exit line.
+
 The operator resets a tripped kill switch with a `"kind": "reset"` line
 (`task reset-kill-switch`); the latest one counts. `kind` lets later
 stories add their own lines to the same file without rewriting one;
@@ -67,6 +70,7 @@ FILL = "fill"
 EXPIRY = "expiry"
 EXIT = "exit"
 RESET = "reset"
+PLAN_SCORE = "plan_score"
 
 ExitReason = Literal["stop", "target", "horizon"]
 
@@ -197,6 +201,41 @@ class Score(BaseModel):
     )
 
 
+class PlanScore(BaseModel):
+    """How a closed position did, in EUR after costs, against the benchmark."""
+
+    model_config = ConfigDict(populate_by_name=True, allow_inf_nan=False)
+
+    decision_id: int = Field(description="The id of the call whose position closed.")
+    scored_at: datetime = Field(description="When the position was scored (UTC).")
+    return_: float = Field(
+        validation_alias="return",
+        serialization_alias="return",
+        description=(
+            "The exit's pnl over the fill's value plus the buy leg's costs, "
+            "in EUR after all costs, dividends included: 0.004 means 0.4%."
+        ),
+    )
+    benchmark: BenchmarkScore = Field(
+        description=(
+            "The benchmark from its close on the last session before the fill "
+            "session to its close on the last session on or before the exit's."
+        )
+    )
+    excess_return: float = Field(description="return minus the benchmark's return.")
+    hit: bool = Field(description="True when the position closed at its target.")
+    realised_r: float = Field(
+        description="The pnl over the plan's risk, both in EUR after costs."
+    )
+    reason: ExitReason = Field(description="Why it closed: stop, target or horizon.")
+    holding_sessions: int = Field(
+        description=(
+            "Sessions of the stock's exchange from the fill session to the "
+            "exit session, both included."
+        )
+    )
+
+
 class Fill(BaseModel):
     """A plan's limit buy, filled on a closed session."""
 
@@ -297,10 +336,11 @@ class _Contents(NamedTuple):
     scores: dict[int, Score]
     positions: Positions
     resets: list[Reset]
+    plan_scores: dict[int, PlanScore]
 
 
 def _empty() -> _Contents:
-    return _Contents([], {}, Positions({}, {}, {}), [])
+    return _Contents([], {}, Positions({}, {}, {}), [], {})
 
 
 def _breach(line: PositionLine, contents: _Contents) -> str | None:
@@ -428,6 +468,29 @@ class Journal:
             self._write_line({"kind": _kind(line), **line.model_dump(mode="json")})
         return line
 
+    def append_plan_score(self, score: PlanScore) -> PlanScore | None:
+        """
+        Store `score`, and return it. `None` (nothing written) when its
+        position already has a score, which stays as it is. A `ValueError`
+        when its call has no exit line.
+
+        """
+        self.directory.mkdir(parents=True, exist_ok=True)
+        with self._lock(fcntl.LOCK_EX):
+            _cut_torn_tail(self.path)
+            # Checked under the lock, so two runs at once score it once.
+            contents = self._read()
+            if score.decision_id in contents.plan_scores:
+                return None
+            if score.decision_id not in contents.positions.exits:
+                raise ValueError(
+                    f"call #{score.decision_id} has no exit to score in {self.path}"
+                )
+            self._write_line(
+                {"kind": PLAN_SCORE, **score.model_dump(mode="json", by_alias=True)}
+            )
+        return score
+
     def append_reset(self, reset: Reset) -> Reset:
         """
         Store `reset`, and return it. A damaged journal raises its
@@ -469,6 +532,13 @@ class Journal:
         with self._lock(fcntl.LOCK_SH):
             return self._read().resets
 
+    def plan_scores(self) -> dict[int, PlanScore]:
+        """Every closed position's score, keyed by the id of its call."""
+        if not self.directory.exists():
+            return {}
+        with self._lock(fcntl.LOCK_SH):
+            return self._read().plan_scores
+
     def _write_line(self, entry: dict[str, Any]) -> None:
         line = json.dumps(entry, ensure_ascii=False)
         with self.path.open("a", encoding="utf-8") as file:
@@ -485,7 +555,7 @@ class Journal:
     def _read(self) -> _Contents:
         # A torn last line isn't read; only an append cuts it.
         contents = _empty()
-        decisions, scores, positions, resets = contents
+        decisions, scores, positions, resets, plan_scores = contents
         if not self.path.exists():
             return contents
         ids: set[int] = set()
@@ -505,6 +575,16 @@ class Journal:
                     if score.decision_id in scores:
                         raise ValueError(f"call #{score.decision_id} is already scored")
                     scores[score.decision_id] = score
+                elif entry.get("kind") == PLAN_SCORE:
+                    plan_score = PlanScore.model_validate(entry)
+                    decision_id = plan_score.decision_id
+                    if decision_id not in positions.exits:
+                        raise ValueError(f"call #{decision_id} has no earlier exit")
+                    if decision_id in plan_scores:
+                        raise ValueError(
+                            f"call #{decision_id}'s plan is already scored"
+                        )
+                    plan_scores[decision_id] = plan_score
                 elif entry.get("kind") == RESET:
                     resets.append(Reset.model_validate(entry))
                 elif (model := KINDS.get(entry.get("kind", ""))) is not None:
