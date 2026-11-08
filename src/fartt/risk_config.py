@@ -29,6 +29,13 @@ Amount = Annotated[float, Field(ge=0)]
 
 STRICT = ConfigDict(strict=True, extra="forbid", frozen=True)
 
+# The journal depends on `Limits` and `ExchangeCosts`: a recorded buy stores
+# its trade plan with the limits and the exchange's costs it was checked
+# against, and every journal line is validated with these models when read.
+# A field added without a default, a field removed or a constraint tightened
+# makes every earlier plan a damaged line, and the journal can't be rebuilt:
+# give the stored copy models of its own before changing their shape.
+
 
 class Limits(BaseModel):
     model_config = STRICT
