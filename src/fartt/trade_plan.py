@@ -136,6 +136,29 @@ class TradePlan(BaseModel):
     tariff: Tariff = Field(description="The costs the plan was worked out with.")
 
 
+class PlanSummary(BaseModel):
+    """A stored plan in brief, as get_decisions lists it."""
+
+    entry: float = Field(description="The limit buy price.")
+    stop: float = Field(description="The stop, below the entry.")
+    target: float = Field(description="The target, above the entry.")
+    valid_for: int = Field(
+        description="Sessions of the stock's exchange the limit order stays open."
+    )
+    shares: int = Field(description="Whole shares to buy.")
+    position_value: float = Field(description="shares × entry, in EUR.")
+    risk: float = Field(
+        description="The loss in EUR if the stop is hit, every cost counted."
+    )
+    reward_to_risk: float = Field(description="reward / risk, after costs.")
+    sized_by: SizedBy = Field(description="The limit that set the size.")
+    based_on: date = Field(description="The last closed session the plan uses.")
+
+    @classmethod
+    def of(cls, plan: TradePlan) -> PlanSummary:
+        return cls.model_validate(plan.model_dump(include=set(cls.model_fields)))
+
+
 def _cents(value: float) -> float:
     return round(value, CENTS)
 

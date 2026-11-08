@@ -317,7 +317,7 @@ async def test_a_buy_is_recorded_with_its_plan(tmp_path: Path) -> None:
     stored = journal_of(cache).decisions()[0]
     assert stored.plan is not None
     assert stored.plan.model_dump(mode="json") == planned
-    read = await call(cache, {}, "get_decisions")
+    read = await call(cache, {"id": 1}, "get_decisions")
     assert read.structured_content["decisions"][0]["plan"] == planned
 
 
@@ -444,3 +444,84 @@ async def test_a_session_closing_during_the_call_does_not_split_call_and_plan(
     assert content["decision_session"] == "2026-10-29"
     assert content["plan"]["based_on"] == "2026-10-29"
     assert content["plan"]["last_close"] == content["close"]
+
+
+SUMMARY = [
+    "entry",
+    "stop",
+    "target",
+    "valid_for",
+    "shares",
+    "position_value",
+    "risk",
+    "reward_to_risk",
+    "sized_by",
+    "based_on",
+]
+
+
+@pytest.mark.anyio
+async def test_the_list_of_calls_shows_each_plan_in_summary(tmp_path: Path) -> None:
+    # @AC8 @AC11
+    cache = cache_for(provider(), tmp_path)
+    planned = (await record(cache, plan=PLAN)).structured_content["plan"]
+    await record(cache, direction="pass")
+
+    read = await call(cache, {}, "get_decisions")
+
+    pass_call, buy = read.structured_content["decisions"]
+    assert buy["plan"] == {name: planned[name] for name in SUMMARY}
+    assert pass_call["plan"] is None
+
+
+@pytest.mark.anyio
+async def test_one_call_by_id_comes_with_its_full_plan(tmp_path: Path) -> None:
+    # @AC11
+    cache = cache_for(provider(), tmp_path)
+    await record(cache, direction="pass")
+    recorded = (await record(cache, plan=PLAN)).structured_content
+    await record(cache, direction="pass")
+
+    read = await call(cache, {"id": 2}, "get_decisions")
+
+    assert not read.is_error, read.content
+    content = read.structured_content
+    assert content["total"] == 1
+    assert content["note"] is None
+    [entry] = content["decisions"]
+    assert {name: entry[name] for name in recorded} == recorded
+    assert entry["status"] == "open"
+
+
+@pytest.mark.anyio
+async def test_an_unknown_id_returns_no_call_with_a_note(tmp_path: Path) -> None:
+    # @AC11
+    cache = cache_for(provider(), tmp_path)
+    await record(cache, plan=PLAN)
+
+    read = await call(cache, {"id": 7}, "get_decisions")
+
+    assert not read.is_error, read.content
+    content = read.structured_content
+    assert (content["decisions"], content["total"]) == ([], 0)
+    assert "7" in content["note"]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "other",
+    [{"status": "all"}, {"status": "open"}, {"ticker": "ASML.AS"}, {"limit": 10}],
+)
+async def test_an_id_with_another_filter_is_refused(
+    tmp_path: Path, other: dict[str, Any]
+) -> None:
+    # @AC11
+    cache = cache_for(provider(), tmp_path)
+    await record(cache, plan=PLAN)
+
+    read = await call(cache, {"id": 1} | other, "get_decisions")
+
+    assert read.is_error
+    text = read.content[0].text
+    assert "id" in text
+    assert next(iter(other)) in text
