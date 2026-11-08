@@ -64,6 +64,7 @@ from fartt.portfolio import (
     Totals,
     WaitingPlan,
     calculate_portfolio,
+    refuse_beyond_free_cash,
 )
 from fartt.positions import (
     Blocked,
@@ -1408,15 +1409,6 @@ class PlanRequest(BaseModel):
     )
 
 
-def _portfolio_value(risk_config: RiskConfig) -> float:
-    """
-    The value every share-of-the-portfolio limit is taken of. The starting
-    capital until the paper portfolio (#145) values itself.
-
-    """
-    return risk_config.limits.starting_capital
-
-
 def _refuse_exchange_rate(ticker: str, action: str) -> None:
     """
     A ToolError when `ticker` is an exchange rate: record_decision and
@@ -1433,18 +1425,21 @@ def _refuse_exchange_rate(ticker: str, action: str) -> None:
 def _trade_plan(
     tool: str,
     cache: StockCache,
+    journal: Journal,
     ticker: str,
     request: PlanRequest,
     risk_config: RiskConfig,
 ) -> TradePlan:
     """
-    The plan for `request` on the ticker's current data, or a ToolError
-    saying why there is none: an exchange rate, data that isn't current, or
-    a check or limit the plan breaks. plan_trade and record_decision both
+    The plan for `request` on the ticker's current data and the portfolio
+    after settling, or a ToolError saying why there is none: an exchange
+    rate, data that isn't current, a check or limit the plan breaks, or
+    too little free cash. plan_trade and record_decision both
     plan with it, so they refuse in the same words.
 
     """
     _refuse_exchange_rate(ticker, "Plan trades")
+    totals = _portfolio(tool, cache, journal, risk_config)[1].totals
     snapshot = _snapshot(tool, cache, ticker, sys.maxsize)
     if not snapshot.is_current:
         ticker = snapshot.listing.ticker
@@ -1454,7 +1449,7 @@ def _trade_plan(
             "yet, so the plan can't be made on the price of the moment. Try "
             "again later."
         )
-    return _plan_on(tool, cache, snapshot, request, risk_config)
+    return _plan_on(tool, cache, snapshot, request, risk_config, totals)
 
 
 def _plan_on(
@@ -1463,10 +1458,12 @@ def _plan_on(
     snapshot: Snapshot,
     request: PlanRequest,
     risk_config: RiskConfig,
+    totals: Totals,
 ) -> TradePlan:
     """
     The plan for `request` on a current snapshot of the stock's whole
-    history, or a ToolError saying which check or limit it breaks.
+    history, sized on the portfolio's total value, or a ToolError saying
+    which check or limit it breaks, or that it doesn't fit the free cash.
     record_decision plans on the snapshot it stamps the call with, so the
     call and its plan are one session.
 
@@ -1481,7 +1478,7 @@ def _plan_on(
         rate = round(fx.candles[-1].close, RATE_DECIMALS)
         rate_session, rate_is_current = fx.candles[-1].date, fx.is_current
     try:
-        return calculate_plan(
+        plan = calculate_plan(
             ticker=ticker,
             currency=listing.currency,
             exchange_code=listing.exchange,
@@ -1495,12 +1492,14 @@ def _plan_on(
             rate=rate,
             rate_session=rate_session,
             rate_is_current=rate_is_current,
-            portfolio_value=_portfolio_value(risk_config),
+            portfolio_value=totals.total_value,
             limits=risk_config.limits,
             costs=risk_config.costs,
         )
+        refuse_beyond_free_cash(plan, totals)
     except PlanRefused as error:
         raise ToolError(f"{error} Nothing was recorded.") from error
+    return plan.model_copy(update={"free_cash": totals.free_cash})
 
 
 class NotAnalysable(ValueError):
@@ -1838,7 +1837,15 @@ def build_server(
             warning=warning,
         )
 
-    @server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+    # Not read-only: it settles the paper positions before sizing.
+    @server.tool(
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        )
+    )
     def plan_trade(
         ticker: Annotated[
             str,
@@ -1861,14 +1868,17 @@ def build_server(
         Size a long trade from your entry (a limit buy), stop and target
         against the operator's risk limits, after costs: the whole shares to
         buy, the risk and reward in EUR with every cost of both legs
-        itemised, the reward-to-risk, and the limit that set the size. A
-        plan that breaks a check or limit is refused saying which. Nothing is
-        recorded: try prices as often as needed, then pass the plan to
-        record_decision with the buy.
+        itemised, the reward-to-risk, and the limit that set the size. The
+        limits are shares of the paper portfolio's total value, settled
+        first; a plan that breaks a check or limit, or whose position value
+        plus buy costs is more than the free cash, is refused saying which.
+        No call is recorded: try prices as often as needed, then pass the
+        plan to record_decision with the buy.
         """
         plan = _trade_plan(
             "plan_trade",
             cache,
+            journal,
             ticker,
             PlanRequest(entry=entry, stop=stop, target=target, valid_for=valid_for),
             risk_config,
@@ -1967,6 +1977,11 @@ def build_server(
                 "signal once, with the stance it took."
             )
 
+        # A plan is sized on the portfolio, settled first.
+        totals = None
+        if plan is not None:
+            _, portfolio, _ = _portfolio("record_decision", cache, journal, risk_config)
+            totals = portfolio.totals
         # A plan needs the whole history (for its ATR); one read serves the
         # call's close and the plan, so both are the same session.
         count = 1 if plan is None else sys.maxsize
@@ -1974,8 +1989,10 @@ def build_server(
         benchmark = _current_close("record_decision", cache, BENCHMARK)
         candle = stock.candles[-1]
         trade_plan = None
-        if plan is not None:
-            trade_plan = _plan_on("record_decision", cache, stock, plan, risk_config)
+        if plan is not None and totals is not None:
+            trade_plan = _plan_on(
+                "record_decision", cache, stock, plan, risk_config, totals
+            )
         try:
             horizon_ends = session_after(stock.listing.exchange, candle.date, horizon)
         except ValueError as error:
