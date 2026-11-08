@@ -1778,13 +1778,6 @@ def largest_plan() -> TradePlan:
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "#143 v2 AC11: ten of the largest calls with a plan summary are about "
-        "51,000 characters, over 50,000; the developer decides what gives"
-    ),
-)
 @pytest.mark.anyio
 async def test_ten_of_the_largest_calls_fit_within_max_decisions_chars(
     tmp_path: Path,

@@ -92,14 +92,13 @@ MAX_CANDLES = 200
 # A worst-case journal entry in get_decisions' list (2,000 characters of
 # reasoning, every signal with a 200-character note, its score and a buy's
 # plan in summary) is about 5,100 characters of JSON, so ten are about
-# 51,000: over MAX_DECISIONS_CHARS, the 50,000 design v2 of #143 aims for to
-# leave #144 about 1,000 characters an entry. Which gives (the bound, the
-# limit or the summary) is open with the developer. At one token per three
-# characters, the pessimistic rate for numbers, 51,000 is about 17,000
-# tokens, well under that limit. Narrowing by ticker or status reaches older
-# calls; get_decisions(id=...) returns one call with its full plan.
+# 51,000, under MAX_DECISIONS_CHARS. That bound, 60,000 characters (#143 v3),
+# is about 20,000 tokens at one token per three characters, the pessimistic
+# rate for numbers: under the limit above, and it leaves #144 about 900
+# characters an entry for its position. Narrowing by ticker or status reaches
+# older calls; get_decisions(id=...) returns one call with its full plan.
 MAX_DECISIONS = 10
-MAX_DECISIONS_CHARS = 50_000
+MAX_DECISIONS_CHARS = 60_000
 # A scored call is about 200 characters and a call not scored about 150, so
 # 50 of each stay well under the limit. Every score is stored either way.
 MAX_SCORED = 50
