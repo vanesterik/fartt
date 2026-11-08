@@ -792,14 +792,17 @@ def _unreachable(ticker: str) -> ToolError:
     )
 
 
-def _current_close(tool: str, cache: StockCache, ticker: str) -> Snapshot:
+def _current_close(
+    tool: str, cache: StockCache, ticker: str, count: int = 1
+) -> Snapshot:
     """
-    The ticker's last candle after bringing its cache up to date. A ToolError
-    unless it's the exchange's newest closed session: a call stamped with an
-    older close could be scored on a move that was already known.
+    The ticker's last `count` candles after bringing its cache up to date. A
+    ToolError unless the last is the exchange's newest closed session: a call
+    stamped with an older close could be scored on a move that was already
+    known.
 
     """
-    snapshot = _snapshot(tool, cache, ticker, 1)
+    snapshot = _snapshot(tool, cache, ticker, count)
     if not snapshot.is_current:
         ticker = snapshot.listing.ticker
         newest = cache.newest_closed_session(ticker)
@@ -872,15 +875,34 @@ def _trade_plan(
 
     """
     _refuse_exchange_rate(ticker, "Plan trades")
-    listing, candles, _, is_current, _ = _snapshot(tool, cache, ticker, sys.maxsize)
-    ticker = listing.ticker
-    if not is_current:
+    snapshot = _snapshot(tool, cache, ticker, sys.maxsize)
+    if not snapshot.is_current:
+        ticker = snapshot.listing.ticker
         newest = cache.newest_closed_session(ticker)
         raise ToolError(
             f"{ticker}'s newest close ({newest.isoformat()}) isn't available "
             "yet, so the plan can't be made on the price of the moment. Try "
             "again later."
         )
+    return _plan_on(tool, cache, snapshot, request, risk_config)
+
+
+def _plan_on(
+    tool: str,
+    cache: StockCache,
+    snapshot: Snapshot,
+    request: PlanRequest,
+    risk_config: RiskConfig,
+) -> TradePlan:
+    """
+    The plan for `request` on a current snapshot of the stock's whole
+    history, or a ToolError saying which check or limit it breaks.
+    record_decision plans on the snapshot it stamps the call with, so the
+    call and its plan are one session.
+
+    """
+    listing, candles = snapshot.listing, snapshot.candles
+    ticker = listing.ticker
     atr = calculate_indicators(candles).atr
     rate = None
     pair = fx_pair(listing.currency)
@@ -1371,14 +1393,15 @@ def build_server(
                 "signal once, with the stance it took."
             )
 
-        stock = _current_close("record_decision", cache, ticker)
+        # A plan needs the whole history (for its ATR); one read serves the
+        # call's close and the plan, so both are the same session.
+        count = 1 if plan is None else sys.maxsize
+        stock = _current_close("record_decision", cache, ticker, count)
         benchmark = _current_close("record_decision", cache, BENCHMARK)
         candle = stock.candles[-1]
         trade_plan = None
         if plan is not None:
-            trade_plan = _trade_plan(
-                "record_decision", cache, ticker, plan, risk_config
-            )
+            trade_plan = _plan_on("record_decision", cache, stock, plan, risk_config)
         try:
             horizon_ends = session_after(stock.listing.exchange, candle.date, horizon)
         except ValueError as error:
