@@ -40,6 +40,7 @@ EXPECTED_TOOLS = [
     "get_analysis_procedure",
     "get_risk_config",
     "plan_trade",
+    "settle_positions",
 ]
 EXPECTED_PROMPTS = ["analyze_ticker"]
 # Per response; also the MCP client's read timeout, which defaults to none.
@@ -161,8 +162,10 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
         assert {
             k: v
             for k, v in read_back.items()
-            if k not in ("status", "horizon_passed", "score")
+            if k not in ("status", "horizon_passed", "score", "position")
         } == entry
+        # @issue-144 @AC13
+        assert read_back["position"] is None
 
         # @issue-121 @AC12
         scoring = await client.call_tool("score_decisions", {})
@@ -181,6 +184,13 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
         assert figures["open"] == 1
         assert figures["overall"]["calls"] == 0
         assert figures["tickers"] == []
+
+        # @issue-144 @AC13
+        settling = await client.call_tool("settle_positions", {})
+        assert not settling.is_error, settling.content
+        settled = settling.structured_content
+        assert settled["filled"] == settled["closed"] == settled["not_settled"] == []
+        assert settled["note"]
 
         # @issue-149 @AC1
         risk = await client.call_tool("get_risk_config", {})
