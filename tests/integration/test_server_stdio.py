@@ -39,6 +39,7 @@ EXPECTED_TOOLS = [
     "get_performance",
     "get_analysis_procedure",
     "get_risk_config",
+    "plan_trade",
 ]
 EXPECTED_PROMPTS = ["analyze_ticker"]
 # Per response; also the MCP client's read timeout, which defaults to none.
@@ -190,6 +191,23 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
         assert sorted(config["costs"]["exchanges"]) == sorted(
             ["XNYS", "XAMS", "XPAR", "XBRU", "XLIS", "XMIL", "XDUB", "XOSL"]
         )
+
+        # @issue-143 @AC1
+        last = zones["last"]
+        plan = await client.call_tool(
+            "plan_trade",
+            {
+                "ticker": "ASML.AS",
+                "entry": round(last * 0.98, 2),
+                "stop": round(last * 0.98 * 0.95, 2),
+                "target": round(last * 0.98 * 1.3, 2),
+            },
+        )
+        assert not plan.is_error, plan.content
+        sized = plan.structured_content
+        assert sized["ticker"] == "ASML.AS"
+        assert sized["shares"] >= 1
+        assert sized["risk"] <= 0.02 * config["limits"]["starting_capital"]
 
     assert (tmp_path / "stocks" / "ASML.AS" / "candles.csv").exists()
     assert (tmp_path / "journal" / "decisions.jsonl").exists()
