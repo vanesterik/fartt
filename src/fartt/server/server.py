@@ -838,6 +838,19 @@ def _portfolio_value(risk_config: RiskConfig) -> float:
     return risk_config.limits.starting_capital
 
 
+def _refuse_exchange_rate(ticker: str, action: str) -> None:
+    """
+    A ToolError when `ticker` is an exchange rate: record_decision and
+    plan_trade refuse one in the same words, `action` aside.
+
+    """
+    if ticker.strip().upper().endswith(FX_SUFFIX):
+        raise ToolError(
+            f"{ticker.strip().upper()} is an exchange rate, not a stock. "
+            f"{action} on stocks only."
+        )
+
+
 def _trade_plan(
     tool: str,
     cache: StockCache,
@@ -852,11 +865,7 @@ def _trade_plan(
     plan with it, so they refuse in the same words.
 
     """
-    if ticker.strip().upper().endswith(FX_SUFFIX):
-        raise ToolError(
-            f"{ticker.strip().upper()} is an exchange rate, not a stock. "
-            "Plan trades on stocks only."
-        )
+    _refuse_exchange_rate(ticker, "Plan trades")
     listing, candles, _, is_current, _ = _snapshot(tool, cache, ticker, sys.maxsize)
     ticker = listing.ticker
     if not is_current:
@@ -1347,11 +1356,7 @@ def build_server(
                 f"reasoning must be 1 to {MAX_REASONING:,} characters after "
                 f"stripping whitespace; it is {len(reasoning):,}."
             )
-        if ticker.strip().upper().endswith(FX_SUFFIX):
-            raise ToolError(
-                f"{ticker.strip().upper()} is an exchange rate, not a stock. "
-                "Record calls on stocks only."
-            )
+        _refuse_exchange_rate(ticker, "Record calls")
         names = [signal.name for signal in signals]
         twice = sorted({name for name in names if names.count(name) > 1})
         if twice:
