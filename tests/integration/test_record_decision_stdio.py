@@ -396,7 +396,8 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
     writes nothing; it joins as a read-only tool. get_risk_config (#149) reads
     the operator's risk config and takes no arguments; it joins as a read-only
     tool. plan_trade (#143) calculates a trade plan and records nothing; it
-    joins as a tool that writes no entry.
+    joins as a tool that writes no entry. settle_positions (#144) appends
+    fill, expiry and exit lines and never edits or removes one.
     """
     async with _server(seeded_assets) as client:
         tools = (await client.list_tools()).tools
@@ -415,6 +416,7 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
             "get_analysis_procedure",
             "get_risk_config",
             "plan_trade",
+            "settle_positions",
         ]
     )
     record = next(tool for tool in tools if tool.name == "record_decision")
@@ -429,6 +431,9 @@ async def test_should_offer_no_tool_that_edits_or_removes_an_entry(
     performance = next(tool for tool in tools if tool.name == "get_performance")
     assert performance.annotations is not None
     assert performance.annotations.read_only_hint is True
+    settler = next(tool for tool in tools if tool.name == "settle_positions")
+    assert settler.annotations is not None
+    assert settler.annotations.destructive_hint is False
     procedure = next(tool for tool in tools if tool.name == "get_analysis_procedure")
     assert procedure.annotations is not None
     assert procedure.annotations.read_only_hint is True
