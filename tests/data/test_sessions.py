@@ -19,6 +19,7 @@ from fartt.data import (
     normalise_ticker,
     session_after,
     session_on_or_before,
+    sessions_in_range,
 )
 
 
@@ -218,3 +219,16 @@ def test_session_on_or_before() -> None:
     assert session_on_or_before("XAMS", date(2027, 3, 26)) == date(2027, 3, 25)
     assert session_on_or_before("XAMS", date(2026, 11, 3)) == date(2026, 11, 3)
     assert session_on_or_before("XAMS", date(2026, 11, 8)) == date(2026, 11, 6)
+
+
+def test_sessions_in_range_includes_both_ends_and_skips_the_weekend() -> None:
+    # Friday 2026-10-30 to Tuesday 2026-11-03 on Euronext Amsterdam.
+    assert sessions_in_range("XAMS", date(2026, 10, 30), date(2026, 11, 3)) == [
+        date(2026, 10, 30),
+        date(2026, 11, 2),
+        date(2026, 11, 3),
+    ]
+
+
+def test_sessions_in_range_is_empty_when_it_starts_after_it_ends() -> None:
+    assert sessions_in_range("XAMS", date(2026, 11, 3), date(2026, 11, 2)) == []
