@@ -80,6 +80,7 @@ from fartt.trade_plan import (
     DEFAULT_VALID_FOR,
     MAX_VALID_FOR,
     PlanRefused,
+    PlanSummary,
     TradePlan,
     calculate_plan,
 )
@@ -88,16 +89,17 @@ from fartt.trade_plan import (
 # numbers cost roughly one token per three characters. 200 compact rows stay
 # well under that, and the agent needs recent context, not years of history.
 MAX_CANDLES = 200
-# A worst-case journal entry (2,000 characters of reasoning, every signal with
-# a 200-character note, and a buy's trade plan, about 1,400 of them) is about
-# 6,200 characters of JSON with its score, so ten are about 63,000. At one
-# token per three characters, the pessimistic rate for numbers, the bound
-# below is about 23,300 tokens, under that limit; the reasoning and notes
-# (3,600 of each entry's characters) are prose at about four characters a
-# token, so a real worst case is nearer 18,000. Narrowing by ticker or status
-# reaches older calls.
+# A worst-case journal entry in get_decisions' list (2,000 characters of
+# reasoning, every signal with a 200-character note, its score and a buy's
+# plan in summary) is about 5,100 characters of JSON, so ten are about
+# 51,000: over MAX_DECISIONS_CHARS, the 50,000 design v2 of #143 aims for to
+# leave #144 about 1,000 characters an entry. Which gives (the bound, the
+# limit or the summary) is open with the developer. At one token per three
+# characters, the pessimistic rate for numbers, 51,000 is about 17,000
+# tokens, well under that limit. Narrowing by ticker or status reaches older
+# calls; get_decisions(id=...) returns one call with its full plan.
 MAX_DECISIONS = 10
-MAX_DECISIONS_CHARS = 70_000
+MAX_DECISIONS_CHARS = 50_000
 # A scored call is about 200 characters and a call not scored about 150, so
 # 50 of each stay well under the limit. Every score is stored either way.
 MAX_SCORED = 50
@@ -390,6 +392,14 @@ class JournalEntry(Decision):
         default=None,
         description="How the call turned out, in EUR against IWDA.AS; null while open.",
     )
+    # Wider than Decision's: a list carries each plan in summary.
+    plan: TradePlan | PlanSummary | None = Field(  # pyright: ignore[reportIncompatibleVariableOverride]
+        default=None,
+        description=(
+            "A buy's trade plan: in full when one call is asked for by id, "
+            "in summary in a list; null without a plan."
+        ),
+    )
 
 
 class DecisionsResult(BaseModel):
@@ -601,6 +611,46 @@ def _no_match_note(status: StatusFilter, ticker: str | None, any_scored: bool) -
     if status == "scored" and not any_scored:
         note += " No call has been scored yet."
     return note
+
+
+def _entry(
+    decision: Decision, scores: Mapping[int, Score], now: datetime, *, brief: bool
+) -> JournalEntry:
+    """A call with its state now; its plan in summary when `brief`."""
+    plan = decision.plan
+    return JournalEntry(
+        **decision.model_dump(exclude={"plan"}),
+        status=_status(decision, scores),
+        horizon_passed=_horizon_passed(decision, now),
+        score=scores.get(decision.id),
+        plan=PlanSummary.of(plan) if brief and plan is not None else plan,
+    )
+
+
+def _one_decision(
+    cache: StockCache, journal: Journal, decision_id: int
+) -> DecisionsResult:
+    """get_decisions(id=...): the call with its full plan, or none and a note."""
+    try:
+        decisions = journal.decisions()
+        scores = journal.scores()
+    except CACHE_ERRORS as error:
+        raise _journal_unreadable("get_decisions", journal.path, error) from error
+    found = [decision for decision in decisions if decision.id == decision_id]
+    logger.info(f"get_decisions id={decision_id}: {len(found)} match")
+    if not found:
+        known = (
+            f"ids run from 1 to {len(decisions)}"
+            if decisions
+            else "no call is recorded yet"
+        )
+        return DecisionsResult(
+            decisions=[], total=0, note=f"No call has id {decision_id}; {known}."
+        )
+    return DecisionsResult(
+        decisions=[_entry(found[0], scores, cache.clock(), brief=False)],
+        total=1,
+    )
 
 
 def _journal_unreadable(tool: str, path: Path, error: Exception) -> ToolError:
@@ -1457,14 +1507,15 @@ def build_server(
     )
     def get_decisions(
         status: Annotated[
-            StatusFilter,
+            StatusFilter | None,
             Field(
                 description=(
                     "open: calls not scored yet, including those whose horizon "
-                    "has passed; scored: calls with a score; all: both."
+                    "has passed; scored: calls with a score; all (the "
+                    "default): both."
                 )
             ),
-        ] = "all",
+        ] = None,
         ticker: Annotated[
             str | None,
             Field(
@@ -1475,20 +1526,53 @@ def build_server(
             ),
         ] = None,
         limit: Annotated[
-            int,
+            int | None,
             Field(
                 ge=1,
                 le=MAX_DECISIONS,
-                description="How many of the newest matching calls to return.",
+                description=(
+                    f"How many of the newest matching calls to return, 1 to "
+                    f"{MAX_DECISIONS} (the default)."
+                ),
             ),
-        ] = MAX_DECISIONS,
+        ] = None,
+        id: Annotated[
+            int | None,
+            Field(
+                ge=1,
+                description=(
+                    "One call by its id, with its full trade plan; without "
+                    "status, ticker or limit."
+                ),
+            ),
+        ] = None,
     ) -> DecisionsResult:
         """
         Read the journal back: the calls record_decision recorded, newest
         first, filtered by status and ticker. A call is open until
         score_decisions scores it; horizon_passed says whether it's due. A
-        scored call carries its score.
+        scored call carries its score. A buy's trade plan is listed in
+        summary; ask for the call by id for the whole plan, costs and
+        limits included.
         """
+        if id is not None:
+            given = [
+                name
+                for name, value in (
+                    ("status", status),
+                    ("ticker", ticker),
+                    ("limit", limit),
+                )
+                if value is not None
+            ]
+            if given:
+                raise ToolError(
+                    f"id asks for one call; leave out {', '.join(given)}, or "
+                    "leave out id to list calls."
+                )
+            return _one_decision(cache, journal, id)
+        status = status or "all"
+        limit = limit or MAX_DECISIONS
         if ticker is not None:
             try:
                 ticker = normalise_ticker(ticker)
@@ -1502,12 +1586,7 @@ def build_server(
 
         now = cache.clock()
         matching = [
-            JournalEntry(
-                **decision.model_dump(),
-                status=_status(decision, scores),
-                horizon_passed=_horizon_passed(decision, now),
-                score=scores.get(decision.id),
-            )
+            _entry(decision, scores, now, brief=True)
             for decision in reversed(decisions)
             if (ticker is None or decision.ticker == ticker)
             and (status == "all" or _status(decision, scores) == status)
