@@ -16,11 +16,15 @@ from fartt.journal import (
     BenchmarkClose,
     BenchmarkScore,
     DecisionDraft,
+    Exit,
+    Expiry,
+    Fill,
     Leg,
     Score,
     Signal,
 )
 from fartt.risk_config import RISK_FILE, load_risk_config
+from fartt.trade_plan import LegCosts, TradePlan, calculate_plan
 
 # The checked-in risk config, which every server under test is built on.
 RISK_CONFIG = load_risk_config(
@@ -136,3 +140,77 @@ def decision_score(decision_id: int, **changes: Any) -> Score:
         "right": True,
     }
     return Score(**(fields | changes))
+
+
+def buy_plan(**changes: Any) -> TradePlan:
+    """A plan on ASML.AS made on 2026-10-29's close: entry 600, stop 580, target 680."""
+    arguments: dict[str, Any] = {
+        "ticker": "ASML.AS",
+        "currency": "EUR",
+        "exchange_code": "XAMS",
+        "based_on": date(2026, 10, 29),
+        "last_close": 612.4,
+        "atr": 15.0,
+        "entry": 600.0,
+        "stop": 580.0,
+        "target": 680.0,
+        "valid_for": 5,
+        "rate": None,
+        "rate_session": None,
+        "rate_is_current": True,
+        "portfolio_value": RISK_CONFIG.limits.starting_capital,
+        "limits": RISK_CONFIG.limits,
+        "costs": RISK_CONFIG.costs,
+    }
+    return calculate_plan(**(arguments | changes))
+
+
+SETTLED_AT = datetime(2026, 11, 3, 21, 0, tzinfo=UTC)
+LEG_COSTS = LegCosts(
+    commission=3.0, slippage=0.6, conversion=0.0, tax=0.0, fee=0.0, total=3.6
+)
+
+
+def fill_line(decision_id: int, **changes: Any) -> Fill:
+    """A fill of call `decision_id` at 600 on 2026-10-30."""
+    fields: dict[str, Any] = {
+        "decision_id": decision_id,
+        "settled_at": SETTLED_AT,
+        "session": date(2026, 10, 30),
+        "price": 600.0,
+        "at_open": False,
+        "shares": 2,
+        "rate": None,
+        "value": 1200.0,
+        "costs": LEG_COSTS,
+    }
+    return Fill(**(fields | changes))
+
+
+def expiry_line(decision_id: int, **changes: Any) -> Expiry:
+    """The expiry of call `decision_id`'s order on 2026-11-05."""
+    fields: dict[str, Any] = {
+        "decision_id": decision_id,
+        "settled_at": SETTLED_AT,
+        "session": date(2026, 11, 5),
+    }
+    return Expiry(**(fields | changes))
+
+
+def exit_line(decision_id: int, **changes: Any) -> Exit:
+    """An exit of call `decision_id` at the 580 stop on 2026-11-02."""
+    fields: dict[str, Any] = {
+        "decision_id": decision_id,
+        "settled_at": SETTLED_AT,
+        "session": date(2026, 11, 2),
+        "reason": "stop",
+        "price": 580.0,
+        "at_open": False,
+        "slippage": 0.0,
+        "rate": None,
+        "value": 1160.0,
+        "costs": LEG_COSTS,
+        "dividends": 0.0,
+        "pnl": -47.2,
+    }
+    return Exit(**(fields | changes))

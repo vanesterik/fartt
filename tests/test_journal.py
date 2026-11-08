@@ -6,7 +6,14 @@ import pytest
 
 from fartt.journal import Journal
 from fartt.trade_plan import calculate_plan
-from tests.fakes import RISK_CONFIG, decision_draft
+from tests.fakes import (
+    RISK_CONFIG,
+    buy_plan,
+    decision_draft,
+    exit_line,
+    expiry_line,
+    fill_line,
+)
 from tests.fakes import decision_score as score
 
 
@@ -246,3 +253,132 @@ def test_a_plan_is_stored_with_its_call(tmp_path: Path) -> None:
 
     assert stored.plan == plan
     assert Journal(tmp_path).decisions()[0].plan == plan
+
+
+def with_plan(journal: Journal) -> None:
+    journal.append(decision_draft(plan=buy_plan()))
+
+
+def test_a_fill_and_an_exit_round_trip(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    with_plan(journal)
+
+    assert journal.append_fill(fill_line(1)) == fill_line(1)
+    assert journal.append_exit(exit_line(1)) == exit_line(1)
+
+    for reader in (journal, Journal(tmp_path)):
+        positions = reader.positions()
+        assert positions.fills == {1: fill_line(1)}
+        assert positions.exits == {1: exit_line(1)}
+        assert positions.expiries == {}
+    lines = journal_file(tmp_path).read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line)["kind"] for line in lines] == ["decision", "fill", "exit"]
+    assert json.loads(lines[2]) == {
+        "kind": "exit",
+        **exit_line(1).model_dump(mode="json"),
+    }
+
+
+def test_an_expiry_round_trips(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    with_plan(journal)
+
+    assert journal.append_expiry(expiry_line(1)) == expiry_line(1)
+
+    assert Journal(tmp_path).positions().expiries == {1: expiry_line(1)}
+    last = journal_file(tmp_path).read_text(encoding="utf-8").splitlines()[-1]
+    assert json.loads(last)["kind"] == "expiry"
+
+
+def test_each_position_line_is_written_once(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    with_plan(journal)
+    journal.append(decision_draft(plan=buy_plan()))
+    journal.append_fill(fill_line(1))
+    journal.append_exit(exit_line(1))
+    journal.append_expiry(expiry_line(2))
+    before = journal_file(tmp_path).read_bytes()
+
+    assert journal.append_fill(fill_line(1, price=590.0)) is None
+    assert journal.append_exit(exit_line(1, price=570.0)) is None
+    assert journal.append_expiry(expiry_line(2)) is None
+
+    assert journal_file(tmp_path).read_bytes() == before
+    assert journal.positions().fills[1].price == 600.0
+
+
+@pytest.mark.parametrize("decision_id", [1, 7])
+def test_a_position_line_for_a_call_without_a_plan_or_unknown_is_refused(
+    tmp_path: Path, decision_id: int
+) -> None:
+    journal = Journal(tmp_path)
+    journal.append(decision_draft())
+    before = journal_file(tmp_path).read_bytes()
+
+    with pytest.raises(ValueError, match=f"#{decision_id}"):
+        journal.append_fill(fill_line(decision_id))
+    with pytest.raises(ValueError, match=f"#{decision_id}"):
+        journal.append_expiry(expiry_line(decision_id))
+
+    assert journal_file(tmp_path).read_bytes() == before
+
+
+def test_an_exit_without_a_fill_is_refused(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    with_plan(journal)
+    before = journal_file(tmp_path).read_bytes()
+
+    with pytest.raises(ValueError, match="fill"):
+        journal.append_exit(exit_line(1))
+
+    assert journal_file(tmp_path).read_bytes() == before
+
+
+def test_an_expiry_after_a_fill_is_refused(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    with_plan(journal)
+    journal.append_fill(fill_line(1))
+    before = journal_file(tmp_path).read_bytes()
+
+    with pytest.raises(ValueError, match="filled"):
+        journal.append_expiry(expiry_line(1))
+
+    assert journal_file(tmp_path).read_bytes() == before
+
+
+def test_a_fill_after_an_expiry_is_refused(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    with_plan(journal)
+    journal.append_expiry(expiry_line(1))
+    before = journal_file(tmp_path).read_bytes()
+
+    with pytest.raises(ValueError, match="expired"):
+        journal.append_fill(fill_line(1))
+
+    assert journal_file(tmp_path).read_bytes() == before
+
+
+def test_a_duplicated_fill_line_is_a_damaged_line(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    with_plan(journal)
+    journal.append_fill(fill_line(1))
+    second = journal_file(tmp_path).read_text().splitlines(keepends=True)[1]
+    with journal_file(tmp_path).open("a") as file:
+        file.write(second)
+
+    with pytest.raises(ValueError, match="line 3"):
+        journal.positions()
+    with pytest.raises(ValueError, match="line 3"):
+        journal.decisions()
+
+
+def test_an_exit_line_without_its_fill_is_a_damaged_line(tmp_path: Path) -> None:
+    other = Journal(tmp_path / "other")
+    with_plan(other)
+    other.append_fill(fill_line(1))
+    other.append_exit(exit_line(1))
+    lines = journal_file(tmp_path / "other").read_text().splitlines(keepends=True)
+    journal_file(tmp_path).write_text(lines[0] + lines[2])
+
+    with pytest.raises(ValueError, match="line 2"):
+        Journal(tmp_path).positions()
