@@ -412,14 +412,13 @@ async def test_a_pass_with_a_plan_is_refused(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("direction", ["buy", "pass"])
-async def test_a_call_without_a_plan_is_recorded_with_plan_null(
-    tmp_path: Path, direction: str
+async def test_a_pass_without_a_plan_is_recorded_with_plan_null(
+    tmp_path: Path,
 ) -> None:
     # @AC9
     cache = cache_for(provider(), tmp_path)
 
-    result = await record(cache, direction=direction)
+    result = await record(cache, direction="pass")
 
     assert not result.is_error, result.content
     assert result.structured_content["plan"] is None
@@ -674,17 +673,11 @@ async def test_record_decision_with_a_plan_is_refused_while_tripped_but_a_pass_i
 
     refused = await record(cache, plan=PLAN)
     passed = await record(cache, direction="pass")
-    bare_buy = await record(cache)
 
     assert refused.is_error
     assert "kill switch tripped on 2026-10-28" in refused.content[0].text
     assert not passed.is_error, passed.content
-    assert not bare_buy.is_error, bare_buy.content
-    assert [d.direction for d in journal_of(cache).decisions()] == [
-        "buy",
-        "pass",
-        "buy",
-    ]
+    assert [d.direction for d in journal_of(cache).decisions()] == ["buy", "pass"]
 
 
 @pytest.mark.anyio

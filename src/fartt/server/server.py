@@ -2081,8 +2081,9 @@ def build_server(
             PlanRequest | None,
             Field(
                 description=(
-                    "With a buy only: the trade plan's entry, stop, target and "
-                    "valid_for, as given to plan_trade. The server works the "
+                    "Required with a buy, refused with a pass: the trade "
+                    "plan's entry, stop, target and valid_for, as given to "
+                    "plan_trade. The server works the "
                     "plan out again on current data and stores it with the "
                     "call; a plan that breaks a limit records nothing."
                 )
@@ -2094,12 +2095,18 @@ def build_server(
         stamped with the stock's and the benchmark's last closes, so it can
         be scored later against what the market did. Record every call.
         Entries can't be changed or removed afterwards: a correction is a
-        new call. A buy can carry its trade plan (see plan_trade).
+        new call. A buy carries its trade plan (see plan_trade); a pass
+        has none.
         """
         if plan is not None and direction == "pass":
             raise ToolError(
                 "A pass has no trade plan: give a plan with a buy only, or "
                 "record the pass without one. Nothing was recorded."
+            )
+        if plan is None and direction == "buy":
+            raise ToolError(
+                "A buy needs a plan: size it with plan_trade and give its "
+                "entry, stop, target and valid_for as plan. Nothing was recorded."
             )
         reasoning = reasoning.strip()
         if not 1 <= len(reasoning) <= MAX_REASONING:
