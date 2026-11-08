@@ -23,6 +23,7 @@ import pytest
 from mcp import Client, StdioServerParameters
 from mcp.types import LATEST_PROTOCOL_VERSION
 
+from tests.integration.risk import copy_risk_config
 from tests.integration.snapshot import OFFLINE
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -37,6 +38,7 @@ EXPECTED_TOOLS = [
     "score_decisions",
     "get_performance",
     "get_analysis_procedure",
+    "get_risk_config",
 ]
 EXPECTED_PROMPTS = ["analyze_ticker"]
 # Per response; also the MCP client's read timeout, which defaults to none.
@@ -62,6 +64,7 @@ def _environment(
 @pytest.mark.network
 @pytest.mark.anyio
 async def test_tools_over_stdio(tmp_path: Path) -> None:
+    risk_file = copy_risk_config(tmp_path)
     command, *args = _server_command()
     params = StdioServerParameters(
         command=command, args=args, cwd=str(ROOT), env=_environment(tmp_path)
@@ -177,6 +180,16 @@ async def test_tools_over_stdio(tmp_path: Path) -> None:
         assert figures["open"] == 1
         assert figures["overall"]["calls"] == 0
         assert figures["tickers"] == []
+
+        # @issue-149 @AC1
+        risk = await client.call_tool("get_risk_config", {})
+        assert not risk.is_error, risk.content
+        config = risk.structured_content
+        assert Path(config["source"]).resolve() == risk_file.resolve()
+        assert config["limits"]["max_risk_per_position"] == 0.02
+        assert sorted(config["costs"]["exchanges"]) == sorted(
+            ["XNYS", "XAMS", "XPAR", "XBRU", "XLIS", "XMIL", "XDUB", "XOSL"]
+        )
 
     assert (tmp_path / "stocks" / "ASML.AS" / "candles.csv").exists()
     assert (tmp_path / "journal" / "decisions.jsonl").exists()

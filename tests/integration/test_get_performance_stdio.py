@@ -285,13 +285,13 @@ SIDE_FIGURES = ["hit_rate", "average_excess_return", "average_edge"]
 
 
 async def test_overall_and_per_direction_match_the_stored_scores(
-    tmp_path: Path,
+    empty_assets: Path,
 ) -> None:
     """@issue-122 @AC1 @AC2"""
     book = _full_book()
-    book.write(tmp_path)
+    book.write(empty_assets)
 
-    result = await _performance(tmp_path)
+    result = await _performance(empty_assets)
 
     _assert_group(result["overall"], book.scored)
     _assert_group(result["buy"], [m for m in book.scored if m[0]["direction"] == "buy"])
@@ -301,12 +301,12 @@ async def test_overall_and_per_direction_match_the_stored_scores(
     assert result["scored"] == 22
 
 
-async def test_signals_compare_used_with_not_used(tmp_path: Path) -> None:
+async def test_signals_compare_used_with_not_used(empty_assets: Path) -> None:
     """@issue-122 @AC3 @AC4"""
     book = _full_book()
-    book.write(tmp_path)
+    book.write(empty_assets)
 
-    result = await _performance(tmp_path)
+    result = await _performance(empty_assets)
 
     assert [entry["signal"] for entry in result["signals"]] == SIGNAL_NAMES
     by_name = {entry["signal"]: entry for entry in result["signals"]}
@@ -339,7 +339,9 @@ async def test_signals_compare_used_with_not_used(tmp_path: Path) -> None:
     assert by_name["spread"]["used"]["calls"] == 0
 
 
-async def test_a_group_below_the_minimum_shows_its_count_only(tmp_path: Path) -> None:
+async def test_a_group_below_the_minimum_shows_its_count_only(
+    empty_assets: Path,
+) -> None:
     """@issue-122 @AC4 @AC5"""
     book = Book()
     values = [(0.05, 0.01), (-0.02, 0.01), (0.03, 0.02), (0.01, 0.04), (0.06, 0.0)]
@@ -354,9 +356,9 @@ async def test_a_group_below_the_minimum_shows_its_count_only(tmp_path: Path) ->
         )
     book.scored_call("AAPL", "pass", ["rsi"], -0.03, 0.01, date(2026, 3, 9))
     book.scored_call("AAPL", "pass", ["rsi"], 0.04, 0.01, date(2026, 3, 10))
-    book.write(tmp_path)
+    book.write(empty_assets)
 
-    result = await _performance(tmp_path)
+    result = await _performance(empty_assets)
 
     _assert_too_few(result["overall"], 7, GROUP_FIGURES)
     _assert_too_few(result["buy"], 5, GROUP_FIGURES)
@@ -373,13 +375,13 @@ async def test_a_group_below_the_minimum_shows_its_count_only(tmp_path: Path) ->
 
 
 async def test_tickers_are_listed_with_their_open_calls_most_called_first(
-    tmp_path: Path,
+    empty_assets: Path,
 ) -> None:
     """@issue-122 @AC5 @AC6"""
     book = _full_book()
-    book.write(tmp_path)
+    book.write(empty_assets)
 
-    result = await _performance(tmp_path)
+    result = await _performance(empty_assets)
 
     # ARM has only an open call, so it isn't listed; AAPL and GOOG tie on 6.
     assert [t["ticker"] for t in result["tickers"]] == ["ASML.AS", "AAPL", "GOOG"]
@@ -398,12 +400,12 @@ async def test_tickers_are_listed_with_their_open_calls_most_called_first(
         _assert_close(entry["average_edge"], _mean([_edge(c, s) for c, s in members]))
 
 
-async def test_open_calls_are_counted_not_figured(tmp_path: Path) -> None:
+async def test_open_calls_are_counted_not_figured(empty_assets: Path) -> None:
     """@issue-122 @AC6"""
     book = _full_book()
-    book.write(tmp_path)
+    book.write(empty_assets)
 
-    result = await _performance(tmp_path)
+    result = await _performance(empty_assets)
 
     assert result["scored"] == 22
     assert result["overall"]["calls"] == 22
@@ -412,7 +414,7 @@ async def test_open_calls_are_counted_not_figured(tmp_path: Path) -> None:
     assert "score_decisions" in (result["note"] or "")
 
 
-async def test_no_call_due_says_nothing_about_scoring(tmp_path: Path) -> None:
+async def test_no_call_due_says_nothing_about_scoring(empty_assets: Path) -> None:
     """@issue-122 @AC6"""
     book = _full_book()
     book.lines = [
@@ -420,9 +422,9 @@ async def test_no_call_due_says_nothing_about_scoring(tmp_path: Path) -> None:
         for line in book.lines
         if line["kind"] == "score" or line["horizon_ends"] != PAST.isoformat()
     ]
-    book.write(tmp_path)
+    book.write(empty_assets)
 
-    result = await _performance(tmp_path)
+    result = await _performance(empty_assets)
 
     assert result["open"] == 1
     assert result["due"] == 0
@@ -443,43 +445,43 @@ def _assert_empty(result: dict[str, Any]) -> None:
     assert result["note"]
 
 
-async def test_a_missing_journal_is_zero_counts_and_a_note(tmp_path: Path) -> None:
+async def test_a_missing_journal_is_zero_counts_and_a_note(empty_assets: Path) -> None:
     """@issue-122 @AC7"""
-    result = await _performance(tmp_path)
+    result = await _performance(empty_assets)
 
     _assert_empty(result)
     assert result["open"] == 0
-    assert not (tmp_path / "journal").exists()
+    assert not (empty_assets / "journal").exists()
 
 
-async def test_an_empty_journal_is_zero_counts_and_a_note(tmp_path: Path) -> None:
+async def test_an_empty_journal_is_zero_counts_and_a_note(empty_assets: Path) -> None:
     """@issue-122 @AC7"""
-    Book().write(tmp_path)
+    Book().write(empty_assets)
 
-    result = await _performance(tmp_path)
+    result = await _performance(empty_assets)
 
     _assert_empty(result)
 
 
-async def test_only_open_calls_is_zero_counts_and_a_note(tmp_path: Path) -> None:
+async def test_only_open_calls_is_zero_counts_and_a_note(empty_assets: Path) -> None:
     """@issue-122 @AC7 @AC6"""
     book = Book()
     book.open_call("ASML.AS", PAST)
     book.open_call("AAPL", FUTURE)
-    book.write(tmp_path)
+    book.write(empty_assets)
 
-    result = await _performance(tmp_path)
+    result = await _performance(empty_assets)
 
     _assert_empty(result)
     assert result["open"] == 2
     assert result["due"] == 1
 
 
-async def test_the_result_says_it_reports_calls_not_trades(tmp_path: Path) -> None:
+async def test_the_result_says_it_reports_calls_not_trades(empty_assets: Path) -> None:
     """@issue-122 @AC8"""
-    _full_book().write(tmp_path)
+    _full_book().write(empty_assets)
 
-    result = await _performance(tmp_path)
+    result = await _performance(empty_assets)
 
     basis = result["basis"].lower()
     for words in ("calls", "trades", "eur", "iwda.as", "costs", "position size"):
@@ -488,29 +490,31 @@ async def test_the_result_says_it_reports_calls_not_trades(tmp_path: Path) -> No
 
 
 async def test_it_reads_offline_and_leaves_the_journal_as_it_was(
-    tmp_path: Path,
+    empty_assets: Path,
 ) -> None:
     """@issue-122 @AC9"""
-    path = _full_book().write(tmp_path)
+    path = _full_book().write(empty_assets)
     before = hashlib.sha256(path.read_bytes()).hexdigest()
 
-    result = await _performance(tmp_path)
+    result = await _performance(empty_assets)
 
     assert result["scored"] == 22
     assert hashlib.sha256(path.read_bytes()).hexdigest() == before
     # Any cache update or provider fetch would create the stocks folder.
-    assert not (tmp_path / "stocks").exists()
+    assert not (empty_assets / "stocks").exists()
 
 
-async def test_a_damaged_journal_is_an_error_naming_the_file(tmp_path: Path) -> None:
+async def test_a_damaged_journal_is_an_error_naming_the_file(
+    empty_assets: Path,
+) -> None:
     """@issue-122 @AC9"""
     book = _full_book()
-    path = book.write(tmp_path)
+    path = book.write(empty_assets)
     with path.open("a") as file:
         file.write("{not json\n")
     before = path.read_bytes()
 
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         result = await client.call_tool("get_performance", {})
 
     assert result.is_error

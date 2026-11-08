@@ -42,6 +42,7 @@ from fartt.data import (
 from fartt.journal import Journal
 from fartt.server import build_server
 from fartt.stock_cache import StockCache
+from tests.integration.risk import checked_in_risk_config
 from tests.integration.snapshot import OFFLINE, PINNED
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -118,7 +119,9 @@ async def _server_with_first_trade(
         return _AlteredFirstTrade(real, first_trade_ms)
 
     cache = StockCache(YFinanceProvider(ticker_factory=ticker), assets_dir)
-    async with Client(build_server(cache, Journal(assets_dir / "journal"))) as client:
+    async with Client(
+        build_server(cache, Journal(assets_dir / "journal"), checked_in_risk_config())
+    ) as client:
         yield client
 
 
@@ -169,14 +172,14 @@ async def _skip_if_goog_as_has_history(client: Client) -> None:
 
 
 @pytest.mark.network
-async def test_should_say_a_listed_ticker_has_no_history(tmp_path: Path) -> None:
+async def test_should_say_a_listed_ticker_has_no_history(empty_assets: Path) -> None:
     """@issue-116 @AC1 @AC4 Should say a listed ticker has no history, and cache nothing."""
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         await _skip_if_goog_as_has_history(client)
         errors = await _errors(client, NO_HISTORY)
 
     _assert_no_history_message(errors)
-    _assert_no_folder(tmp_path, NO_HISTORY)
+    _assert_no_folder(empty_assets, NO_HISTORY)
 
 
 @pytest.mark.network
@@ -199,7 +202,7 @@ async def test_should_say_a_listed_ticker_has_no_history(tmp_path: Path) -> None
     ],
 )
 async def test_should_word_the_error_from_the_first_trade_date(
-    tmp_path: Path, first_trade: str | None, expected: str
+    empty_assets: Path, first_trade: str | None, expected: str
 ) -> None:
     """@issue-116 @AC2 @AC3 @AC4 Should word the error from the first trade date."""
     newest = newest_closed_session("XAMS", datetime.now(UTC))
@@ -209,7 +212,7 @@ async def test_should_word_the_error_from_the_first_trade_date(
         else None
     )
 
-    async with _server_with_first_trade(tmp_path, first_trade_ms) as client:
+    async with _server_with_first_trade(empty_assets, first_trade_ms) as client:
         await _skip_if_goog_as_has_history(client)
         errors = await _errors(client, NO_HISTORY)
 
@@ -217,17 +220,19 @@ async def test_should_word_the_error_from_the_first_trade_date(
         assert expected in message, (tool, message)
         if first_trade == "next_session":
             assert "can't be analysed" not in message, (tool, message)
-    _assert_no_folder(tmp_path, NO_HISTORY)
+    _assert_no_folder(empty_assets, NO_HISTORY)
 
 
 @pytest.mark.network
 async def test_should_count_a_first_trade_on_the_newest_closed_session_as_history(
-    tmp_path: Path,
+    empty_assets: Path,
 ) -> None:
     """@issue-116 @AC1 Should treat a first trade on the newest closed session as traded."""
     newest = newest_closed_session("XAMS", datetime.now(UTC))
 
-    async with _server_with_first_trade(tmp_path, _session_open_ms(newest)) as client:
+    async with _server_with_first_trade(
+        empty_assets, _session_open_ms(newest)
+    ) as client:
         await _skip_if_goog_as_has_history(client)
         errors = await _errors(client, NO_HISTORY)
 
@@ -235,15 +240,15 @@ async def test_should_count_a_first_trade_on_the_newest_closed_session_as_histor
 
 
 @pytest.mark.network
-async def test_should_leave_no_folder_for_an_unknown_ticker(tmp_path: Path) -> None:
+async def test_should_leave_no_folder_for_an_unknown_ticker(empty_assets: Path) -> None:
     """@issue-116 @AC4 Should leave no folder for a ticker the provider doesn't know."""
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         for tool in ("get_candles", "get_quote"):
             result = await client.call_tool(tool, {"ticker": UNKNOWN})
             assert result.is_error, result.structured_content
             assert f"doesn't know {UNKNOWN}" in _text(result)
 
-    _assert_no_folder(tmp_path, UNKNOWN)
+    _assert_no_folder(empty_assets, UNKNOWN)
 
 
 @pytest.mark.parametrize(
@@ -314,9 +319,9 @@ async def test_should_not_serve_a_header_only_leftover_as_history(
 
 
 @pytest.mark.network
-async def test_should_quote_a_listed_ticker_without_history(tmp_path: Path) -> None:
+async def test_should_quote_a_listed_ticker_without_history(empty_assets: Path) -> None:
     """@issue-116 @AC6 Should still quote a listed ticker without daily history."""
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         await _skip_if_goog_as_has_history(client)
         result = await client.call_tool("get_quote", {"ticker": NO_HISTORY})
 
@@ -327,4 +332,4 @@ async def test_should_quote_a_listed_ticker_without_history(tmp_path: Path) -> N
     assert quote["last"] > 0
     assert quote["average_volume_20d"] is None
     assert quote["volume_ratio"] is None
-    _assert_no_folder(tmp_path, NO_HISTORY)
+    _assert_no_folder(empty_assets, NO_HISTORY)

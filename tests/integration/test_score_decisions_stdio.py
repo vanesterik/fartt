@@ -33,6 +33,7 @@ import pytest
 from mcp import Client, StdioServerParameters
 
 from fartt.data import exchange_calendar
+from tests.integration.risk import copy_risk_config
 from tests.integration.snapshot import OFFLINE, SNAPSHOT_DIR
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -344,6 +345,7 @@ async def test_should_not_change_a_score_when_later_candles_are_cached(
     """@issue-121 @AC5 Should score the same with or without candles after horizon_ends."""
     truncated = tmp_path_factory.mktemp("truncated")
     shutil.copytree(seeded_assets / "stocks", truncated / "stocks")
+    copy_risk_config(truncated)
     calls = [EUR_CALLS[0], USD_CALLS[1]]
     _seed(seeded_assets, calls)
     entries = _seed(truncated, calls)
@@ -502,11 +504,11 @@ async def test_should_be_a_tool_error_on_a_damaged_journal_and_write_nothing(
 
 
 async def test_should_refuse_a_call_on_any_fx_pair_and_reject_path_like_ones(
-    tmp_path: Path,
+    empty_assets: Path,
 ) -> None:
     """@issue-121 @AC10 Should refuse record_decision on any FX pair however it's written, and reject an FX-looking ticker that could escape the cache folder."""
     # Given an empty assets folder and the server started from .mcp.json
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         # When the agent records calls on FX pairs written in other ways
         refusals = {
             ticker: await client.call_tool(
@@ -532,10 +534,10 @@ async def test_should_refuse_a_call_on_any_fx_pair_and_reject_path_like_ones(
         assert result.is_error, ticker
         assert "exchange rate, not a stock" in _text(result)
         assert ticker.strip().upper() in _text(result)
-    assert not _journal(tmp_path).exists()
+    assert not _journal(empty_assets).exists()
     # And the path-like tickers aren't tickers, with no folder written for them
     for ticker, result in paths.items():
         assert result.is_error, ticker
         assert "isn't a ticker" in _text(result)
-    stocks = tmp_path / "stocks"
+    stocks = empty_assets / "stocks"
     assert not stocks.exists() or sorted(p.name for p in stocks.iterdir()) == []

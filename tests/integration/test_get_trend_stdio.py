@@ -295,10 +295,10 @@ async def test_should_serve_a_stale_cache_when_the_provider_is_unreachable(
 
 @pytest.mark.network
 async def test_should_say_what_to_do_for_a_ticker_it_cannot_serve(
-    tmp_path: Path,
+    empty_assets: Path,
 ) -> None:
     """@issue-108 @AC7 Should say what to do for a ticker it can't serve."""
-    async with _server(tmp_path, live=True) as client:
+    async with _server(empty_assets, live=True) as client:
         for ticker in ("ZZZQXQ", "VOD.L"):
             trend_error = await _error(client, "get_trend", ticker=ticker)
             candles_error = await _error(client, "get_candles", ticker=ticker)

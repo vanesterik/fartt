@@ -211,10 +211,10 @@ async def test_should_filter_by_ticker_case_and_space_insensitively(
 
 @pytest.mark.parametrize("ticker", ["AS ML", "../x", ""])
 async def test_should_reject_a_string_that_cant_be_a_ticker(
-    tmp_path: Path, ticker: str
+    empty_assets: Path, ticker: str
 ) -> None:
     """@issue-120 @AC2 Should be a tool error for a string that can't be a ticker."""
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         text = await _error(client, ticker=ticker)
 
     assert "isn't a ticker" in text
@@ -255,10 +255,10 @@ async def test_should_cap_at_the_limit_with_the_total_and_a_note(
 
 @pytest.mark.parametrize("limit", [0, 11, -1])
 async def test_should_reject_a_limit_outside_1_to_10(
-    tmp_path: Path, limit: int
+    empty_assets: Path, limit: int
 ) -> None:
     """@issue-120 @AC4 Should reject a limit below 1 or above 10."""
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         text = await _error(client, limit=limit)
 
     assert "limit" in text

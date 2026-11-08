@@ -34,6 +34,7 @@ from fartt.data import YFinanceProvider
 from fartt.journal import Journal
 from fartt.server import build_server
 from fartt.stock_cache import StockCache
+from tests.integration.risk import checked_in_risk_config, written
 from tests.integration.snapshot import OFFLINE
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -130,9 +131,9 @@ def _step_sections(text: str) -> dict[str, str]:
     }
 
 
-async def test_prompt_is_listed_with_one_required_ticker(tmp_path: Path) -> None:
+async def test_prompt_is_listed_with_one_required_ticker(empty_assets: Path) -> None:
     """@issue-131 @AC1 Should list analyze_ticker with one required argument."""
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         prompts = {p.name: p for p in (await client.list_prompts()).prompts}
 
     assert PROMPT in prompts
@@ -142,9 +143,9 @@ async def test_prompt_is_listed_with_one_required_ticker(tmp_path: Path) -> None
     assert [(a.name, a.required) for a in prompt.arguments] == [("ticker", True)]
 
 
-async def test_prompt_names_the_eight_steps_in_order(tmp_path: Path) -> None:
+async def test_prompt_names_the_eight_steps_in_order(empty_assets: Path) -> None:
     """@issue-131 @AC2 Should name the PRD's eight steps in order for ASML.AS."""
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         text = await _prompt_text(client, "asml.as")
 
     assert "ASML.AS" in text
@@ -152,9 +153,9 @@ async def test_prompt_names_the_eight_steps_in_order(tmp_path: Path) -> None:
     _in_order(text, STEPS)
 
 
-async def test_prompt_names_the_tools_and_skipped_steps(tmp_path: Path) -> None:
+async def test_prompt_names_the_tools_and_skipped_steps(empty_assets: Path) -> None:
     """@issue-131 @AC3 Should name each step's tools and mark the rest skipped."""
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         text = await _prompt_text(client, "ASML.AS")
     sections = _step_sections(text)
 
@@ -177,9 +178,9 @@ async def test_prompt_names_the_tools_and_skipped_steps(tmp_path: Path) -> None:
     assert "record_decision" in sections["monitoring and review"]
 
 
-async def test_prompt_states_the_decision_rules(tmp_path: Path) -> None:
+async def test_prompt_states_the_decision_rules(empty_assets: Path) -> None:
     """@issue-131 @AC4 Should state the decision rules the agent follows."""
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         text = await _prompt_text(client, "ASML.AS")
     lowered = text.lower()
 
@@ -205,9 +206,9 @@ async def test_prompt_states_the_decision_rules(tmp_path: Path) -> None:
     assert "`for`" in text and "`against`" in text
 
 
-async def test_prompt_says_when_no_call_is_recorded(tmp_path: Path) -> None:
+async def test_prompt_says_when_no_call_is_recorded(empty_assets: Path) -> None:
     """@issue-131 @AC5 Should say an open call or stale data means no new call."""
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         text = await _prompt_text(client, "ASML.AS")
     lowered = text.lower()
     no_record = r"(don't|do not|never) record"
@@ -220,9 +221,9 @@ async def test_prompt_says_when_no_call_is_recorded(tmp_path: Path) -> None:
     assert re.search(no_record, lowered[stale : stale + 300])
 
 
-async def test_prompt_names_the_report_sections_in_order(tmp_path: Path) -> None:
+async def test_prompt_names_the_report_sections_in_order(empty_assets: Path) -> None:
     """@issue-131 @AC6 Should name the report's six sections in order."""
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         text = await _prompt_text(client, "ASML.AS")
 
     # The report comes after the procedure's last step.
@@ -232,10 +233,10 @@ async def test_prompt_names_the_report_sections_in_order(tmp_path: Path) -> None
 
 @pytest.mark.parametrize("ticker", REFUSED)
 async def test_refused_ticker_is_an_error_and_no_prompt(
-    tmp_path: Path, ticker: str
+    empty_assets: Path, ticker: str
 ) -> None:
     """@issue-131 @AC7 Should refuse a ticker that can't be analysed."""
-    async with _server(tmp_path) as client:
+    async with _server(empty_assets) as client:
         with pytest.raises(MCPError) as raised:
             await client.get_prompt(PROMPT, {"ticker": ticker})
 
@@ -243,10 +244,10 @@ async def test_refused_ticker_is_an_error_and_no_prompt(
     # Says what a valid ticker looks like.
     assert "ASML.AS" in message
     assert "AAPL" in message
-    assert not any(tmp_path.iterdir())
+    assert written(empty_assets) == []
 
 
-async def test_refused_ticker_never_reaches_the_provider(tmp_path: Path) -> None:
+async def test_refused_ticker_never_reaches_the_provider(empty_assets: Path) -> None:
     """@issue-131 @AC7 Should refuse every bad ticker without calling Yahoo."""
     asked: list[str] = []
 
@@ -254,8 +255,10 @@ async def test_refused_ticker_never_reaches_the_provider(tmp_path: Path) -> None
         asked.append(symbol)
         return yfinance.Ticker(symbol)
 
-    cache = StockCache(YFinanceProvider(ticker_factory=ticker_factory), tmp_path)
-    server = build_server(cache, Journal(tmp_path / "journal"))
+    cache = StockCache(YFinanceProvider(ticker_factory=ticker_factory), empty_assets)
+    server = build_server(
+        cache, Journal(empty_assets / "journal"), checked_in_risk_config()
+    )
     async with Client(server) as client:
         for ticker in REFUSED:
             with pytest.raises(MCPError):
@@ -264,4 +267,4 @@ async def test_refused_ticker_never_reaches_the_provider(tmp_path: Path) -> None
         await _prompt_text(client, "ASML.AS")
 
     assert asked == []
-    assert not any(tmp_path.iterdir())
+    assert written(empty_assets) == []

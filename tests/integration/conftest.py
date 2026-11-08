@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.integration.risk import copy_risk_config
 from tests.integration.snapshot import SNAPSHOT_DIR
 
 
@@ -27,7 +28,19 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
 def seeded_assets(tmp_path: Path) -> Path:
     """
     This test's own assets folder, a copy of the snapshot: current at the
-    pinned clock, so the server fetches nothing, and free to change.
+    pinned clock, so the server fetches nothing, and free to change. It holds
+    a copy of the checked-in risk config, which the server needs to start.
     """
     shutil.copytree(SNAPSHOT_DIR / "stocks", tmp_path / "stocks")
+    copy_risk_config(tmp_path)
+    return tmp_path
+
+
+@pytest.fixture
+def empty_assets(tmp_path: Path) -> Path:
+    """
+    This test's own assets folder with nothing cached: only a copy of the
+    checked-in risk config, which the server needs to start.
+    """
+    copy_risk_config(tmp_path)
     return tmp_path
