@@ -87,6 +87,9 @@ CALL: dict[str, Any] = {
     "reasoning": "Integration check of a call with its trade plan.",
     "signals": SIGNALS,
 }
+# Since #148 a buy needs a plan: record_decision is compared with plan_trade
+# on the same ticker with a plan, so it refuses for the ticker, not the plan.
+ANY_PLAN: dict[str, Any] = {"entry": 1.0, "stop": 0.9, "target": 1.5, "valid_for": 5}
 
 pytestmark = pytest.mark.anyio
 
@@ -698,7 +701,12 @@ class TestRefusedAsRecordDecisionRefuses:
                 target=1400.0,
             )
             recorded = await _error(
-                client, "record_decision", ticker="ASML.AS", direction="buy", **CALL
+                client,
+                "record_decision",
+                ticker="ASML.AS",
+                direction="buy",
+                plan={"entry": 1000.0, "stop": 900.0, "target": 1400.0, "valid_for": 5},
+                **CALL,
             )
 
         for message in (planned, recorded):
@@ -720,7 +728,12 @@ class TestRefusedAsRecordDecisionRefuses:
                 client, "plan_trade", ticker=ticker, entry=1.0, stop=0.9, target=1.5
             )
             recorded = await _error(
-                client, "record_decision", ticker=ticker, direction="buy", **CALL
+                client,
+                "record_decision",
+                ticker=ticker,
+                direction="buy",
+                plan=ANY_PLAN,
+                **CALL,
             )
 
         def reason(message: str) -> str:
@@ -748,7 +761,12 @@ class TestRefusedAsRecordDecisionRefuses:
                 target=130.0,
             )
             recorded = await _error(
-                client, "record_decision", ticker="ZZZQXQ", direction="buy", **CALL
+                client,
+                "record_decision",
+                ticker="ZZZQXQ",
+                direction="buy",
+                plan={"entry": 100.0, "stop": 90.0, "target": 130.0, "valid_for": 5},
+                **CALL,
             )
 
         assert planned == recorded.replace("record_decision", "plan_trade")
@@ -863,7 +881,8 @@ class TestCallsWithoutAPlan:
         assert read_back["total"] == 0
         assert not _journal(seeded_assets).exists()
 
-    @pytest.mark.parametrize("direction", ["buy", "pass"])
+    # A buy without a plan is refused since #148 (test_procedure_148_stdio.py).
+    @pytest.mark.parametrize("direction", ["pass"])
     async def test_should_record_a_call_without_a_plan_as_before(
         self, seeded_assets: Path, direction: str
     ) -> None:
@@ -889,10 +908,12 @@ class TestCallsWithoutAPlan:
         """@issue-143 @AC9 Should read an older journal line as plan null."""
         async with _server(seeded_assets) as client:
             await _call(
-                client, "record_decision", ticker="ASML.AS", direction="buy", **CALL
+                client, "record_decision", ticker="ASML.AS", direction="pass", **CALL
             )
         journal = _journal(seeded_assets)
         line = json.loads(journal.read_text())
+        # A buy from before plans, which record_decision no longer takes (#148).
+        line["direction"] = "buy"
         line.pop("plan", None)
         journal.write_text(json.dumps(line) + "\n")
 

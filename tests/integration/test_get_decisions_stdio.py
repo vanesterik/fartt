@@ -109,8 +109,9 @@ async def _record(
     reasoning: str = "Integration test call.",
     signals: list[dict[str, Any]] | None = None,
     horizon: int = 20,
-    direction: str = "buy",
+    direction: str = "pass",
 ) -> dict[str, Any]:
+    # A pass by default: since #148 a buy needs a plan (`_record_with_plan`).
     result = await client.call_tool(
         "record_decision",
         {

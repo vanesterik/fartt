@@ -280,7 +280,8 @@ class TestKillSwitch:
         @issue-146 @AC3 Should refuse plan_trade and record_decision with a
         plan while the switch is tripped, saying it tripped, on which session,
         at what drawdown and that only the operator can reset it, recording
-        nothing; a pass and a buy without a plan are still recorded.
+        nothing; a pass is still recorded. (A buy without a plan was too until
+        #148, which refuses it: see test_procedure_148_stdio.py.)
         """
         await _seed(seeded_assets, [TRIPS])
         async with _server(seeded_assets) as client:
@@ -289,13 +290,11 @@ class TestKillSwitch:
             messages = await _plan_both_ways(client)
             unchanged = _journal(seeded_assets).read_bytes() == before
             passed = await _call(client, "record_decision", direction="pass", **CALL)
-            bought = await _call(client, "record_decision", direction="buy", **CALL)
 
         for message in messages:
             _check_kill_switch_message(message)
         assert unchanged
         assert passed["direction"] == "pass" and passed["plan"] is None
-        assert bought["direction"] == "buy" and bought["plan"] is None
 
     async def test_should_give_the_kill_switch_before_the_limit(
         self, seeded_assets: Path

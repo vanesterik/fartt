@@ -468,6 +468,8 @@ async def test_should_read_fx_candles_and_refuse_a_call_on_an_fx_pair(
                 "horizon": 20,
                 "reasoning": "An FX pair isn't a stock.",
                 "signals": [{"name": "trend", "stance": "for"}],
+                # A buy needs a plan since #148; the pair is refused anyway.
+                "plan": {"entry": 1.1, "stop": 1.0, "target": 1.3, "valid_for": 5},
             },
         )
 
