@@ -7,8 +7,10 @@ excess return for a `pass`, so a positive edge means right by that much in
 any group, also one that mixes directions, where right calls of opposite
 directions cancel in the average excess return.
 
-These are calls, not trades: no costs, no position sizes. Pure functions,
-no I/O.
+These are calls, not trades: no costs, no position sizes. The closed paper
+positions are reported apart, as trades: from their stored plan scores
+(EUR, after costs, against IWDA.AS over each holding period), with the
+stage 1 gate read from them. Pure functions, no I/O.
 
 """
 
@@ -20,7 +22,7 @@ from typing import NamedTuple
 
 from pydantic import BaseModel, Field
 
-from fartt.journal import SIGNALS, Decision, Score
+from fartt.journal import SIGNALS, Decision, Exit, Fill, PlanScore, Positions, Score
 
 # How many scored calls a group needs before it reports a rate or average.
 MIN_CALLS = 10
@@ -30,6 +32,11 @@ MAX_TICKERS = 50
 
 HIT_RATE_DECIMALS = 4
 RETURN_DECIMALS = 6
+
+# The stage 1 -> 2 gate (PRD section 6): paper trading for at least this
+# many whole months and this many scored plans.
+GATE_MONTHS = 3
+GATE_CLOSED_PLANS = 30
 
 
 class Period(BaseModel):
@@ -253,3 +260,264 @@ def _short_note(calls: int) -> str:
         f"{calls} scored {'call' if calls == 1 else 'calls'}; needs "
         f"{MIN_CALLS - calls} more (minimum {MIN_CALLS})."
     )
+
+
+class ReasonGroup(BaseModel):
+    """The scored plans that closed for one reason."""
+
+    plans: int = Field(description="How many scored plans closed this way.")
+    average_realised_r: float | None = Field(
+        description=f"Their mean realised R; null below {MIN_CALLS} scored plans."
+    )
+
+
+class ByReason(BaseModel):
+    stop: ReasonGroup = Field(description="Closed at the stop, gapped or not.")
+    target: ReasonGroup = Field(description="Closed at the target: the hits.")
+    horizon: ReasonGroup = Field(description="Closed at the call's horizon_ends.")
+
+
+class PlanPeriod(BaseModel):
+    """The span the scored plans cover."""
+
+    start: date = Field(description="The earliest fill session.")
+    end: date = Field(description="The latest exit session.")
+
+
+class PlanPerformance(BaseModel):
+    """How the closed and scored paper positions did, as trades after costs."""
+
+    plans: int = Field(description="How many closed plans are scored.")
+    open: int = Field(
+        description="How many closed plans aren't scored yet: score_decisions scores them."
+    )
+    hits: int = Field(description="How many scored plans closed at their target.")
+    hit_rate: float | None = Field(
+        description=(
+            "hits / plans, 0-1: the share that reached the target before the "
+            f"stop; null below {MIN_CALLS} scored plans, as every figure here."
+        )
+    )
+    average_return: float | None = Field(
+        description="The mean return, in EUR after all costs, dividends included."
+    )
+    average_benchmark_return: float | None = Field(
+        description="The mean of IWDA.AS's returns over the same holding periods."
+    )
+    average_excess_return: float | None = Field(
+        description="The mean excess return after costs: the gate's primary metric."
+    )
+    average_reward_to_risk: float | None = Field(
+        description="The mean planned reward-to-risk, after costs."
+    )
+    average_realised_r: float | None = Field(
+        description="The mean realised R: P&L over the plan's risk."
+    )
+    expectancy: float | None = Field(
+        description=(
+            "In R: the mean realised R, measured, so gaps through stops and "
+            "horizon exits count as they happened."
+        )
+    )
+    average_stop_slippage: float | None = Field(
+        description=(
+            "The mean of slippage / stop over the stop exits that gapped "
+            "through, as a fraction; null without one."
+        )
+    )
+    average_holding_sessions: float | None = Field(
+        description="The mean sessions held, fill and exit sessions included."
+    )
+    by_reason: ByReason = Field(description="The scored plans per exit reason.")
+    period: PlanPeriod | None = Field(
+        description="The span the scored plans cover; null when there are none."
+    )
+    note: str | None = Field(
+        default=None,
+        description="Why the figures are null, or plans wait for scoring, if so.",
+    )
+
+
+class GateCondition(BaseModel):
+    """One condition of the stage 1 gate."""
+
+    met: bool = Field(description="Whether the value meets what's required.")
+    value: int | float | None = Field(
+        description="The current value; null when there's nothing to measure yet."
+    )
+    required: int | float = Field(description="The threshold it's measured against.")
+
+
+class Gate(BaseModel):
+    """The gate from stage 1 (paper trading) to stage 2, PRD section 6."""
+
+    months: GateCondition = Field(
+        description=(
+            "Whole calendar months from the first plan's recording to today; "
+            f"met at {GATE_MONTHS} or more."
+        )
+    )
+    closed_plans: GateCondition = Field(
+        description=f"Closed and scored plans; met at {GATE_CLOSED_PLANS} or more."
+    )
+    average_excess_return: GateCondition = Field(
+        description="The plans' mean excess return after costs; met above 0."
+    )
+    average_reward_to_risk: GateCondition = Field(
+        description=(
+            "The plans' mean planned reward-to-risk after costs; met at "
+            "min_reward_to_risk (risk.toml) or more."
+        )
+    )
+    expectancy: GateCondition = Field(
+        description="The plans' mean realised R; met above 0."
+    )
+    met: bool = Field(description="Whether every condition is met.")
+
+
+class _Scored(NamedTuple):
+    decision: Decision
+    fill: Fill
+    exit: Exit
+    score: PlanScore
+
+
+def _scored_plans(
+    decisions: Sequence[Decision],
+    positions: Positions,
+    plan_scores: Mapping[int, PlanScore],
+) -> list[_Scored]:
+    # The journal stores a plan score only after its call's fill and exit.
+    return [
+        _Scored(d, positions.fills[d.id], positions.exits[d.id], plan_scores[d.id])
+        for d in decisions
+        if d.id in plan_scores
+    ]
+
+
+def _planned_reward_to_risk(plans: Sequence[_Scored]) -> list[float]:
+    return [p.decision.plan.reward_to_risk for p in plans if p.decision.plan]
+
+
+def _plans_note(scored: int, waiting: int) -> str | None:
+    notes: list[str] = []
+    if not scored:
+        notes.append("No plan has been scored yet.")
+    elif scored < MIN_CALLS:
+        notes.append(
+            f"{scored} scored {'plan' if scored == 1 else 'plans'}; needs "
+            f"{MIN_CALLS - scored} more (minimum {MIN_CALLS})."
+        )
+    if waiting:
+        notes.append(
+            "1 closed plan isn't scored yet: call score_decisions."
+            if waiting == 1
+            else f"{waiting} closed plans aren't scored yet: call score_decisions."
+        )
+    return " ".join(notes) or None
+
+
+def calculate_plans(
+    decisions: Sequence[Decision],
+    positions: Positions,
+    plan_scores: Mapping[int, PlanScore],
+) -> PlanPerformance:
+    """The figures over the scored plans; closed plans not scored are counted."""
+    plans = _scored_plans(decisions, positions, plan_scores)
+    count = len(plans)
+    waiting = sum(1 for d in positions.exits if d not in plan_scores)
+    full = count >= MIN_CALLS
+
+    def mean(values: Sequence[float]) -> float | None:
+        return _mean(values) if full and values else None
+
+    def reason(name: str) -> ReasonGroup:
+        rs = [p.score.realised_r for p in plans if p.exit.reason == name]
+        return ReasonGroup(plans=len(rs), average_realised_r=mean(rs))
+
+    realised = mean([p.score.realised_r for p in plans])
+    hits = sum(p.score.hit for p in plans)
+    gapped = [
+        p.exit.slippage / p.decision.plan.stop
+        for p in plans
+        if p.decision.plan and p.exit.reason == "stop" and p.exit.slippage > 0
+    ]
+    return PlanPerformance(
+        plans=count,
+        open=waiting,
+        hits=hits,
+        hit_rate=round(hits / count, HIT_RATE_DECIMALS) if full else None,
+        average_return=mean([p.score.return_ for p in plans]),
+        average_benchmark_return=mean([p.score.benchmark.return_ for p in plans]),
+        average_excess_return=mean([p.score.excess_return for p in plans]),
+        average_reward_to_risk=mean(_planned_reward_to_risk(plans)),
+        average_realised_r=realised,
+        expectancy=realised,
+        average_stop_slippage=mean(gapped),
+        average_holding_sessions=mean([p.score.holding_sessions for p in plans]),
+        by_reason=ByReason(
+            stop=reason("stop"), target=reason("target"), horizon=reason("horizon")
+        ),
+        period=PlanPeriod(
+            start=min(p.fill.session for p in plans),
+            end=max(p.exit.session for p in plans),
+        )
+        if plans
+        else None,
+        note=_plans_note(count, waiting),
+    )
+
+
+def calculate_gate(
+    decisions: Sequence[Decision],
+    positions: Positions,
+    plan_scores: Mapping[int, PlanScore],
+    today: date,
+    min_reward_to_risk: float,
+) -> Gate:
+    """
+    The stage 1 gate on `today` (UTC). Its values show from the first
+    scored plan, whatever `MIN_CALLS` says; months from the first plan
+    recorded.
+
+    """
+    plans = _scored_plans(decisions, positions, plan_scores)
+    recorded = [d.recorded_at.date() for d in decisions if d.plan is not None]
+    months = _whole_months(min(recorded), today) if recorded else None
+
+    def average(values: Sequence[float]) -> float | None:
+        return _mean(values) if values else None
+
+    excess = average([p.score.excess_return for p in plans])
+    reward_to_risk = average(_planned_reward_to_risk(plans))
+    expectancy = average([p.score.realised_r for p in plans])
+    conditions = {
+        "months": GateCondition(
+            met=months is not None and months >= GATE_MONTHS,
+            value=months,
+            required=GATE_MONTHS,
+        ),
+        "closed_plans": GateCondition(
+            met=len(plans) >= GATE_CLOSED_PLANS,
+            value=len(plans),
+            required=GATE_CLOSED_PLANS,
+        ),
+        "average_excess_return": GateCondition(
+            met=excess is not None and excess > 0, value=excess, required=0
+        ),
+        "average_reward_to_risk": GateCondition(
+            met=reward_to_risk is not None and reward_to_risk >= min_reward_to_risk,
+            value=reward_to_risk,
+            required=min_reward_to_risk,
+        ),
+        "expectancy": GateCondition(
+            met=expectancy is not None and expectancy > 0, value=expectancy, required=0
+        ),
+    }
+    return Gate(**conditions, met=all(c.met for c in conditions.values()))
+
+
+def _whole_months(start: date, end: date) -> int:
+    """Whole calendar months from `start` to `end`: 29 Oct to 28 Jan is 2."""
+    months = (end.year - start.year) * 12 + end.month - start.month
+    return max(months - (end.day < start.day), 0)

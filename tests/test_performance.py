@@ -1,14 +1,38 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any
 
-from fartt.journal import SIGNALS, BenchmarkScore, Decision, Leg, Score, Signal
+from fartt.journal import (
+    SIGNALS,
+    BenchmarkScore,
+    Decision,
+    ExitReason,
+    Leg,
+    PlanScore,
+    Positions,
+    Score,
+    Signal,
+)
 from fartt.performance import (
     MAX_TICKERS,
     MIN_CALLS,
+    Gate,
+    GateCondition,
     Period,
+    PlanPerformance,
+    PlanPeriod,
+    ReasonGroup,
+    calculate_gate,
     calculate_performance,
+    calculate_plans,
 )
-from tests.fakes import decision_draft, decision_score
+from tests.fakes import (
+    buy_plan,
+    decision_draft,
+    decision_score,
+    exit_line,
+    fill_line,
+    plan_score_line,
+)
 
 
 class Journal:
@@ -350,3 +374,234 @@ def test_no_scored_calls_has_no_tickers_and_empty_signals() -> None:
     assert performance.tickers == []
     assert performance.more_tickers == 0
     assert all(s.used.calls == s.not_used.calls == 0 for s in performance.signals)
+
+
+# Plans: closed paper positions and their scores.
+
+
+class Book:
+    """Planned calls with their fills, exits and plan scores."""
+
+    def __init__(self) -> None:
+        self.decisions: list[Decision] = []
+        self.positions = Positions({}, {}, {})
+        self.plan_scores: dict[int, PlanScore] = {}
+
+    def closed(
+        self,
+        realised_r: float,
+        reason: ExitReason = "stop",
+        excess: float = 0.01,
+        trade: float = 0.03,
+        benchmark: float = 0.02,
+        slippage: float = 0.0,
+        fill: date = date(2026, 10, 30),
+        exit: date = date(2026, 11, 2),
+        scored: bool = True,
+        **changes: Any,
+    ) -> Decision:
+        draft = decision_draft(plan=buy_plan(), **changes)
+        decision = Decision(id=len(self.decisions) + 1, **draft.model_dump())
+        self.decisions.append(decision)
+        self.positions.fills[decision.id] = fill_line(decision.id, session=fill)
+        self.positions.exits[decision.id] = exit_line(
+            decision.id, session=exit, reason=reason, slippage=slippage
+        )
+        if scored:
+            self.plan_scores[decision.id] = plan_score_line(
+                decision.id,
+                return_=trade,
+                benchmark=BenchmarkScore(
+                    ticker="IWDA.AS",
+                    start=Leg(session=fill, close=100.0),
+                    end=Leg(session=exit, close=102.0),
+                    return_=benchmark,
+                ),
+                excess_return=excess,
+                hit=reason == "target",
+                realised_r=realised_r,
+                reason=reason,
+                holding_sessions=3,
+            )
+        return decision
+
+    def plans(self) -> PlanPerformance:
+        return calculate_plans(self.decisions, self.positions, self.plan_scores)
+
+    def gate(self, today: date = date(2027, 2, 1)) -> Gate:
+        return calculate_gate(
+            self.decisions, self.positions, self.plan_scores, today, 2.0
+        )
+
+
+def ten_plans() -> Book:
+    book = Book()
+    for _ in range(4):
+        book.closed(3.0, "target", excess=0.05, trade=0.06, benchmark=0.01)
+    for _ in range(4):
+        book.closed(-1.0, "stop", excess=-0.03, trade=-0.02, benchmark=0.01)
+    book.closed(-1.5, "stop", excess=-0.04, trade=-0.03, benchmark=0.01, slippage=5.8)
+    book.closed(0.5, "horizon", excess=0.0, trade=0.01, benchmark=0.01)
+    return book
+
+
+def test_plans_report_the_means_of_the_stored_scores() -> None:
+    # @AC5 @AC7
+    plans = ten_plans().plans()
+
+    plan = buy_plan()
+    assert plans.plans == 10
+    assert plans.open == 0
+    assert plans.hits == 4
+    assert plans.hit_rate == 0.4
+    assert plans.average_return == round((0.24 - 0.08 - 0.03 + 0.01) / 10, 6)
+    assert plans.average_benchmark_return == 0.01
+    assert plans.average_excess_return == round((0.2 - 0.12 - 0.04) / 10, 6)
+    assert plans.average_reward_to_risk == plan.reward_to_risk
+    assert plans.average_realised_r == 0.7
+    assert plans.expectancy == 0.7
+    assert plans.average_stop_slippage == round(5.8 / 580.0, 6)
+    assert plans.average_holding_sessions == 3.0
+    assert plans.by_reason.target == ReasonGroup(plans=4, average_realised_r=3.0)
+    assert plans.by_reason.stop == ReasonGroup(plans=5, average_realised_r=-1.1)
+    assert plans.by_reason.horizon == ReasonGroup(plans=1, average_realised_r=0.5)
+    assert plans.period == PlanPeriod(start=date(2026, 10, 30), end=date(2026, 11, 2))
+    assert plans.note is None
+
+
+def test_expectancy_is_the_mean_realised_r_with_gaps_and_horizon_exits() -> None:
+    # @AC7
+    book = Book()
+    rs = [2.5, -1.0, -1.3, 0.2, -0.4, 2.5, -1.0, -1.0, 0.7, -1.21]
+    for r in rs:
+        book.closed(r, "horizon" if abs(r) < 1 else "stop")
+
+    plans = book.plans()
+
+    assert plans.expectancy == round(sum(rs) / len(rs), 6)
+    assert plans.expectancy == plans.average_realised_r
+
+
+def test_stop_slippage_is_null_without_a_gapped_stop() -> None:
+    book = Book()
+    for _ in range(10):
+        book.closed(-1.0, "stop")
+
+    assert book.plans().average_stop_slippage is None
+
+
+def test_below_the_minimum_plan_figures_are_null_with_a_note() -> None:
+    # @AC5
+    book = Book()
+    for _ in range(3):
+        book.closed(3.0, "target")
+    book.closed(-1.0, scored=False)
+
+    plans = book.plans()
+
+    assert plans.plans == 3
+    assert plans.open == 1
+    assert plans.hits == 3
+    assert plans.by_reason.target == ReasonGroup(plans=3, average_realised_r=None)
+    for figure in (
+        plans.hit_rate,
+        plans.average_return,
+        plans.average_benchmark_return,
+        plans.average_excess_return,
+        plans.average_reward_to_risk,
+        plans.average_realised_r,
+        plans.expectancy,
+        plans.average_stop_slippage,
+        plans.average_holding_sessions,
+    ):
+        assert figure is None
+    assert plans.period is not None
+    assert plans.note == (
+        f"3 scored plans; needs {MIN_CALLS - 3} more (minimum {MIN_CALLS}). "
+        "1 closed plan isn't scored yet: call score_decisions."
+    )
+
+
+def test_no_plans_is_zero_counts_and_a_note() -> None:
+    # @AC8
+    plans = Book().plans()
+
+    assert plans.plans == plans.open == plans.hits == 0
+    assert plans.hit_rate is None
+    assert plans.by_reason.stop == ReasonGroup(plans=0, average_realised_r=None)
+    assert plans.period is None
+    assert plans.note == "No plan has been scored yet."
+
+
+def test_the_gate_reports_each_condition() -> None:
+    # @AC6
+    book = ten_plans()
+
+    gate = book.gate()
+
+    plan = buy_plan()
+    assert gate.months == GateCondition(met=True, value=3, required=3)
+    assert gate.closed_plans == GateCondition(met=False, value=10, required=30)
+    assert gate.average_excess_return == GateCondition(
+        met=True, value=0.004, required=0
+    )
+    assert gate.average_reward_to_risk == GateCondition(
+        met=True, value=plan.reward_to_risk, required=2.0
+    )
+    assert gate.expectancy == GateCondition(met=True, value=0.7, required=0)
+    assert gate.met is False
+
+
+def test_months_are_whole_calendar_months_from_the_first_plan() -> None:
+    # @AC6: the first plan was recorded on 2026-10-29.
+    book = Book()
+    book.closed(1.0)
+    book.closed(1.0, recorded_at=datetime(2026, 12, 1, 9, 0, tzinfo=UTC))
+    # A call without a plan, recorded earlier, doesn't start the count.
+    early = decision_draft(recorded_at=datetime(2026, 9, 1, 9, 0, tzinfo=UTC))
+    book.decisions.insert(0, Decision(id=99, **early.model_dump()))
+
+    assert book.gate(date(2027, 1, 28)).months.value == 2
+    assert book.gate(date(2027, 1, 29)).months.value == 3
+
+
+def test_the_gate_is_met_when_every_condition_is() -> None:
+    # @AC6
+    book = Book()
+    for _ in range(30):
+        book.closed(0.5, "target", excess=0.01)
+
+    gate = book.gate()
+
+    assert gate.closed_plans == GateCondition(met=True, value=30, required=30)
+    assert gate.met is True
+
+
+def test_the_gate_shows_its_values_below_the_figures_minimum() -> None:
+    # @AC6
+    book = Book()
+    book.closed(-1.0, excess=-0.02)
+
+    gate = book.gate()
+
+    assert gate.closed_plans.value == 1
+    assert gate.average_excess_return == GateCondition(
+        met=False, value=-0.02, required=0
+    )
+    assert gate.expectancy.value == -1.0
+
+
+def test_without_plans_the_gate_is_not_met() -> None:
+    # @AC8
+    gate = Book().gate()
+
+    assert gate.months == GateCondition(met=False, value=None, required=3)
+    assert gate.closed_plans == GateCondition(met=False, value=0, required=30)
+    for condition in (
+        gate.average_excess_return,
+        gate.average_reward_to_risk,
+        gate.expectancy,
+    ):
+        assert condition.value is None
+        assert condition.met is False
+    assert gate.met is False
