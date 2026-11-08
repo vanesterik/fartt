@@ -8,7 +8,14 @@ import pytest
 from fartt.journal import SIGNALS, Signal
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
-from tests.fakes import decision_draft, decision_score
+from tests.fakes import (
+    buy_plan,
+    decision_draft,
+    decision_score,
+    exit_line,
+    fill_line,
+    plan_score_line,
+)
 from tests.test_server import (
     cache_for,
     call,
@@ -255,3 +262,112 @@ async def test_the_largest_result_fits(tmp_path: Path) -> None:
 def test_the_instructions_mention_get_performance() -> None:
     assert "get_performance" in server_module.INSTRUCTIONS
     assert "calls, not trades" in server_module.INSTRUCTIONS
+
+
+def closed_plan(cache: StockCache, scored: bool = True, **score: Any) -> None:
+    journal = journal_of(cache)
+    (decision,) = seed(cache, decision_draft(plan=buy_plan()))
+    journal.append_fill(fill_line(decision.id))
+    journal.append_exit(exit_line(decision.id))
+    if scored:
+        journal.append_plan_score(plan_score_line(decision.id, **score))
+
+
+@pytest.mark.anyio
+async def test_get_performance_reports_the_plans_and_the_gate(tmp_path: Path) -> None:
+    # @AC5 @AC6 @AC7: ten plans stopped out (realised R -0.988), next to calls.
+    cache = a_cache(tmp_path)
+    for _ in range(10):
+        scored(cache, 0.02)
+    for _ in range(10):
+        closed_plan(cache)
+
+    content = (await get_performance(cache)).structured_content
+
+    assert content["overall"]["calls"] == 10
+    plans = content["plans"]
+    assert plans["plans"] == 10
+    assert plans["open"] == 0
+    assert plans["hits"] == 0
+    assert plans["hit_rate"] == 0.0
+    assert plans["average_return"] == -0.03924
+    assert plans["average_benchmark_return"] == 0.007407
+    assert plans["average_excess_return"] == -0.046647
+    assert plans["average_reward_to_risk"] == buy_plan().reward_to_risk
+    assert plans["average_realised_r"] == plans["expectancy"] == -0.988
+    assert plans["average_stop_slippage"] is None
+    assert plans["average_holding_sessions"] == 2.0
+    assert plans["by_reason"]["stop"] == {"plans": 10, "average_realised_r": -0.988}
+    assert plans["by_reason"]["target"] == {"plans": 0, "average_realised_r": None}
+    assert plans["period"] == {"start": "2026-10-30", "end": "2026-11-02"}
+    assert plans["note"] is None
+    gate = content["gate"]
+    # The plans were recorded on 2026-10-29; the clock says 2026-10-29.
+    assert gate["months"] == {"met": False, "value": 0, "required": 3}
+    assert gate["closed_plans"] == {"met": False, "value": 10, "required": 30}
+    assert gate["average_excess_return"] == {
+        "met": False,
+        "value": -0.046647,
+        "required": 0,
+    }
+    assert gate["average_reward_to_risk"] == {
+        "met": True,
+        "value": buy_plan().reward_to_risk,
+        "required": 2.0,
+    }
+    assert gate["expectancy"] == {"met": False, "value": -0.988, "required": 0}
+    assert gate["met"] is False
+
+
+@pytest.mark.anyio
+async def test_below_ten_plans_the_figures_wait(tmp_path: Path) -> None:
+    # @AC5
+    cache = a_cache(tmp_path)
+    for _ in range(3):
+        closed_plan(cache)
+    closed_plan(cache, scored=False)
+
+    content = (await get_performance(cache)).structured_content
+
+    plans = content["plans"]
+    assert plans["plans"] == 3
+    assert plans["open"] == 1
+    assert plans["hit_rate"] is None
+    assert plans["expectancy"] is None
+    assert plans["note"] == (
+        "3 scored plans; needs 7 more (minimum 10). "
+        "1 closed plan isn't scored yet: call score_decisions."
+    )
+    assert content["gate"]["expectancy"]["value"] == -0.988
+
+
+@pytest.mark.anyio
+async def test_without_plans_the_block_is_empty_and_the_gate_not_met(
+    tmp_path: Path,
+) -> None:
+    # @AC8
+    cache = a_cache(tmp_path)
+    scored(cache, 0.02)
+
+    content = (await get_performance(cache)).structured_content
+
+    assert content["overall"]["calls"] == 1
+    plans = content["plans"]
+    assert plans["plans"] == plans["open"] == plans["hits"] == 0
+    assert plans["average_return"] is None
+    assert plans["period"] is None
+    assert plans["note"] == "No plan has been scored yet."
+    assert content["gate"]["met"] is False
+    assert content["gate"]["months"]["value"] is None
+    assert content["gate"]["closed_plans"]["value"] == 0
+
+
+@pytest.mark.anyio
+async def test_the_basis_says_plans_are_trades_after_costs(tmp_path: Path) -> None:
+    content = (await get_performance(a_cache(tmp_path))).structured_content
+
+    basis = content["basis"]
+    assert "calls, not trades" in basis
+    assert "plans" in basis
+    assert "after costs" in basis
+    assert "holding period" in basis

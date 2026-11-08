@@ -52,10 +52,14 @@ from fartt.journal import (
 from fartt.performance import (
     MAX_TICKERS,
     MIN_CALLS,
+    Gate,
     Group,
+    PlanPerformance,
     SignalPerformance,
     TickerPerformance,
+    calculate_gate,
     calculate_performance,
+    calculate_plans,
 )
 from fartt.portfolio import (
     ClosedSummary,
@@ -727,7 +731,10 @@ class PortfolioResult(BaseModel):
 BASIS = (
     "These are calls, not trades: each return is in EUR against IWDA.AS, "
     "without costs or position sizes. Calls whose horizons overlap aren't "
-    "independent, so the hit rate can look steadier than it is."
+    "independent, so the hit rate can look steadier than it is. The plans "
+    "block is trades: each closed plan's return in EUR after costs against "
+    "IWDA.AS over its holding period; overlapping plans aren't independent "
+    "either."
 )
 
 
@@ -769,6 +776,18 @@ class PerformanceResult(BaseModel):
             "Every ticker with a scored call, most scored calls first, then "
             f"by ticker; at most {MAX_TICKERS}. Its figures hold whatever "
             "its count: weigh them by calls."
+        )
+    )
+    plans: PlanPerformance = Field(
+        description=(
+            "The closed paper positions, scored as trades after costs against "
+            f"IWDA.AS; figures from {MIN_CALLS} scored plans, counts always."
+        )
+    )
+    gate: Gate = Field(
+        description=(
+            "The stage 1 to 2 gate: each condition's value, what it requires "
+            "and whether it's met; met when all are."
         )
     )
     note: str | None = Field(
@@ -2551,11 +2570,17 @@ def build_server(
         per ticker. Edge is the excess return for a buy and its negation for
         a pass, so above 0 means right on average; read it, not the excess
         return, for a group mixing both. Calls, not trades: no costs or
-        position sizes. Open calls are counted, not figured.
+        position sizes. Open calls are counted, not figured. Next to them,
+        the closed paper positions as trades after costs (plans: hit rate,
+        average return, benchmark and excess return, planned reward-to-risk,
+        realised R and expectancy, stop slippage, per exit reason) and the
+        stage 1 gate, each condition with its value and whether it's met.
         """
         try:
             decisions = journal.decisions()
             scores = journal.scores()
+            positions = journal.positions()
+            plan_scores = journal.plan_scores()
         except CACHE_ERRORS as error:
             raise _journal_unreadable("get_performance", journal.path, error) from error
 
@@ -2563,9 +2588,18 @@ def build_server(
         still_open = [d for d in decisions if _status(d, scores) == "open"]
         due = sum(_horizon_passed(d, now) for d in still_open)
         performance = calculate_performance(decisions, scores)
+        plans = calculate_plans(decisions, positions, plan_scores)
+        gate = calculate_gate(
+            decisions,
+            positions,
+            plan_scores,
+            now.astimezone(UTC).date(),
+            risk_config.limits.min_reward_to_risk,
+        )
         logger.info(
             f"get_performance: {performance.overall.calls} scored, "
-            f"{len(still_open)} open, {due} due"
+            f"{len(still_open)} open, {due} due; {plans.plans} plans scored, "
+            f"gate {'met' if gate.met else 'not met'}"
         )
         return PerformanceResult(
             basis=BASIS,
@@ -2578,6 +2612,8 @@ def build_server(
             pass_=performance.pass_,
             signals=performance.signals,
             tickers=performance.tickers,
+            plans=plans,
+            gate=gate,
             note=_performance_note(
                 performance.overall.calls, due, performance.more_tickers
             ),
