@@ -175,6 +175,14 @@ def session_on_or_before(exchange: str, day: date) -> date:
     return calendar.date_to_session(day, direction="previous").date()
 
 
+def sessions_in_range(exchange: str, start: date, end: date) -> list[date]:
+    """The sessions of `exchange` from `start` to `end`, both included, ascending."""
+    if start > end:
+        return []
+    window = exchange_calendar(exchange).sessions_in_range(start, end)
+    return [session.date() for session in window]
+
+
 def exchange_date(exchange: str, moment: datetime) -> date:
     """The date `moment` (timezone-aware) falls on in the exchange's time zone."""
     return moment.astimezone(exchange_calendar(exchange).tz).date()
