@@ -448,6 +448,40 @@ class TestPricesThatDontMakeALongPlan:
         assert "above 0" in message
         assert written(seeded_assets) == ["stocks"]
 
+    @pytest.mark.parametrize("field", ["entry", "stop", "target"])
+    @pytest.mark.parametrize("value", ["NaN", "Infinity", "-Infinity"])
+    async def test_should_refuse_a_price_that_is_not_a_finite_number(
+        self, seeded_assets: Path, field: str, value: str
+    ) -> None:
+        """
+        @issue-143 @AC6 @AC8 Should refuse a price that isn't a finite number,
+        naming it, in plan_trade and in record_decision's plan, recording
+        nothing.
+        """
+        async with _server(seeded_assets) as client:
+            close, _atr = await _market(client, "AAPL")
+            entry = round(close * 0.98, 2)
+            prices: dict[str, Any] = {
+                "entry": entry,
+                "stop": round(entry * 0.97, 2),
+                "target": round(entry * 1.12, 2),
+            }
+            prices[field] = value
+            planned = await _error(client, "plan_trade", ticker="AAPL", **prices)
+            recorded = await _error(
+                client,
+                "record_decision",
+                ticker="AAPL",
+                direction="buy",
+                **CALL,
+                plan={**prices, "valid_for": 5},
+            )
+
+        for message in (planned, recorded):
+            assert field in message
+            assert "finite" in message
+        assert written(seeded_assets) == ["stocks"]
+
     async def test_should_refuse_an_entry_more_than_one_atr_above_the_close(
         self, seeded_assets: Path
     ) -> None:
