@@ -219,12 +219,12 @@ async def test_get_portfolio_settles_so_it_is_idempotent_not_read_only(
     assert tool.input_schema.get("properties", {}) == {}
 
 
-def test_the_instructions_name_get_portfolio_at_the_check_in() -> None:
+def test_the_instructions_say_what_get_portfolio_shows() -> None:
     (sentence,) = [
         s for s in server_module.INSTRUCTIONS.split(". ") if "get_portfolio" in s
     ]
-    assert "check-in" in sentence
-    assert "score_decisions" in sentence
+    assert "settles the plans first" in sentence
+    assert "open positions against their plans" in sentence
 
 
 @pytest.mark.anyio

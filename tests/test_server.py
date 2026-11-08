@@ -26,7 +26,12 @@ from fartt.journal import (
     Journal,
     Signal,
 )
-from fartt.procedure import analysis_prompt, procedure_tools
+from fartt.procedure import (
+    analysis_prompt,
+    checkin_prompt,
+    checkin_tools,
+    procedure_tools,
+)
 from fartt.risk_config import RISK_FILE, Costs, ExchangeCosts, Limits, RiskConfig
 from fartt.server import build_server
 from fartt.server import server as server_module
@@ -314,6 +319,7 @@ async def test_the_tools_are_listed(tmp_path: Path) -> None:
     assert sorted(tool.name for tool in tools) == [
         "get_analysis_procedure",
         "get_candles",
+        "get_checkin_procedure",
         "get_decisions",
         "get_indicators",
         "get_performance",
@@ -1511,6 +1517,19 @@ def test_the_instructions_send_an_analysis_to_get_analysis_procedure() -> None:
     assert "analyze_ticker" in sentence
 
 
+def test_the_instructions_send_a_checkin_to_get_checkin_procedure() -> None:
+    # @AC6
+    sentences = server_module.INSTRUCTIONS.split(". ")
+    sentence = next(
+        s
+        for s in sentences
+        if "Before a daily check-in, call get_checkin_procedure" in s
+    )
+    assert "daily_checkin" in sentence
+    checkin = [s for s in sentences if "check-in" in s]
+    assert checkin == [sentence]
+
+
 def test_the_instructions_say_to_record_every_call() -> None:
     assert "record_decision" in server_module.INSTRUCTIONS
 
@@ -1997,7 +2016,7 @@ async def test_the_analyze_ticker_prompt_is_listed(tmp_path: Path) -> None:
     async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
         prompts = (await client.list_prompts()).prompts
 
-    assert [prompt.name for prompt in prompts] == ["analyze_ticker"]
+    assert [prompt.name for prompt in prompts] == ["analyze_ticker", "daily_checkin"]
     prompt = prompts[0]
     assert prompt.description
     assert prompt.arguments is not None
@@ -2105,12 +2124,64 @@ async def test_get_analysis_procedure_refuses_as_the_prompt_does(
 
 
 @pytest.mark.anyio
-async def test_every_tool_the_procedure_names_is_registered(tmp_path: Path) -> None:
+async def test_every_tool_either_procedure_names_is_registered(tmp_path: Path) -> None:
+    # @AC7
     cache = cache_for(provider([]), tmp_path)
     async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
         tools = {tool.name for tool in (await client.list_tools()).tools}
 
     assert procedure_tools() <= tools
+    assert checkin_tools() <= tools
+
+
+@pytest.mark.anyio
+async def test_the_daily_checkin_prompt_takes_no_arguments(tmp_path: Path) -> None:
+    # @AC5
+    cache = cache_for(provider([]), tmp_path)
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
+        prompts = (await client.list_prompts()).prompts
+
+    prompt = next(p for p in prompts if p.name == "daily_checkin")
+    assert prompt.description
+    assert not prompt.arguments
+
+
+@pytest.mark.anyio
+async def test_get_checkin_procedure_is_read_only_without_arguments(
+    tmp_path: Path,
+) -> None:
+    # @AC5
+    cache = cache_for(provider([]), tmp_path)
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
+        tools = (await client.list_tools()).tools
+
+    tool = next(t for t in tools if t.name == "get_checkin_procedure")
+    assert tool.description
+    assert tool.input_schema.get("properties", {}) == {}
+    assert tool.annotations is not None
+    assert tool.annotations.read_only_hint is True
+    assert tool.annotations.open_world_hint is False
+
+
+@pytest.mark.anyio
+async def test_the_checkin_prompt_and_tool_return_the_same_procedure(
+    tmp_path: Path,
+) -> None:
+    # @AC5
+    fake = provider([])
+    fake.reachable = False
+    cache = cache_for(fake, tmp_path)
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
+        result = await client.call_tool("get_checkin_procedure", {})
+        prompt = await client.get_prompt("daily_checkin", {})
+
+    assert not result.is_error, result.content
+    assert len(prompt.messages) == 1
+    assert prompt.messages[0].role == "user"
+    assert prompt.messages[0].content.text == checkin_prompt()
+    assert result.structured_content == {"procedure": checkin_prompt()}
+    assert fake.history_calls == []
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.anyio
