@@ -305,6 +305,12 @@ def test_a_target_too_large_to_work_out_is_refused(target: float) -> None:
         plan(target=target)
 
 
+def test_an_entry_too_small_to_work_out_is_refused() -> None:
+    # Positive, but the shares the position limit allows overflow to infinity.
+    with pytest.raises(PlanRefused, match=r"entry \(1e-320\) is too small"):
+        plan(entry=1e-320, stop=1e-321, target=1.0)
+
+
 @pytest.mark.parametrize("field", ["reward", "risk", "reward_to_risk"])
 @pytest.mark.parametrize("value", [math.nan, math.inf])
 def test_a_plan_with_an_amount_that_is_not_a_number_is_invalid(
