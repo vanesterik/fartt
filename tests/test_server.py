@@ -310,6 +310,7 @@ async def test_the_tools_are_listed(tmp_path: Path) -> None:
         "get_risk_config",
         "get_support_resistance",
         "get_trend",
+        "plan_trade",
         "record_decision",
         "score_decisions",
     ]
