@@ -16,6 +16,7 @@ cent and every sum is of rounded amounts. Pure functions, no I/O.
 
 """
 
+from bisect import bisect_right
 from collections.abc import Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from datetime import date, datetime
@@ -70,6 +71,18 @@ class Totals(BaseModel):
     realised_pnl: float = Field(description="The closed positions' P&L after costs.")
     unrealised_pnl: float = Field(
         description="The open positions' P&L after the costs to close, with dividends."
+    )
+    peak: float = Field(
+        description=(
+            "The highest portfolio value at any session close since the first "
+            "fill, and at least the starting capital."
+        )
+    )
+    peak_session: date | None = Field(
+        description="The session of the peak; null while the starting capital is it."
+    )
+    drawdown: float = Field(
+        description="(peak − total_value) / peak: 0.05 means 5% below the peak."
     )
     open_risk: float = Field(
         description="The further loss if every open stop is hit as planned, after costs."
@@ -177,6 +190,12 @@ class Portfolio(BaseModel):
     waiting: list[WaitingPlan]
     closed: ClosedSummary
     stale: list[str] = Field(description="Tickers valued on a stale close.")
+    skipped_days: int = Field(
+        description=(
+            "Valuation days left out of the peak because a close or rate of "
+            "theirs isn't cached yet."
+        )
+    )
 
 
 def _cents(value: float) -> float:
@@ -354,6 +373,101 @@ def _closed(decisions: Mapping[int, Decision], exits: Sequence[Exit]) -> ClosedS
     )
 
 
+class _Held(NamedTuple):
+    """A filled position, for valuing the portfolio on past sessions."""
+
+    decision: Decision
+    fill: Fill
+    exit: Exit | None
+
+
+def _value_on(
+    day: date,
+    held: Sequence[_Held],
+    starting_capital: float,
+    market: Market,
+    costs: Costs,
+    sessions: Mapping[str, set[date]],
+) -> float | None:
+    """
+    The portfolio's value at `day`'s close: cash after its fills and exits
+    plus each position then open at its latest close on or before the day
+    and the day's rate, with its dividends so far. `None` when a session's
+    close or a rate isn't cached.
+
+    """
+    total = starting_capital
+    for decision, fill, exit in held:
+        if fill.session > day:
+            continue
+        total -= fill.value + fill.costs.total
+        if exit is not None and exit.session <= day:
+            total += exit.value - exit.costs.total + exit.dividends
+            continue
+        candles = market.candles[decision.ticker]
+        index = bisect_right(candles, day, key=lambda c: c.date)
+        if not index or (
+            day in sessions[decision.exchange] and candles[index - 1].date != day
+        ):
+            return None
+        rate: float | None = None
+        pair = fx_pair(decision.currency)
+        if pair is not None:
+            try:
+                rate = rate_on(decision.currency, market.candles.get(pair, []), day)
+            except Unscorable:
+                return None
+        close = round(candles[index - 1].close, PRICE_DECIMALS)
+        total += _sale(fill.shares, close, rate, decision, costs)
+        total += _dividends(
+            market.dividends.get(decision.ticker, []),
+            fill.shares,
+            fill.session,
+            day,
+            rate,
+        )
+    return _cents(total)
+
+
+def _peak(
+    held: Sequence[_Held],
+    starting_capital: float,
+    total_value: float,
+    based_on: date | None,
+    market: Market,
+    costs: Costs,
+    now: datetime,
+) -> tuple[float, date | None, int]:
+    """
+    The highest value at a valuation day's close (every session since the
+    first fill of an exchange with a position then open, through its exit
+    session), the starting capital and the current total; its session; and
+    how many valuation days were skipped.
+
+    """
+    sessions: dict[str, set[date]] = {}
+    for decision, fill, exit in held:
+        last = (
+            exit.session
+            if exit is not None
+            else newest_closed_session(decision.exchange, now)
+        )
+        sessions.setdefault(decision.exchange, set()).update(
+            sessions_in_range(decision.exchange, fill.session, last)
+        )
+    days = {day for exchange_days in sessions.values() for day in exchange_days}
+    peak, peak_session, skipped = starting_capital, None, 0
+    for day in sorted(days):
+        value = _value_on(day, held, starting_capital, market, costs, sessions)
+        if value is None:
+            skipped += 1
+        elif value > peak:
+            peak, peak_session = value, day
+    if total_value > peak:
+        peak, peak_session = total_value, based_on
+    return peak, peak_session, skipped
+
+
 def calculate_portfolio(
     decisions: Sequence[Decision],
     positions: Positions,
@@ -407,25 +521,40 @@ def calculate_portfolio(
     reserved = _cents(sum(w.reserved for w in waiting))
     open_value = _cents(sum(h.value for h in holdings))
     closed = _closed(by_id, exit_lines)
+    total_value = _cents(cash + open_value)
+    based_on = max((h.based_on for h in holdings), default=None)
+    peak, peak_session, skipped = _peak(
+        [_Held(by_id[i], f, exits.get(i)) for i, f in sorted(fills.items())],
+        starting_capital,
+        total_value,
+        based_on,
+        market,
+        costs,
+        now,
+    )
     totals = Totals(
         starting_capital=starting_capital,
         cash=cash,
         reserved=reserved,
         free_cash=_cents(cash - reserved),
         open_value=open_value,
-        total_value=_cents(cash + open_value),
+        total_value=total_value,
         realised_pnl=closed.realised_pnl,
         unrealised_pnl=_cents(sum(h.unrealised_pnl for h in holdings)),
+        peak=peak,
+        peak_session=peak_session,
+        drawdown=round((peak - total_value) / peak, DISTANCE_DECIMALS),
         open_risk=_cents(sum(v.risk for v in held)),
         waiting_risk=_cents(waiting_risk),
         open_positions=len(holdings),
         waiting_plans=len(waiting),
     )
     return Portfolio(
-        based_on=max((h.based_on for h in holdings), default=None),
+        based_on=based_on,
         totals=totals,
         open=holdings,
         waiting=waiting,
         closed=closed,
         stale=list(dict.fromkeys(h.ticker for h in holdings if not h.is_current)),
+        skipped_days=skipped,
     )
