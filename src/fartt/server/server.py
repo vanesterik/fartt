@@ -89,9 +89,15 @@ from fartt.trade_plan import (
 # well under that, and the agent needs recent context, not years of history.
 MAX_CANDLES = 200
 # A worst-case journal entry (2,000 characters of reasoning, every signal with
-# a 200-character note) is about 4,500 characters of JSON and its score about
-# 500 more, so ten stay well under that limit. Narrowing by ticker or status reaches older calls.
+# a 200-character note, and a buy's trade plan, about 1,400 of them) is about
+# 6,200 characters of JSON with its score, so ten are about 63,000. At one
+# token per three characters, the pessimistic rate for numbers, the bound
+# below is about 23,300 tokens, under that limit; the reasoning and notes
+# (3,600 of each entry's characters) are prose at about four characters a
+# token, so a real worst case is nearer 18,000. Narrowing by ticker or status
+# reaches older calls.
 MAX_DECISIONS = 10
+MAX_DECISIONS_CHARS = 70_000
 # A scored call is about 200 characters and a call not scored about 150, so
 # 50 of each stay well under the limit. Every score is stored either way.
 MAX_SCORED = 50

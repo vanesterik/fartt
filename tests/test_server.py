@@ -23,6 +23,7 @@ from fartt.risk_config import RISK_FILE, Costs, ExchangeCosts, Limits, RiskConfi
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
+from fartt.trade_plan import TradePlan, calculate_plan
 from tests.fakes import (
     RISK_CONFIG,
     FakeProvider,
@@ -1755,15 +1756,36 @@ async def test_get_decisions_rejects_a_limit_outside_1_to_10(
     assert "limit" in result.content[0].text
 
 
+def largest_plan() -> TradePlan:
+    """A plan on a US stock: converted, so every cost is filled in."""
+    return calculate_plan(
+        ticker="TEST",
+        currency="USD",
+        exchange_code="XNYS",
+        based_on=date(2026, 10, 29),
+        last_close=1234.5678,
+        atr=45.6789,
+        entry=1234.5678,
+        stop=1187.6543,
+        target=1456.7891,
+        valid_for=10,
+        rate=1.162345,
+        portfolio_value=RISK_CONFIG.limits.starting_capital,
+        limits=RISK_CONFIG.limits,
+        costs=RISK_CONFIG.costs,
+    )
+
+
 @pytest.mark.anyio
-async def test_ten_of_the_largest_calls_fit_under_60000_characters(
+async def test_ten_of_the_largest_calls_fit_within_max_decisions_chars(
     tmp_path: Path,
 ) -> None:
-    # @AC9
+    # @AC9 (#120); a buy carries its plan since #143.
     cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
     largest = decision_draft(
         reasoning="x" * 2000,
         signals=[Signal(name=name, stance="for", note="n" * 200) for name in SIGNALS],
+        plan=largest_plan(),
     )
     seed(cache, *(largest for _ in range(12)))
     for decision_id in range(1, 13):
@@ -1773,8 +1795,11 @@ async def test_ten_of_the_largest_calls_fit_under_60000_characters(
 
     assert all(entry["score"] for entry in result.structured_content["decisions"])
 
+    assert all(entry["plan"] for entry in result.structured_content["decisions"])
     assert len(result.structured_content["decisions"]) == 10
-    assert len(json.dumps(result.structured_content)) < 60_000
+    assert (
+        len(json.dumps(result.structured_content)) < server_module.MAX_DECISIONS_CHARS
+    )
 
 
 @pytest.mark.anyio
