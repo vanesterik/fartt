@@ -412,3 +412,19 @@ def test_a_plan_beyond_the_free_cash_is_refused() -> None:
     assert f"free cash of €{free:,.2f}" in message
     assert f"€{5 * each:,.2f} reserved" in message
     assert f"misses by €{round(need - free, 2):,.2f}" in message
+
+
+def test_a_position_with_nothing_cached_is_valued_at_its_fill() -> None:
+    # The stocks/ cache is safe to delete; an unreachable provider can't refill it.
+    result = portfolio(
+        [call(1)], fills=[fill_line(1)], candles={"ASML.AS": []},
+        not_updated=frozenset({"ASML.AS"}),
+    )  # fmt: skip
+
+    (held,) = result.open
+    assert (held.last_close, held.based_on) == (600.0, date(2026, 10, 30))
+    assert held.value == sale(2, 600.0)
+    assert held.is_current is False
+    assert held.warning is not None
+    assert "Nothing is cached for ASML.AS" in held.warning
+    assert (held.to_stop_atr, held.to_target_atr) == (None, None)

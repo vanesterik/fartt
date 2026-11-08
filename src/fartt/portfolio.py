@@ -290,18 +290,28 @@ def _hold(
     now: datetime,
     not_updated: AbstractSet[str],
 ) -> _Valued:
-    candles = market.candles[decision.ticker]
-    last = candles[-1]
-    close = round(last.close, PRICE_DECIMALS)
+    candles = market.candles.get(decision.ticker, [])
     warnings: list[str] = []
-    stale = _staleness(decision, last.date, now, not_updated)
+    if candles:
+        last_session = candles[-1].date
+        close = round(candles[-1].close, PRICE_DECIMALS)
+        stale = _staleness(decision, last_session, now, not_updated)
+    else:
+        # The stock cache is safe to delete; an unreachable provider can't
+        # refill it, so the fill is the newest price known.
+        last_session, close = fill.session, fill.price
+        stale = (
+            f"Nothing is cached for {decision.ticker} and it couldn't be "
+            f"brought up to date; it's valued at its fill price of "
+            f"{fill.session.isoformat()}."
+        )
     if stale is not None:
         warnings.append(stale)
     rate: float | None = None
     pair = fx_pair(decision.currency)
     if pair is not None:
         rate, warning = _current_rate(
-            decision, market.candles.get(pair, []), last.date, fill.rate
+            decision, market.candles.get(pair, []), last_session, fill.rate
         )
         if warning is not None:
             warnings.append(warning)
@@ -310,10 +320,10 @@ def _hold(
         market.dividends.get(decision.ticker, []),
         fill.shares,
         fill.session,
-        last.date,
+        last_session,
         rate,
     )
-    atr_block = calculate_indicators(list(candles)).atr
+    atr_block = calculate_indicators(list(candles)).atr if candles else None
     atr = atr_block.value if atr_block is not None else None
 
     def in_atr(distance: float) -> float | None:
@@ -328,7 +338,7 @@ def _hold(
         stop=plan.stop,
         target=plan.target,
         last_close=close,
-        based_on=last.date,
+        based_on=last_session,
         rate=rate,
         value=value,
         dividends=dividends,
@@ -338,7 +348,8 @@ def _hold(
         to_target=round((plan.target - close) / close, DISTANCE_DECIMALS),
         to_target_atr=in_atr(plan.target - close),
         sessions_held=max(
-            len(sessions_in_range(decision.exchange, fill.session, last.date)) - 1, 0
+            len(sessions_in_range(decision.exchange, fill.session, last_session)) - 1,
+            0,
         ),
         horizon_ends=decision.horizon_ends,
         is_current=stale is None,
