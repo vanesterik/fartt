@@ -329,3 +329,100 @@ async def test_a_damaged_journal_is_a_tool_error(tmp_path: Path) -> None:
 
 def test_the_instructions_name_settle_positions() -> None:
     assert "settle_positions" in server_module.INSTRUCTIONS
+
+
+async def positions(cache: StockCache, **arguments: Any) -> dict[int, Any]:
+    result = await call(cache, arguments, "get_decisions")
+    assert not result.is_error, result.content
+    return {
+        entry["id"]: entry["position"]
+        for entry in result.structured_content["decisions"]
+    }
+
+
+@pytest.mark.anyio
+async def test_get_decisions_shows_the_position(tmp_path: Path) -> None:
+    # @AC1 @AC3
+    cache = cache_for(
+        fake(
+            {
+                after(B, 2): (101.0, 102.0, 99.5, 101.0),
+                after(DAYS[-30], 1): (101.0, 102.0, 99.5, 101.0),
+                after(DAYS[-30], 3): (98.0, 99.0, 94.0, 96.0),
+            }
+        ),
+        tmp_path,
+    )
+    seed(
+        cache,
+        planned_call(B),
+        planned_call(DAYS[-30]),
+        planned_call(DAYS[-40]),
+        planned_call(DAYS[-2]),
+    )
+    unsettled = {"fill": None, "exit": None, "expiry": None}
+    assert await positions(cache) == {
+        n: {"state": "waiting", **unsettled} for n in (1, 2, 3, 4)
+    }
+
+    await settle_positions(cache)
+    shown = await positions(cache)
+
+    stored = journal_of(cache).positions()
+
+    def dumped(line: Any) -> Any:
+        return line.model_dump(mode="json")
+
+    assert shown[1] == {
+        "state": "open",
+        "fill": dumped(stored.fills[1]),
+        "exit": None,
+        "expiry": None,
+    }
+    assert shown[2] == {
+        "state": "closed",
+        "fill": dumped(stored.fills[2]),
+        "exit": dumped(stored.exits[2]),
+        "expiry": None,
+    }
+    assert shown[3] == {
+        "state": "expired",
+        "fill": None,
+        "exit": None,
+        "expiry": dumped(stored.expiries[3]),
+    }
+    assert shown[4] == {"state": "waiting", **unsettled}
+    assert await positions(cache, id=2) == {2: shown[2]}
+
+
+@pytest.mark.anyio
+async def test_a_call_without_a_plan_has_no_position(tmp_path: Path) -> None:
+    # @AC13
+    cache = cache_for(fake(), tmp_path)
+    seed(cache, decision_draft(direction="pass"))
+
+    assert await positions(cache) == {1: None}
+    assert await positions(cache, id=1) == {1: None}
+
+
+@pytest.mark.anyio
+async def test_positions_read_the_same_after_a_restart(tmp_path: Path) -> None:
+    # @AC11
+    cache = cache_for(
+        fake(
+            {
+                after(B, 2): (101.0, 102.0, 99.5, 101.0),
+                after(DAYS[-30], 1): (101.0, 102.0, 99.5, 101.0),
+                after(DAYS[-30], 3): (98.0, 99.0, 94.0, 96.0),
+            }
+        ),
+        tmp_path,
+    )
+    seed(cache, planned_call(B), planned_call(DAYS[-30]), planned_call(DAYS[-40]))
+    await settle_positions(cache)
+    before = await call(cache, {}, "get_decisions")
+
+    restarted = cache_for(fake(), tmp_path)
+    after_restart = await call(restarted, {}, "get_decisions")
+
+    assert after_restart.structured_content == before.structured_content
