@@ -171,9 +171,9 @@ Tool names and outputs are settled in each epic's design; this table is the inte
 | Maximum open positions | 8 |
 | Minimum reward-to-risk | 2 |
 | Kill switch | blocks new plans at 16% below the portfolio's peak, until the operator resets it outside the agent |
-| Costs | Saxo's Bronze tariff (the level below €200,000): 0.08% per trade, with a minimum of €2 on Euronext Amsterdam, Paris, Brussels and Lisbon, $1 in the US, €3 in Milan and NOK 10 in Oslo, and 0.12% (minimum €5) in Dublin; 0.25% currency conversion on every trade not in EUR; the SEC fee of 0.00229% on US sales; plus 0.1% slippage per leg 🔶 |
+| Costs | Saxo's Bronze tariff (the level below €200,000): 0.08% per trade, with a minimum of €2 and a maximum of €150 on Euronext Amsterdam, Paris, Brussels and Lisbon, a minimum of $1 and a maximum of $150 in the US, a minimum of €3 in Milan and NOK 10 in Oslo, and 0.12% (minimum €5) in Dublin; 0.25% currency conversion on every trade not in EUR; the SEC fee of 0.00229% on US sales; the taxes Saxo collects on top: the French FTT of 0.4% and the Italian FTT of 0.2% on purchases, Irish stamp duty of 1% on purchases and the Irish Takeover Panel levy of €1.25 per trade, charged per exchange (they follow the company, so this overstates them); plus 0.1% slippage per leg 🔶 |
 
-Only the operator can change these, in a config file outside the agent's reach. The commissions are Saxo's Dutch tariff of 13 July 2026; Silver (from €200,000) charges 0.05% and Gold (from €1,000,000) 0.03%, with the same minimums.
+Only the operator can change these, in `assets/risk.toml`, a checked-in file outside the agent's reach (#149); the agent reads them with `get_risk_config`. The commissions are Saxo's Dutch tariff "Tarieven Zelf Beleggen" of 13 July 2026 (`NL/TAR-ZB/UNIFIED/DIGI/13072026`); the taxes come from Saxo's international trading conditions; Silver (from €200,000) charges 0.05% and Gold (from €1,000,000) 0.03%, with the same minimums.
 
 At this portfolio size the minimums and the currency conversion weigh more than the rate. A €2,000 position (20% of €10,000) on Euronext pays the €2 minimum, 0.1% per leg, so a round trip costs about 0.4% with slippage. The same position in a US stock pays 0.08% per leg plus 0.25% currency conversion each way, about 0.86% a round trip. A US call needs roughly twice the edge of a Euronext call to clear the same gate. The kill switch matches the maximum open risk: 8 positions at 2% each put 16% at risk, so every stop being hit as planned brings the portfolio to the threshold but not past it. Only losing more than the plans allowed trips it (see risk 5).
 
@@ -250,6 +250,6 @@ Stories are written just in time, one epic at a time, as GitHub issues in the Us
 
 1. 🔵 **Benchmark:** VWCE or IWDA. Decided in epic C's design.
 2. **Order of epics E–K.** Decided 2026-11-05 at the walking-skeleton milestone: H, F, G, K, E, I, L, J (section 7).
-3. 🔵 **Costs per exchange:** Saxo's commissions and currency conversion fee are known (section 6). Still open: transaction taxes outside Saxo's tariff (France's and Italy's financial transaction taxes on purchases), and whether 0.1% slippage per leg matches real fills.
+3. 🔵 **Costs per exchange:** decided in #149 (section 6): Saxo's commissions, maximums and currency conversion fee, and the French, Italian and Irish taxes and the Irish levy, per exchange in `assets/risk.toml`. Still open: whether 0.1% slippage per leg matches real fills.
 4. 🔵 **Horizon of a call:** fixed per call (chosen by the agent), or the plan's stop/target with a maximum holding period. Decided in epic C's design.
 5. 🔵 **Macro events** for step 1: which source, given that yfinance doesn't provide an economic calendar. Decided in epic F's design.
