@@ -585,4 +585,5 @@ def test_a_tripped_switch_refuses_a_plan() -> None:
     assert "threshold 0.16" in message
     assert "Only the operator can reset it" in message
     assert "task reset-kill-switch" in message
+    assert "record nothing for a buy and say why in the report" in message
     assert isinstance(switch, KillSwitch)
