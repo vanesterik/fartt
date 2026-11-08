@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,8 @@ from tests.test_server import (
     sessions,
 )
 
+# Euronext Amsterdam has closed (plus margin) for 2026-10-30.
+AFTER_CLOSE_30 = datetime(2026, 10, 30, 21, 0, tzinfo=UTC)
 EURUSD = Listing("EURUSD=X", "EUR/USD", "USD", "24/5")
 RATE = 1.16
 # 30 sessions closing 100, 101, ... 129, each ranging 2 around its close: ATR 2.
@@ -356,3 +358,35 @@ async def test_a_call_without_a_plan_is_recorded_with_plan_null(
     assert not result.is_error, result.content
     assert result.structured_content["plan"] is None
     assert journal_of(cache).decisions()[0].plan is None
+
+
+@pytest.mark.anyio
+async def test_a_session_closing_during_the_call_does_not_split_call_and_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # @AC8: the stored call and its plan describe the same session.
+    fake = provider()
+    cache = cache_for(fake, tmp_path)
+    snapshot = server_module._snapshot  # pyright: ignore[reportPrivateUsage]
+
+    def snapshot_then_close_a_session(
+        tool: str, cache: StockCache, ticker: str, count: int
+    ) -> Any:
+        result = snapshot(tool, cache, ticker, count)
+        if ticker == "IWDA.AS":
+            # ASML.AS's next session closes once the call's closes are read.
+            fake.now = AFTER_CLOSE_30
+            fake.histories["ASML.AS"].candles.append(
+                Candle(date(2026, 10, 30), 129.5, 131.0, 128.0, 130.0, 1000.0)
+            )
+        return result
+
+    monkeypatch.setattr(server_module, "_snapshot", snapshot_then_close_a_session)
+
+    result = await record(cache, plan=PLAN)
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert content["decision_session"] == "2026-10-29"
+    assert content["plan"]["based_on"] == "2026-10-29"
+    assert content["plan"]["last_close"] == content["close"]
