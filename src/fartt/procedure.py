@@ -1,6 +1,7 @@
 """
-The PRD's eight-step analysis procedure (section 5) as data, and the text of
-the `analyze_ticker` prompt generated from it.
+The PRD's eight-step analysis procedure (section 5) and its daily check-in as
+data, and the text of the `analyze_ticker` and `daily_checkin` prompts
+generated from them.
 
 A later epic fills in its step by adding its tools to the step's entry (and
 the signal names they feed to `TOOL_SIGNALS`) and clearing its `epic`.
@@ -262,5 +263,100 @@ accepted; the server refuses a buy without one. A `pass` has no plan.
 
 ## Report
 Report to the operator in these sections, in this order:
+{report}
+"""
+
+
+class CheckinStep(NamedTuple):
+    number: int
+    # The tool the step calls, without arguments.
+    tool: str
+    purpose: str
+
+
+# The daily check-in, after the US close: settle and read the portfolio, score
+# what's due, read the figures. No analysis: a ticker that needs a new look is
+# named for a separate one.
+CHECKIN_STEPS: tuple[CheckinStep, ...] = (
+    CheckinStep(
+        1,
+        PORTFOLIO_TOOL,
+        "settles the plans on the closed daily candles, then reads the "
+        "portfolio: fills, expiries and exits since the last check-in are in "
+        "`settled`.",
+    ),
+    CheckinStep(
+        2,
+        "score_decisions",
+        "scores the calls whose horizon has passed, and the closed plans.",
+    ),
+    CheckinStep(
+        3,
+        "get_performance",
+        "the plans' figures and the gate.",
+    ),
+)
+
+CHECKIN_SECTIONS: tuple[str, ...] = (
+    "Settled",
+    "Portfolio",
+    "Open positions",
+    "Waiting plans",
+    "New scores",
+    "Not scored yet",
+    "The gate",
+)
+
+_CHECKIN_DETAILS = (
+    (
+        "what filled, expired and closed since the last check-in, with each exit's "
+        "reason and P&L."
+    ),
+    (
+        "total value, cash, free cash, drawdown from the peak, the kill switch and "
+        "the room left."
+    ),
+    (
+        "each against its plan: last close, distance to stop and target (in ATR), "
+        "unrealised P&L, sessions held, horizon end; stale data flagged."
+    ),
+    "each with its entry and valid until.",
+    "the calls and plans scored this run.",
+    "the calls left unscored, with reasons.",
+    "each condition, its value and whether it's met.",
+)
+
+
+def checkin_tools() -> set[str]:
+    """Every tool the check-in names, as the server registers them."""
+    return {step.tool for step in CHECKIN_STEPS}
+
+
+def checkin_prompt() -> str:
+    """The prompt text for the daily check-in."""
+    steps = "\n".join(
+        f"{step.number}. `{step.tool}()`: {step.purpose}" for step in CHECKIN_STEPS
+    )
+    report = "\n".join(
+        f"{i}. **{section}**: {detail}"
+        for i, (section, detail) in enumerate(
+            zip(CHECKIN_SECTIONS, _CHECKIN_DETAILS, strict=True), 1
+        )
+    )
+    return f"""\
+Run fartt's daily check-in: settle and read the paper portfolio, score what's \
+due, and report, with the server's tools only.
+
+## The steps
+Call these in order:
+{steps}
+
+No analysis, no new calls or plans in a check-in. If a ticker needs a new look \
+(a position near its stop, stale data, a plan about to expire), name it for a \
+separate analysis.
+
+## Report
+Report to the operator in these sections, in this order; a section with \
+nothing in it says so:
 {report}
 """

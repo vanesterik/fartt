@@ -1,10 +1,14 @@
 from fartt.journal import SIGNALS
 from fartt.procedure import (
+    CHECKIN_SECTIONS,
+    CHECKIN_STEPS,
     HORIZON,
     REPORT_SECTIONS,
     STEPS,
     TOOL_SIGNALS,
     analysis_prompt,
+    checkin_prompt,
+    checkin_tools,
     procedure_tools,
 )
 
@@ -226,3 +230,67 @@ def test_the_plan_section_reports_the_plan_or_why_there_is_none() -> None:
 
 def test_the_prompt_stays_readable_in_one_go() -> None:
     assert len(PROMPT.split()) < 1500
+
+
+CHECKIN = checkin_prompt()
+
+
+def test_the_checkin_calls_portfolio_scores_and_performance_in_order() -> None:
+    # @AC5
+    assert [step.tool for step in CHECKIN_STEPS] == [
+        "get_portfolio",
+        "score_decisions",
+        "get_performance",
+    ]
+    positions = [CHECKIN.index(f"`{step.tool}()`") for step in CHECKIN_STEPS]
+    assert positions == sorted(positions)
+
+
+def test_the_checkin_steps_say_what_each_tool_is_for() -> None:
+    # @AC5
+    assert "settles" in CHECKIN
+    assert "`settled`" in CHECKIN
+    assert "closed plans" in CHECKIN
+    assert "the gate" in CHECKIN
+
+
+def test_the_checkin_report_sections_are_named_in_order() -> None:
+    # @AC5
+    assert CHECKIN_SECTIONS == (
+        "Settled",
+        "Portfolio",
+        "Open positions",
+        "Waiting plans",
+        "New scores",
+        "Not scored yet",
+        "The gate",
+    )
+    report = CHECKIN[CHECKIN.index("## Report") :]
+    positions = [report.index(f"**{section}**") for section in CHECKIN_SECTIONS]
+    assert positions == sorted(positions)
+
+
+def test_the_checkin_report_says_what_each_section_holds() -> None:
+    # @AC5
+    report = CHECKIN[CHECKIN.index("## Report") :]
+    assert "each exit's reason and P&L" in report
+    assert "drawdown from the peak" in report
+    assert "distance to stop and target (in ATR)" in report
+    assert "stale data flagged" in report
+    assert "entry and valid until" in report
+    assert "with reasons" in report
+    assert "whether it's met" in report
+
+
+def test_the_checkin_makes_no_calls_or_plans() -> None:
+    assert "No analysis, no new calls or plans" in CHECKIN
+    assert "record_decision" not in CHECKIN
+    assert "plan_trade" not in CHECKIN
+    assert "separate analysis" in CHECKIN
+
+
+def test_checkin_tools_names_every_tool_the_checkin_uses() -> None:
+    # @AC7
+    assert checkin_tools() == {"get_portfolio", "score_decisions", "get_performance"}
+    for tool in checkin_tools():
+        assert tool in CHECKIN
