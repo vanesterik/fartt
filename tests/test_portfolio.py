@@ -315,3 +315,73 @@ def test_a_session_not_published_yet_is_not_current() -> None:
     assert held.warning is not None
     assert "hasn't published 2026-11-05" in held.warning
     assert result.stale == ["ASML.AS"]
+
+
+def test_without_fills_the_peak_is_the_starting_capital() -> None:
+    # @AC8
+    totals = portfolio([call(1)]).totals
+
+    assert (totals.peak, totals.peak_session, totals.drawdown) == (CAPITAL, None, 0)
+
+
+def test_the_peak_is_the_highest_close_since_the_first_fill() -> None:
+    # @AC8
+    candles = {"ASML.AS": history(closes={date(2026, 11, 2): 700.0})}
+
+    totals = portfolio([call(1)], fills=[fill_line(1)], candles=candles).totals
+
+    peak = round(CAPITAL - 1203.6 + sale(2, 700.0), 2)
+    assert (totals.peak, totals.peak_session) == (peak, date(2026, 11, 2))
+    assert totals.total_value == round(CAPITAL - 1203.6 + sale(2, LAST), 2)
+    assert totals.drawdown == round((peak - totals.total_value) / peak, 4)
+    assert totals.drawdown > 0
+
+
+def test_after_a_close_above_the_earlier_peak_the_drawdown_is_0() -> None:
+    # @AC8
+    closes = {date(2026, 11, 2): 700.0, date(2026, 11, 5): 720.0}
+    candles = {"ASML.AS": history(closes=closes)}
+
+    totals = portfolio([call(1)], fills=[fill_line(1)], candles=candles).totals
+
+    assert totals.peak == totals.total_value
+    assert (totals.peak_session, totals.drawdown) == (date(2026, 11, 5), 0)
+
+
+def test_an_exit_counts_as_cash_on_its_session() -> None:
+    # @AC8
+    at_target = exit_line(
+        1, reason="target", price=680.0, value=1360.0, pnl=152.8
+    )  # On 2026-11-02
+    lower = {d: 590.0 for d in DAYS if d >= date(2026, 11, 3)}
+    candles = {"ASML.AS": history(closes=lower)}
+
+    totals = portfolio(
+        [call(1), call(2)],
+        fills=[fill_line(1), fill_line(2, session=date(2026, 11, 3))],
+        exits=[at_target],
+        candles=candles,
+    ).totals
+
+    assert (totals.peak, totals.peak_session) == (
+        round(CAPITAL + 152.8, 2),
+        date(2026, 11, 2),
+    )
+
+
+def test_a_day_whose_rate_isnt_cached_is_skipped() -> None:
+    fill = fill_line(1, rate=1.16, value=round(1200 / 1.16, 2))
+    candles = {"AAPL": history(US_DAYS), "EURUSD=X": rates(1.14, date(2026, 11, 4))}
+
+    result = portfolio([us_call(1)], fills=[fill], candles=candles)
+
+    assert result.skipped_days == 1
+
+
+def test_a_session_whose_close_isnt_cached_is_skipped() -> None:
+    gap = [d for d in DAYS if d != date(2026, 11, 3)]
+    candles = {"ASML.AS": history(gap)}
+
+    result = portfolio([call(1)], fills=[fill_line(1)], candles=candles)
+
+    assert result.skipped_days == 1
