@@ -1,0 +1,106 @@
+# The risk limits and trading costs every trade plan is held to. The server
+# reads this file when it starts and refuses to start on a value it can't
+# accept; a change takes effect when the server restarts. The agent reads the
+# values with get_risk_config and can't change them: changing one is a
+# deliberate commit by the operator. Every value must be present: the code
+# holds no defaults.
+#
+# Fractions throughout: 0.02 means 2%.
+
+[limits]
+starting_capital = 10000        # EUR, the paper portfolio's start
+max_risk_per_position = 0.02    # loss if the stop is hit, share of the portfolio, after costs
+max_position_size = 0.20        # share of the portfolio
+max_open_positions = 8
+min_reward_to_risk = 2.0        # after costs
+kill_switch_drawdown = 0.16     # below the portfolio's peak
+
+[costs]
+tariff = "Saxo NL, Bronze, Tarieven Zelf Beleggen 13 July 2026 (NL/TAR-ZB/UNIFIED/DIGI/13072026); taxes from Saxo's trading conditions"
+currency_conversion = 0.0025    # on every trade not in EUR, each way
+slippage_per_leg = 0.001
+
+# One table per exchange in the universe, by its calendar code. Per table:
+#   commission            rate per trade
+#   commission_min        minimum per trade, in commission_currency
+#   commission_max        maximum per trade, in commission_currency; leave it
+#                         out for no maximum
+#   commission_currency   the currency of min, max and fee_per_trade
+#   tax_on_buy            rate on purchases (financial transaction tax, stamp duty)
+#   fee_on_sell           rate on sales (the SEC fee)
+#   fee_per_trade         fixed, on purchases and sales
+#
+# The taxes are levied by the countries and collected by Saxo on top of its
+# tariff. They follow the company, not the exchange, but are charged here to
+# every stock on the exchange: that overstates the cost for the rest, so plans
+# come out smaller, never larger. Check them in Saxo's order ticket before the
+# first real trade.
+
+[costs.exchanges.XNYS]          # US: NYSE, Nasdaq (no suffix)
+commission = 0.0008
+commission_min = 1
+commission_max = 150
+commission_currency = "USD"
+tax_on_buy = 0
+fee_on_sell = 0.0000229         # the SEC fee, 0.00229%
+fee_per_trade = 0
+
+[costs.exchanges.XAMS]          # Euronext Amsterdam (.AS)
+commission = 0.0008
+commission_min = 2
+commission_max = 150
+commission_currency = "EUR"
+tax_on_buy = 0
+fee_on_sell = 0
+fee_per_trade = 0
+
+[costs.exchanges.XPAR]          # Euronext Paris (.PA)
+commission = 0.0008
+commission_min = 2
+commission_max = 150
+commission_currency = "EUR"
+tax_on_buy = 0.004              # French FTT, on large caps
+fee_on_sell = 0
+fee_per_trade = 0
+
+[costs.exchanges.XBRU]          # Euronext Brussels (.BR)
+commission = 0.0008
+commission_min = 2
+commission_max = 150
+commission_currency = "EUR"
+tax_on_buy = 0
+fee_on_sell = 0
+fee_per_trade = 0
+
+[costs.exchanges.XLIS]          # Euronext Lisbon (.LS)
+commission = 0.0008
+commission_min = 2
+commission_max = 150
+commission_currency = "EUR"
+tax_on_buy = 0
+fee_on_sell = 0
+fee_per_trade = 0
+
+[costs.exchanges.XMIL]          # Milan (.MI)
+commission = 0.0008
+commission_min = 3
+commission_currency = "EUR"
+tax_on_buy = 0.002              # Italian FTT, from 1 January 2026
+fee_on_sell = 0
+fee_per_trade = 0
+
+[costs.exchanges.XDUB]          # Dublin (.IR)
+commission = 0.0012
+commission_min = 5
+commission_currency = "EUR"
+tax_on_buy = 0.01               # Irish stamp duty
+fee_on_sell = 0
+fee_per_trade = 1.25            # Irish Takeover Panel levy
+
+[costs.exchanges.XOSL]          # Oslo (.OL)
+commission = 0.0008
+commission_min = 10
+commission_currency = "NOK"
+tax_on_buy = 0
+fee_on_sell = 0
+fee_per_trade = 0
