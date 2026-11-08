@@ -173,7 +173,7 @@ async def test_a_plan_breaking_a_check_is_refused(
 async def test_a_target_that_is_not_a_number_is_refused(
     tmp_path: Path, value: str
 ) -> None:
-    # @AC6
+    # @AC6 @AC12
     cache = cache_for(provider(), tmp_path)
 
     result = await plan_trade(cache, target=value)
@@ -184,7 +184,7 @@ async def test_a_target_that_is_not_a_number_is_refused(
 
 @pytest.mark.anyio
 async def test_a_target_too_large_to_work_out_is_refused(tmp_path: Path) -> None:
-    # @AC6
+    # @AC6 @AC12
     cache = cache_for(provider(), tmp_path)
 
     result = await plan_trade(cache, target=1e308)
@@ -194,14 +194,17 @@ async def test_a_target_too_large_to_work_out_is_refused(tmp_path: Path) -> None
 
 
 @pytest.mark.anyio
-async def test_an_entry_too_small_to_work_out_is_refused(tmp_path: Path) -> None:
-    # @AC6
+@pytest.mark.parametrize("entry", [1e-306, 1e-320])
+async def test_an_entry_too_small_to_work_out_is_refused(
+    tmp_path: Path, entry: float
+) -> None:
+    # @AC12
     cache = cache_for(provider(), tmp_path)
 
-    result = await plan_trade(cache, entry=1e-320, stop=1e-321, target=1.0)
+    result = await plan_trade(cache, entry=entry, stop=entry / 10, target=1.0)
 
     assert result.is_error
-    assert "entry (1e-320) is too small" in result.content[0].text
+    assert f"entry ({entry}) is too small" in result.content[0].text
 
 
 @pytest.mark.anyio
@@ -307,7 +310,7 @@ async def test_a_buy_whose_plan_breaks_a_limit_records_nothing(
 async def test_a_buy_whose_target_is_not_a_number_records_nothing(
     tmp_path: Path, value: str
 ) -> None:
-    # @AC8
+    # @AC8 @AC12
     cache = cache_for(provider(), tmp_path)
 
     result = await record(cache, plan=PLAN | {"target": value})
@@ -321,13 +324,29 @@ async def test_a_buy_whose_target_is_not_a_number_records_nothing(
 async def test_a_buy_whose_target_is_too_large_records_nothing(
     tmp_path: Path,
 ) -> None:
-    # @AC8
+    # @AC8 @AC12
     cache = cache_for(provider(), tmp_path)
 
     result = await record(cache, plan=PLAN | {"target": 1e308})
 
     assert result.is_error
     assert "target (1e+308) is too large" in result.content[0].text
+    assert not journal_of(cache).path.exists()
+
+
+@pytest.mark.anyio
+async def test_a_buy_whose_entry_is_too_small_records_nothing(
+    tmp_path: Path,
+) -> None:
+    # @AC12
+    cache = cache_for(provider(), tmp_path)
+
+    result = await record(
+        cache, plan=PLAN | {"entry": 1e-306, "stop": 1e-307, "target": 1.0}
+    )
+
+    assert result.is_error
+    assert "entry (1e-306) is too small" in result.content[0].text
     assert not journal_of(cache).path.exists()
 
 
