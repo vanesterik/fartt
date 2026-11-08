@@ -192,6 +192,17 @@ async def test_a_target_too_large_to_work_out_is_refused(tmp_path: Path) -> None
 
 
 @pytest.mark.anyio
+async def test_an_entry_too_small_to_work_out_is_refused(tmp_path: Path) -> None:
+    # @AC6
+    cache = cache_for(provider(), tmp_path)
+
+    result = await plan_trade(cache, entry=1e-320, stop=1e-321, target=1.0)
+
+    assert result.is_error
+    assert "entry (1e-320) is too small" in result.content[0].text
+
+
+@pytest.mark.anyio
 async def test_a_ticker_without_its_newest_close_is_refused(tmp_path: Path) -> None:
     # @AC7
     cache = cache_for(provider(asml_last=date(2026, 10, 28)), tmp_path)

@@ -287,7 +287,15 @@ def calculate_plan(
     def within_risk(shares: int) -> bool:
         return _cents(risk(shares)) <= max_risk
 
-    by_position = _largest(within_position, math.ceil(max_position * r / entry) + 1)
+    # A positive entry near zero allows more shares than a float can count.
+    most = max_position * r / entry
+    if not math.isfinite(most):
+        raise PlanRefused(
+            f"The entry ({entry}) is too small: the shares the position limit "
+            "allows at it aren't a finite number. Set the entry where the "
+            "price can go."
+        )
+    by_position = _largest(within_position, math.ceil(most) + 1)
     if within_risk(by_position):
         shares, sized_by = by_position, "max_position_size"
     else:
