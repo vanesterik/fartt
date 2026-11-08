@@ -18,8 +18,11 @@ fills, then a `"kind": "exit"` line when the position closes, or a
 `"kind": "expiry"` line when the order runs out unfilled. Each carries its
 `decision_id`, comes after its decision's line, whose call has a plan, and
 is written at most once; an expiry never goes with a fill, and an exit only
-follows a fill. A line breaking these rules is a damaged line. `kind` lets
-later stories add their own lines to the same file without rewriting one;
+follows a fill. A line breaking these rules is a damaged line.
+
+The operator resets a tripped kill switch with a `"kind": "reset"` line
+(`task reset-kill-switch`); the latest one counts. `kind` lets later
+stories add their own lines to the same file without rewriting one;
 readers skip the kinds they don't know.
 
 """
@@ -63,6 +66,7 @@ SCORE = "score"
 FILL = "fill"
 EXPIRY = "expiry"
 EXIT = "exit"
+RESET = "reset"
 
 ExitReason = Literal["stop", "target", "horizon"]
 
@@ -257,6 +261,26 @@ class Exit(BaseModel):
     )
 
 
+class Reset(BaseModel):
+    """The operator's reset of a tripped kill switch."""
+
+    model_config = ConfigDict(allow_inf_nan=False)
+
+    reset_at: datetime = Field(description="When the switch was reset (UTC).")
+    session: date = Field(
+        description="The newest valuation day the reset was worked out on."
+    )
+    total_value: float = Field(
+        description="The portfolio's total value at the reset, in EUR: the new peak."
+    )
+    peak: float = Field(description="The peak the switch tripped against, in EUR.")
+    drawdown: float = Field(description="(peak − total_value) / peak at the reset.")
+    tripped_on: date = Field(description="The session the switch tripped on.")
+    note: str | None = Field(
+        default=None, max_length=200, description="The operator's note, if any."
+    )
+
+
 PositionLine = Fill | Expiry | Exit
 
 
@@ -272,10 +296,11 @@ class _Contents(NamedTuple):
     decisions: list[Decision]
     scores: dict[int, Score]
     positions: Positions
+    resets: list[Reset]
 
 
 def _empty() -> _Contents:
-    return _Contents([], {}, Positions({}, {}, {}))
+    return _Contents([], {}, Positions({}, {}, {}), [])
 
 
 def _breach(line: PositionLine, contents: _Contents) -> str | None:
@@ -359,7 +384,7 @@ class Journal:
         with self._lock(fcntl.LOCK_EX):
             _cut_torn_tail(self.path)
             # Checked under the lock, so two runs at once can't both score it.
-            decisions, scores, _ = self._read()
+            decisions, scores, *_ = self._read()
             if score.decision_id not in {d.id for d in decisions}:
                 raise ValueError(f"no call #{score.decision_id} in {self.path}")
             if score.decision_id in scores:
@@ -403,6 +428,19 @@ class Journal:
             self._write_line({"kind": _kind(line), **line.model_dump(mode="json")})
         return line
 
+    def append_reset(self, reset: Reset) -> Reset:
+        """
+        Store `reset`, and return it. A damaged journal raises its
+        `ValueError` before anything is written.
+
+        """
+        self.directory.mkdir(parents=True, exist_ok=True)
+        with self._lock(fcntl.LOCK_EX):
+            _cut_torn_tail(self.path)
+            self._read()
+            self._write_line({"kind": RESET, **reset.model_dump(mode="json")})
+        return reset
+
     def decisions(self) -> list[Decision]:
         """Every decision, oldest first."""
         if not self.directory.exists():
@@ -424,6 +462,13 @@ class Journal:
         with self._lock(fcntl.LOCK_SH):
             return self._read().positions
 
+    def resets(self) -> list[Reset]:
+        """Every kill switch reset, oldest first."""
+        if not self.directory.exists():
+            return []
+        with self._lock(fcntl.LOCK_SH):
+            return self._read().resets
+
     def _write_line(self, entry: dict[str, Any]) -> None:
         line = json.dumps(entry, ensure_ascii=False)
         with self.path.open("a", encoding="utf-8") as file:
@@ -440,7 +485,7 @@ class Journal:
     def _read(self) -> _Contents:
         # A torn last line isn't read; only an append cuts it.
         contents = _empty()
-        decisions, scores, positions = contents
+        decisions, scores, positions, resets = contents
         if not self.path.exists():
             return contents
         ids: set[int] = set()
@@ -460,6 +505,8 @@ class Journal:
                     if score.decision_id in scores:
                         raise ValueError(f"call #{score.decision_id} is already scored")
                     scores[score.decision_id] = score
+                elif entry.get("kind") == RESET:
+                    resets.append(Reset.model_validate(entry))
                 elif (model := KINDS.get(entry.get("kind", ""))) is not None:
                     line = model.model_validate(entry)
                     if _already(line, positions):

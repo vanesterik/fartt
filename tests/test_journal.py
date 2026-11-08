@@ -13,6 +13,7 @@ from tests.fakes import (
     exit_line,
     expiry_line,
     fill_line,
+    reset_line,
 )
 from tests.fakes import decision_score as score
 
@@ -382,3 +383,62 @@ def test_an_exit_line_without_its_fill_is_a_damaged_line(tmp_path: Path) -> None
 
     with pytest.raises(ValueError, match="line 2"):
         Journal(tmp_path).positions()
+
+
+def test_a_reset_is_appended_and_read_back(tmp_path: Path) -> None:
+    # @AC5
+    journal = Journal(tmp_path)
+    journal.append(decision_draft())
+    reset = reset_line()
+
+    assert journal.append_reset(reset) == reset
+
+    assert journal.resets() == [reset]
+    last = journal_file(tmp_path).read_text(encoding="utf-8").splitlines()[-1]
+    assert json.loads(last) == {"kind": "reset", **reset.model_dump(mode="json")}
+    assert len(journal.decisions()) == 1
+
+
+def test_resets_come_back_oldest_first(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    first = reset_line(note=None)
+    second = reset_line(session=date(2026, 11, 20), note="second")
+
+    journal.append_reset(first)
+    journal.append_reset(second)
+
+    assert journal.resets() == [first, second]
+
+
+def test_without_a_journal_there_are_no_resets(tmp_path: Path) -> None:
+    assert Journal(tmp_path / "journal").resets() == []
+
+
+def test_a_damaged_reset_line_is_a_damaged_line(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    journal.append(decision_draft())
+    line = {"kind": "reset", **reset_line().model_dump(mode="json")}
+    del line["peak"]
+    with journal_file(tmp_path).open("a", encoding="utf-8") as file:
+        file.write(json.dumps(line) + "\n")
+
+    with pytest.raises(ValueError, match="line 2"):
+        journal.resets()
+
+
+def test_a_reset_on_a_damaged_journal_writes_nothing(tmp_path: Path) -> None:
+    journal = Journal(tmp_path)
+    journal.append(decision_draft())
+    with journal_file(tmp_path).open("ab") as file:
+        file.write(b"not json\n")
+    before = journal_file(tmp_path).read_bytes()
+
+    with pytest.raises(ValueError, match="line 2"):
+        journal.append_reset(reset_line())
+
+    assert journal_file(tmp_path).read_bytes() == before
+
+
+def test_a_reset_note_is_at_most_200_characters() -> None:
+    with pytest.raises(ValueError):
+        reset_line(note="x" * 201)
