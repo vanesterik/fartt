@@ -76,6 +76,13 @@ from fartt.technical import (
     calculate_levels,
     calculate_trend,
 )
+from fartt.trade_plan import (
+    DEFAULT_VALID_FOR,
+    MAX_VALID_FOR,
+    PlanRefused,
+    TradePlan,
+    calculate_plan,
+)
 
 # Claude Code caps MCP tool output at about 25k tokens by default, and
 # numbers cost roughly one token per three characters. 200 compact rows stay
@@ -129,7 +136,8 @@ INSTRUCTIONS = (
     "returns step by step, ending in a call; skip that only when the "
     "analyze_ticker prompt already gave you the procedure. "
     "The risk limits and trading costs are the operator's: read them with "
-    "get_risk_config; you can't change them."
+    "get_risk_config; you can't change them. plan_trade sizes a buy against "
+    "them after costs, and record_decision takes the plan with the buy."
 )
 
 # What a ticker the analyze_ticker prompt accepts looks like, closing every
@@ -797,6 +805,93 @@ def _current_close(tool: str, cache: StockCache, ticker: str) -> Snapshot:
     return snapshot
 
 
+class PlanRequest(BaseModel):
+    """The prices of a long plan, as the agent proposes them."""
+
+    entry: float = Field(
+        description=(
+            "The limit buy price, in the stock's currency: above 0, at most 1 "
+            "ATR above the last close."
+        )
+    )
+    stop: float = Field(
+        description="The stop, below the entry, in the stock's currency."
+    )
+    target: float = Field(
+        description="The target, above the entry, in the stock's currency."
+    )
+    valid_for: int = Field(
+        default=DEFAULT_VALID_FOR,
+        description=(
+            f"How many sessions of the stock's exchange the limit order stays "
+            f"open, 1 to {MAX_VALID_FOR}."
+        ),
+    )
+
+
+def _portfolio_value(risk_config: RiskConfig) -> float:
+    """
+    The value every share-of-the-portfolio limit is taken of. The starting
+    capital until the paper portfolio (#145) values itself.
+
+    """
+    return risk_config.limits.starting_capital
+
+
+def _trade_plan(
+    tool: str,
+    cache: StockCache,
+    ticker: str,
+    request: PlanRequest,
+    risk_config: RiskConfig,
+) -> TradePlan:
+    """
+    The plan for `request` on the ticker's current data, or a ToolError
+    saying why there is none: an exchange rate, data that isn't current, or
+    a check or limit the plan breaks. plan_trade and record_decision both
+    plan with it, so they refuse in the same words.
+
+    """
+    if ticker.strip().upper().endswith(FX_SUFFIX):
+        raise ToolError(
+            f"{ticker.strip().upper()} is an exchange rate, not a stock. "
+            "Plan trades on stocks only."
+        )
+    listing, candles, _, is_current, _ = _snapshot(tool, cache, ticker, sys.maxsize)
+    ticker = listing.ticker
+    if not is_current:
+        newest = cache.newest_closed_session(ticker)
+        raise ToolError(
+            f"{ticker}'s newest close ({newest.isoformat()}) isn't available "
+            "yet, so the plan can't be made on the price of the moment. Try "
+            "again later."
+        )
+    atr = calculate_indicators(candles).atr
+    rate = None
+    pair = fx_pair(listing.currency)
+    if pair is not None:
+        rate = round(_snapshot(tool, cache, pair, 1).candles[-1].close, RATE_DECIMALS)
+    try:
+        return calculate_plan(
+            ticker=ticker,
+            currency=listing.currency,
+            exchange_code=listing.exchange,
+            based_on=candles[-1].date,
+            last_close=round(candles[-1].close, DECIMALS),
+            atr=atr.value if atr else None,
+            entry=request.entry,
+            stop=request.stop,
+            target=request.target,
+            valid_for=request.valid_for,
+            rate=rate,
+            portfolio_value=_portfolio_value(risk_config),
+            limits=risk_config.limits,
+            costs=risk_config.costs,
+        )
+    except PlanRefused as error:
+        raise ToolError(f"{error} Nothing was recorded.") from error
+
+
 class NotAnalysable(ValueError):
     """A ticker the analysis procedure refuses; the message says why and what a ticker looks like."""
 
@@ -1131,6 +1226,47 @@ def build_server(
             is_current=is_current,
             warning=warning,
         )
+
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=True))
+    def plan_trade(
+        ticker: Annotated[
+            str,
+            Field(description="One ticker in Yahoo's format: AAPL, ASML.AS."),
+        ],
+        entry: Annotated[
+            float, Field(description=PlanRequest.model_fields["entry"].description)
+        ],
+        stop: Annotated[
+            float, Field(description=PlanRequest.model_fields["stop"].description)
+        ],
+        target: Annotated[
+            float, Field(description=PlanRequest.model_fields["target"].description)
+        ],
+        valid_for: Annotated[
+            int, Field(description=PlanRequest.model_fields["valid_for"].description)
+        ] = DEFAULT_VALID_FOR,
+    ) -> TradePlan:
+        """
+        Size a long trade from your entry (a limit buy), stop and target
+        against the operator's risk limits, after costs: the whole shares to
+        buy, the risk and reward in EUR with every cost of both legs
+        itemised, the reward-to-risk, and the limit that set the size. A
+        plan that breaks a check or limit is refused saying which. Nothing is
+        recorded: try prices as often as needed, then pass the plan to
+        record_decision with the buy.
+        """
+        plan = _trade_plan(
+            "plan_trade",
+            cache,
+            ticker,
+            PlanRequest(entry=entry, stop=stop, target=target, valid_for=valid_for),
+            risk_config,
+        )
+        logger.info(
+            f"plan_trade {plan.ticker}: {plan.shares} shares, risk {plan.risk} EUR, "
+            f"reward-to-risk {plan.reward_to_risk}, sized by {plan.sized_by}"
+        )
+        return plan
 
     @server.tool(
         annotations=ToolAnnotations(
