@@ -126,6 +126,18 @@ tasks:
         --permission-mode default
         {{.CLI_ARGS}}
 
+  # The operator's reset of a tripped kill switch (#146): on the cached data
+  # only, it appends a reset line to the journal, after which plans are
+  # accepted again and the peak starts from the value at the reset. Not
+  # tripped: it writes nothing and exits 1. No MCP tool can do this, and the
+  # analysis session has no shell. Reset right after a get_portfolio, so the
+  # cache is current. Extra arguments pass through:
+  # `task reset-kill-switch -- --note "gap on ASML"`.
+  reset-kill-switch:
+    desc: Reset a tripped kill switch (the operator's, never the agent's)
+    cmds:
+      - uv run python -m fartt.kill_switch reset {{.CLI_ARGS}}
+
   pre-commit:
     desc: Run the checks the git pre-commit hook runs, over staged files
     prefix: pre-commit

@@ -2478,7 +2478,7 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def _clock() -> Callable[[], datetime]:
+def clock_from_env() -> Callable[[], datetime]:
     """The real clock, or the moment FARTT_NOW pins it to."""
     setting = os.environ.get(NOW_ENV)
     if not setting:
@@ -2497,6 +2497,19 @@ def _clock() -> Callable[[], datetime]:
     return lambda: pinned
 
 
+def assets_dir_from_env() -> Path:
+    """
+    The assets folder: FARTT_ASSETS_DIR from the environment, else from the
+    repository's .env, else `assets/` in the repository; a relative path is
+    relative to the repository.
+
+    """
+    setting = os.environ.get(ASSETS_DIR_ENV) or dotenv_values(ENV_FILE).get(
+        ASSETS_DIR_ENV
+    )
+    return ROOT / setting if setting else DEFAULT_ASSETS_DIR
+
+
 def main() -> None:
     """
     Run the server over stdio: Claude Code starts it from `.mcp.json`
@@ -2505,11 +2518,8 @@ def main() -> None:
     """
     logger.remove()
     logger.add(sys.stderr, level="INFO")
-    setting = os.environ.get(ASSETS_DIR_ENV) or dotenv_values(ENV_FILE).get(
-        ASSETS_DIR_ENV
-    )
-    assets_dir = ROOT / setting if setting else DEFAULT_ASSETS_DIR
-    clock = _clock()
+    assets_dir = assets_dir_from_env()
+    clock = clock_from_env()
     try:
         risk_config = load_risk_config(assets_dir / RISK_FILE)
     except RiskConfigError as error:

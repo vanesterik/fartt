@@ -11,9 +11,9 @@
 starting_capital = 10000        # EUR, the paper portfolio's start
 max_risk_per_position = 0.02    # loss if the stop is hit, share of the portfolio, after costs
 max_position_size = 0.20        # share of the portfolio
-max_open_positions = 8
+max_open_positions = 8          # open positions and waiting plans together
 min_reward_to_risk = 2.0        # after costs
-kill_switch_drawdown = 0.16     # below the portfolio's peak
+kill_switch_drawdown = 0.16     # below the portfolio's peak: no new plans until `task reset-kill-switch`
 
 [costs]
 tariff = "Saxo NL, Bronze, Tarieven Zelf Beleggen 13 July 2026 (NL/TAR-ZB/UNIFIED/DIGI/13072026); taxes from Saxo's trading conditions"
