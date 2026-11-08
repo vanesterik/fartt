@@ -5,13 +5,17 @@ from typing import Any
 import pytest
 
 from fartt.data import Candle, Dividend, sessions_in_range
-from fartt.journal import Decision, Exit, Expiry, Fill, Positions
+from fartt.journal import Decision, Exit, Expiry, Fill, Positions, Reset
 from fartt.portfolio import (
     MAX_RECENT,
+    KillSwitch,
     Market,
     Portfolio,
+    PositionLimit,
     calculate_portfolio,
     refuse_beyond_free_cash,
+    refuse_beyond_open_positions,
+    refuse_when_tripped,
 )
 from fartt.positions import order_window
 from fartt.technical import calculate_indicators
@@ -22,12 +26,14 @@ from tests.fakes import (
     decision_draft,
     exit_line,
     fill_line,
+    reset_line,
     stock_candle,
 )
 
 # Euronext Amsterdam and NYSE have both closed (plus margin) for 2026-11-05.
 NOW = datetime(2026, 11, 5, 23, 0, tzinfo=UTC)
-CAPITAL = RISK_CONFIG.limits.starting_capital
+LIMITS = RISK_CONFIG.limits
+CAPITAL = LIMITS.starting_capital
 COSTS = RISK_CONFIG.costs
 XAMS = COSTS.exchanges["XAMS"]
 XNYS = COSTS.exchanges["XNYS"]
@@ -66,6 +72,7 @@ def portfolio(
     candles: Mapping[str, Sequence[Candle]] | None = None,
     dividends: Mapping[str, Sequence[Dividend]] | None = None,
     not_updated: frozenset[str] = frozenset(),
+    reset: Reset | None = None,
 ) -> Portfolio:
     positions = Positions(
         {f.decision_id: f for f in fills},
@@ -77,7 +84,7 @@ def portfolio(
         dividends or {},
     )
     return calculate_portfolio(
-        list(decisions), positions, market, COSTS, CAPITAL, NOW, not_updated
+        list(decisions), positions, market, COSTS, LIMITS, NOW, not_updated, reset
     )
 
 
@@ -428,3 +435,154 @@ def test_a_position_with_nothing_cached_is_valued_at_its_fill() -> None:
     assert held.warning is not None
     assert "Nothing is cached for ASML.AS" in held.warning
     assert (held.to_stop_atr, held.to_target_atr) == (None, None)
+
+
+# A large position, so a drop in its close moves the portfolio by 16%.
+BIG = fill_line(1, shares=10, value=6000.0)
+
+
+def big_value(close: float) -> float:
+    """The portfolio's value with BIG open at `close`."""
+    return round(CAPITAL - 6003.6 + sale(10, close), 2)
+
+
+def big(closes: Mapping[date, float], reset: Reset | None = None) -> Portfolio:
+    candles = {"ASML.AS": history(closes=closes)}
+    return portfolio([call(1)], fills=[BIG], candles=candles, reset=reset)
+
+
+def test_a_close_16_percent_below_the_peak_trips_the_switch() -> None:
+    # @AC2
+    switch = big({date(2026, 11, 5): 400.0}).kill_switch
+
+    peak = big_value(LAST)
+    assert switch.tripped is True
+    assert switch.tripped_on == date(2026, 11, 5)
+    assert switch.drawdown_at_trip == round((peak - big_value(400.0)) / peak, 4)
+    assert switch.drawdown_at_trip >= LIMITS.kill_switch_drawdown
+    assert switch.threshold == LIMITS.kill_switch_drawdown
+    assert switch.drawdown == switch.drawdown_at_trip
+    assert switch.last_reset is None
+
+
+def test_a_drop_short_of_the_threshold_does_not_trip() -> None:
+    # @AC2
+    switch = big({date(2026, 11, 5): 500.0}).kill_switch
+
+    assert switch.drawdown > 0
+    assert (switch.tripped, switch.tripped_on, switch.drawdown_at_trip) == (
+        False,
+        None,
+        None,
+    )
+
+
+def test_a_value_exactly_at_the_threshold_trips() -> None:
+    # @AC2
+    low = big_value(400.0)
+    at = reset_line(session=date(2026, 11, 4), total_value=low / 0.84)
+    above = reset_line(session=date(2026, 11, 4), total_value=low / 0.84 - 0.02)
+
+    assert big({date(2026, 11, 5): 400.0}, at).kill_switch.tripped is True
+    assert big({date(2026, 11, 5): 400.0}, above).kill_switch.tripped is False
+
+
+def test_the_switch_stays_tripped_after_the_value_recovers() -> None:
+    # @AC2
+    closes = {date(2026, 11, 3): 400.0, date(2026, 11, 5): 900.0}
+
+    result = big(closes)
+
+    switch = result.kill_switch
+    peak = big_value(LAST)
+    assert (switch.tripped, switch.tripped_on) == (True, date(2026, 11, 3))
+    # The later high doesn't move the trip's drawdown.
+    assert switch.drawdown_at_trip == round((peak - big_value(400.0)) / peak, 4)
+    assert (switch.drawdown, result.totals.drawdown) == (0, 0)
+
+
+def test_after_a_reset_the_peak_starts_at_the_value_at_the_reset() -> None:
+    # @AC5
+    low = big_value(400.0)
+    closes = {d: 400.0 for d in DAYS if d >= date(2026, 11, 3)}
+    closes[date(2026, 11, 5)] = 390.0
+    reset = reset_line(session=date(2026, 11, 3), total_value=low)
+
+    result = big(closes, reset)
+
+    switch, totals = result.kill_switch, result.totals
+    assert switch.tripped is False
+    assert (totals.peak, totals.peak_session) == (low, date(2026, 11, 3))
+    drawdown = round((low - big_value(390.0)) / low, 4)
+    assert switch.drawdown == totals.drawdown == drawdown
+    assert switch.last_reset is not None
+    assert switch.last_reset.model_dump() == {
+        "reset_at": reset.reset_at,
+        "session": reset.session,
+        "drawdown": reset.drawdown,
+        "note": reset.note,
+    }
+    assert result.newest_valuation == date(2026, 11, 5)
+
+
+def test_a_new_drop_after_a_reset_trips_again() -> None:
+    # @AC5
+    low = big_value(400.0)
+    closes = {d: 400.0 for d in DAYS if d >= date(2026, 11, 3)}
+    closes[date(2026, 11, 5)] = 250.0
+    reset = reset_line(session=date(2026, 11, 3), total_value=low)
+
+    switch = big(closes, reset).kill_switch
+
+    assert (switch.tripped, switch.tripped_on) == (True, date(2026, 11, 5))
+    assert switch.drawdown_at_trip == round((low - big_value(250.0)) / low, 4)
+
+
+def test_without_fills_nothing_trips_and_nothing_is_valued() -> None:
+    result = portfolio([call(1)])
+
+    assert result.kill_switch.tripped is False
+    assert result.newest_valuation is None
+
+
+def test_the_limit_counts_open_positions_and_waiting_plans() -> None:
+    # @AC8
+    limits = portfolio([call(1), call(2), call(3)], fills=[fill_line(1)]).limits
+
+    assert limits == PositionLimit(
+        max_open_positions=8, open_positions=1, waiting_plans=2, room=5
+    )
+
+
+def test_eight_open_and_waiting_plans_are_refused_and_seven_fit() -> None:
+    # @AC1
+    fills = [fill_line(i) for i in range(1, 4)]
+    seven = portfolio([call(i) for i in range(1, 8)], fills=fills).limits
+    eight = portfolio([call(i) for i in range(1, 9)], fills=fills).limits
+
+    refuse_beyond_open_positions(seven)
+    with pytest.raises(PlanRefused) as refused:
+        refuse_beyond_open_positions(eight)
+
+    assert eight.room == 0
+    message = str(refused.value)
+    assert "open-position limit of 8" in message
+    assert "3 positions are open and 5 plans wait for their entry" in message
+
+
+def test_a_tripped_switch_refuses_a_plan() -> None:
+    # @AC3
+    switch = big({date(2026, 11, 5): 400.0}).kill_switch
+    calm = big({}).kill_switch
+
+    refuse_when_tripped(calm)
+    with pytest.raises(PlanRefused) as refused:
+        refuse_when_tripped(switch)
+
+    message = str(refused.value)
+    assert "kill switch tripped on 2026-11-05" in message
+    assert f"drawdown of {switch.drawdown_at_trip}" in message
+    assert "threshold 0.16" in message
+    assert "Only the operator can reset it" in message
+    assert "task reset-kill-switch" in message
+    assert isinstance(switch, KillSwitch)
