@@ -33,6 +33,7 @@ MAX_VALID_FOR = 10
 
 CENTS = 2
 SHARE_DECIMALS = 4
+REFUSAL_DECIMALS = 6
 
 Side = Literal["buy", "sell"]
 SizedBy = Literal["max_risk_per_position", "max_position_size"]
@@ -303,11 +304,15 @@ def calculate_plan(
     at_target = leg(target, shares, "sell")
     loss = _cents(shares * (entry - stop) / r + buy.total + at_stop.total)
     gain = _cents(shares * (target - entry) / r - buy.total - at_target.total)
-    reward_to_risk = round(gain / loss, SHARE_DECIMALS)
-    if reward_to_risk < limits.min_reward_to_risk:
-        short = round(limits.min_reward_to_risk - reward_to_risk, SHARE_DECIMALS)
+    # Compared unrounded: the limit is the operator's, rounding is for display.
+    # The refusal shows more decimals, so a ratio just short doesn't read as
+    # the limit itself.
+    ratio = gain / loss
+    if ratio < limits.min_reward_to_risk:
+        short = round(limits.min_reward_to_risk - ratio, REFUSAL_DECIMALS)
         raise PlanRefused(
-            f"The plan's reward-to-risk after costs is {reward_to_risk} "
+            f"The plan's reward-to-risk after costs is "
+            f"{round(ratio, REFUSAL_DECIMALS)} "
             f"(reward €{gain:,.2f}, risk €{loss:,.2f} for {shares} shares): "
             f"below min_reward_to_risk ({limits.min_reward_to_risk}); it falls "
             f"short by {short}. Move the target up, the stop up or the entry down."
@@ -333,7 +338,7 @@ def calculate_plan(
         risk=loss,
         risk_share=round(loss / portfolio_value, SHARE_DECIMALS),
         reward=gain,
-        reward_to_risk=reward_to_risk,
+        reward_to_risk=round(ratio, SHARE_DECIMALS),
         reward_to_risk_before_costs=round(
             (target - entry) / (entry - stop), SHARE_DECIMALS
         ),

@@ -216,6 +216,16 @@ def test_a_reward_to_risk_below_the_minimum_is_refused() -> None:
     assert "falls short by" in message
 
 
+def test_the_reward_to_risk_is_compared_before_it_is_rounded() -> None:
+    # Target 66: reward 504.29 / risk 199.01 is 2.533993, shown as 2.534.
+    limits = LIMITS.model_copy(update={"min_reward_to_risk": 2.533999})
+
+    with pytest.raises(PlanRefused) as refused:
+        plan(target=66.0, limits=limits)
+
+    assert "is 2.533993" in str(refused.value)
+
+
 @pytest.mark.parametrize(
     ("changes", "named", "amount"),
     [
