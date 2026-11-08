@@ -1169,7 +1169,7 @@ SIGNALS_SENT = [
 def decision(**changes: Any) -> dict[str, Any]:
     arguments: dict[str, Any] = {
         "ticker": "ASML.AS",
-        "direction": "buy",
+        "direction": "pass",
         "horizon": 20,
         "reasoning": "Trend up, support holding.",
         "signals": SIGNALS_SENT,
@@ -1198,7 +1198,7 @@ async def test_record_decision_returns_the_stored_entry(tmp_path: Path) -> None:
         "ticker": "ASML.AS",
         "currency": "EUR",
         "exchange": "XAMS",
-        "direction": "buy",
+        "direction": "pass",
         "horizon": 20,
         "reasoning": "Trend up, support holding.",
         "signals": SIGNALS_SENT,
@@ -1213,6 +1213,36 @@ async def test_record_decision_returns_the_stored_entry(tmp_path: Path) -> None:
         },
         "plan": None,
     }
+
+
+@pytest.mark.anyio
+async def test_a_buy_without_a_plan_is_refused_and_records_nothing(
+    tmp_path: Path,
+) -> None:
+    # @AC4
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    result = await record(cache, direction="buy")
+
+    assert result.is_error
+    text = result.content[0].text
+    assert "A buy needs a plan" in text
+    assert "plan_trade" in text
+    assert "Nothing was recorded" in text
+    assert not journal_path(cache).exists()
+
+
+@pytest.mark.anyio
+async def test_a_pass_without_a_plan_is_recorded(tmp_path: Path) -> None:
+    # @AC4
+    cache = cache_for(provider(sessions("XAMS", 3)), tmp_path)
+
+    result = await record(cache, direction="pass")
+
+    assert not result.is_error, result.content
+    assert result.structured_content["direction"] == "pass"
+    assert result.structured_content["plan"] is None
+    assert len(journal_of(cache).decisions()) == 1
 
 
 @pytest.mark.anyio
