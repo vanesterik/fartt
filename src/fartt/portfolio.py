@@ -12,7 +12,14 @@ costs to close, at that close's EUR rate, so cash plus the open positions'
 value is the total, and the total is the starting capital plus the realised
 and unrealised P&L, to the cent. A plan waiting for its entry reserves its
 position value plus buy costs out of the cash. Each amount is rounded to the
-cent and every sum is of rounded amounts. Pure functions, no I/O.
+cent and every sum is of rounded amounts.
+
+The kill switch is worked out the same way, never stored: it trips on the
+first valuation day since the operator's last reset whose value is at or
+below the running peak less `kill_switch_drawdown`, and stays tripped
+until the next reset, which starts the peak again from the value at the
+reset. The open-position limit counts open positions and waiting plans
+together. Pure functions, no I/O.
 
 """
 
@@ -31,9 +38,9 @@ from fartt.data import (
     newest_closed_session,
     sessions_in_range,
 )
-from fartt.journal import Decision, Exit, ExitReason, Fill, Positions
+from fartt.journal import Decision, Exit, ExitReason, Fill, Positions, Reset
 from fartt.positions import order_window
-from fartt.risk_config import Costs
+from fartt.risk_config import Costs, Limits
 from fartt.scoring import PRICE_DECIMALS, RATE_DECIMALS, Unscorable, rate_on
 from fartt.technical import calculate_indicators
 from fartt.trade_plan import CENTS, PlanRefused, TradePlan, leg_costs
@@ -74,12 +81,16 @@ class Totals(BaseModel):
     )
     peak: float = Field(
         description=(
-            "The highest portfolio value at any session close since the first "
-            "fill, and at least the starting capital."
+            "The highest portfolio value at any session close since the last "
+            "kill switch reset (the first fill without one), and at least the "
+            "value at the reset (the starting capital without one)."
         )
     )
     peak_session: date | None = Field(
-        description="The session of the peak; null while the starting capital is it."
+        description=(
+            "The session of the peak: the reset's session while the value at "
+            "the reset is it; null while the starting capital is it."
+        )
     )
     drawdown: float = Field(
         description="(peak − total_value) / peak: 0.05 means 5% below the peak."
@@ -181,6 +192,50 @@ class ClosedSummary(BaseModel):
     )
 
 
+class LastReset(BaseModel):
+    """The operator's latest reset of the kill switch."""
+
+    reset_at: datetime = Field(description="When it was reset (UTC).")
+    session: date = Field(description="The valuation day it was worked out on.")
+    drawdown: float = Field(description="The drawdown at the reset.")
+    note: str | None = Field(description="The operator's note, if any.")
+
+
+class KillSwitch(BaseModel):
+    """Whether new plans are blocked for a drawdown, until the operator resets it."""
+
+    tripped: bool = Field(
+        description=(
+            "Whether a session closed at or beyond the threshold below the "
+            "peak since the last reset: no new plans until the operator resets it."
+        )
+    )
+    tripped_on: date | None = Field(
+        description="The first session that closed at or beyond it; null if none."
+    )
+    drawdown_at_trip: float | None = Field(
+        description="The drawdown on that session; null if not tripped."
+    )
+    threshold: float = Field(
+        description="The operator's kill_switch_drawdown: 0.16 means 16% below the peak."
+    )
+    drawdown: float = Field(
+        description="The drawdown now, from the peak since the reset."
+    )
+    last_reset: LastReset | None = Field(
+        description="The operator's latest reset; null if never reset."
+    )
+
+
+class PositionLimit(BaseModel):
+    """The open-position limit, counting waiting plans too."""
+
+    max_open_positions: int = Field(description="The operator's limit.")
+    open_positions: int = Field(description="How many positions are open.")
+    waiting_plans: int = Field(description="How many plans wait for their entry.")
+    room: int = Field(description="How many more plans fit.")
+
+
 class Portfolio(BaseModel):
     based_on: date | None = Field(
         description="The newest session an open position is valued at; null with none open."
@@ -194,6 +249,14 @@ class Portfolio(BaseModel):
         description=(
             "Valuation days left out of the peak because a close or rate of "
             "theirs isn't cached yet."
+        )
+    )
+    kill_switch: KillSwitch
+    limits: PositionLimit
+    newest_valuation: date | None = Field(
+        description=(
+            "The newest valuation day valued since the last reset; the "
+            "reset's session without one since, null without either."
         )
     )
 
@@ -440,20 +503,34 @@ def _value_on(
     return _cents(total)
 
 
-def _peak(
+class _Watch(NamedTuple):
+    """The peak and the kill switch over the valuation days since a reset."""
+
+    peak: float
+    peak_session: date | None
+    skipped: int
+    tripped_on: date | None
+    drawdown_at_trip: float | None
+    newest: date | None
+
+
+def _watch(
     held: Sequence[_Held],
     starting_capital: float,
-    total_value: float,
-    based_on: date | None,
+    since: Reset | None,
+    threshold: float,
     market: Market,
     costs: Costs,
     now: datetime,
-) -> tuple[float, date | None, int]:
+) -> _Watch:
     """
     The highest value at a valuation day's close (every session since the
     first fill of an exchange with a position then open, through its exit
-    session), the starting capital and the current total; its session; and
-    how many valuation days were skipped.
+    session) after `since`'s session, and at least the value at `since`
+    (the starting capital without one); its session;
+    how many of those days were skipped; the first day whose value is at
+    or below the running peak less `threshold`, with its drawdown; and the
+    newest day valued.
 
     """
     sessions: dict[str, set[date]] = {}
@@ -467,16 +544,25 @@ def _peak(
             sessions_in_range(decision.exchange, fill.session, last)
         )
     days = {day for exchange_days in sessions.values() for day in exchange_days}
-    peak, peak_session, skipped = starting_capital, None, 0
-    for day in sorted(days):
+    after = since.session if since is not None else date.min
+    peak = since.total_value if since is not None else starting_capital
+    peak_session = since.session if since is not None else None
+    newest = peak_session
+    skipped = 0
+    tripped_on: date | None = None
+    drawdown_at_trip: float | None = None
+    for day in sorted(d for d in days if d > after):
         value = _value_on(day, held, starting_capital, market, costs, sessions)
         if value is None:
             skipped += 1
-        elif value > peak:
+            continue
+        newest = day
+        if value > peak:
             peak, peak_session = value, day
-    if total_value > peak:
-        peak, peak_session = total_value, based_on
-    return peak, peak_session, skipped
+        if tripped_on is None and value <= _cents(peak * (1 - threshold)):
+            tripped_on = day
+            drawdown_at_trip = round((peak - value) / peak, DISTANCE_DECIMALS)
+    return _Watch(peak, peak_session, skipped, tripped_on, drawdown_at_trip, newest)
 
 
 def calculate_portfolio(
@@ -484,16 +570,20 @@ def calculate_portfolio(
     positions: Positions,
     market: Market,
     costs: Costs,
-    starting_capital: float,
+    limits: Limits,
     now: datetime,
     not_updated: AbstractSet[str] = frozenset(),
+    reset: Reset | None = None,
 ) -> Portfolio:
     """
     The portfolio from the journal's `decisions` and `positions` and the
-    cached `market`, as of `now`. `not_updated` names the tickers whose
-    cache couldn't be brought up to date, for the warnings.
+    cached `market`, as of `now`, held to the operator's `limits`; the
+    peak and the kill switch run from the latest `reset`. `not_updated`
+    names the tickers whose cache couldn't be brought up to date, for the
+    warnings.
 
     """
+    starting_capital = limits.starting_capital
     fills, expiries, exits = positions
     by_id = {d.id: d for d in decisions}
     held: list[_Valued] = []
@@ -534,15 +624,19 @@ def calculate_portfolio(
     closed = _closed(by_id, exit_lines)
     total_value = _cents(cash + open_value)
     based_on = max((h.based_on for h in holdings), default=None)
-    peak, peak_session, skipped = _peak(
+    watch = _watch(
         [_Held(by_id[i], f, exits.get(i)) for i, f in sorted(fills.items())],
         starting_capital,
-        total_value,
-        based_on,
+        reset,
+        limits.kill_switch_drawdown,
         market,
         costs,
         now,
     )
+    peak, peak_session = watch.peak, watch.peak_session
+    if total_value > peak:
+        peak, peak_session = total_value, based_on
+    drawdown = round((peak - total_value) / peak, DISTANCE_DECIMALS)
     totals = Totals(
         starting_capital=starting_capital,
         cash=cash,
@@ -554,7 +648,7 @@ def calculate_portfolio(
         unrealised_pnl=_cents(sum(h.unrealised_pnl for h in holdings)),
         peak=peak,
         peak_session=peak_session,
-        drawdown=round((peak - total_value) / peak, DISTANCE_DECIMALS),
+        drawdown=drawdown,
         open_risk=_cents(sum(v.risk for v in held)),
         waiting_risk=_cents(waiting_risk),
         open_positions=len(holdings),
@@ -567,7 +661,31 @@ def calculate_portfolio(
         waiting=waiting,
         closed=closed,
         stale=list(dict.fromkeys(h.ticker for h in holdings if not h.is_current)),
-        skipped_days=skipped,
+        skipped_days=watch.skipped,
+        kill_switch=KillSwitch(
+            tripped=watch.tripped_on is not None,
+            tripped_on=watch.tripped_on,
+            drawdown_at_trip=watch.drawdown_at_trip,
+            threshold=limits.kill_switch_drawdown,
+            drawdown=drawdown,
+            last_reset=(
+                LastReset(
+                    reset_at=reset.reset_at,
+                    session=reset.session,
+                    drawdown=reset.drawdown,
+                    note=reset.note,
+                )
+                if reset is not None
+                else None
+            ),
+        ),
+        limits=PositionLimit(
+            max_open_positions=limits.max_open_positions,
+            open_positions=len(holdings),
+            waiting_plans=len(waiting),
+            room=max(limits.max_open_positions - len(holdings) - len(waiting), 0),
+        ),
+        newest_valuation=watch.newest,
     )
 
 
@@ -590,4 +708,41 @@ def refuse_beyond_free_cash(plan: TradePlan, totals: Totals) -> None:
         f"plan{'s' if totals.waiting_plans != 1 else ''}): it misses by "
         f"€{_cents(need - totals.free_cash):,.2f}. Wait for a waiting plan to "
         "fill or expire, or a position to close."
+    )
+
+
+def refuse_when_tripped(kill_switch: KillSwitch) -> None:
+    """
+    `PlanRefused` when the kill switch has tripped, naming the session, the
+    drawdown and the threshold, and that only the operator can reset it.
+
+    """
+    if not kill_switch.tripped or kill_switch.tripped_on is None:
+        return
+    raise PlanRefused(
+        f"The kill switch tripped on {kill_switch.tripped_on.isoformat()} at a "
+        f"drawdown of {kill_switch.drawdown_at_trip} below the portfolio's "
+        f"peak (threshold {kill_switch.threshold}), so no new plan is made. "
+        "Open positions and waiting plans run on. Only the operator can reset "
+        "it, with `task reset-kill-switch` outside the analysis session; "
+        "record the call as a pass or without a plan meanwhile."
+    )
+
+
+def refuse_beyond_open_positions(limits: PositionLimit) -> None:
+    """
+    `PlanRefused` when the open positions and waiting plans together leave
+    no room under the limit, naming the limit and both counts.
+
+    """
+    if limits.room > 0:
+        return
+    taken = limits.open_positions + limits.waiting_plans
+    raise PlanRefused(
+        f"The open-position limit of {limits.max_open_positions} is reached: "
+        f"{limits.open_positions} position{'s are' if limits.open_positions != 1 else ' is'} "
+        f"open and {limits.waiting_plans} plan"
+        f"{'s wait' if limits.waiting_plans != 1 else ' waits'} for their entry, "
+        f"{taken} together. Wait for a position to close or a waiting plan to "
+        "expire."
     )

@@ -1264,7 +1264,7 @@ def _portfolio(
         positions,
         market,
         risk_config.costs,
-        risk_config.limits.starting_capital,
+        risk_config.limits,
         cache.clock(),
         settlement.not_updated,
     )
