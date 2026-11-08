@@ -19,10 +19,17 @@ from fartt.data import (
 )
 from fartt.journal import SIGNALS, Decision, DecisionDraft, Journal, Signal
 from fartt.procedure import analysis_prompt, procedure_tools
+from fartt.risk_config import RISK_FILE, Costs, ExchangeCosts, Limits, RiskConfig
 from fartt.server import build_server
 from fartt.server import server as server_module
 from fartt.stock_cache import StockCache
-from tests.fakes import FakeProvider, decision_draft, decision_score, stock_candle
+from tests.fakes import (
+    RISK_CONFIG,
+    FakeProvider,
+    decision_draft,
+    decision_score,
+    stock_candle,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 ASML = Listing("ASML.AS", "ASML Holding N.V.", "EUR", "XAMS")
@@ -72,7 +79,7 @@ def journal_of(cache: StockCache) -> Journal:
 async def call(
     cache: StockCache, arguments: dict[str, Any], tool: str = "get_candles"
 ) -> Any:
-    async with Client(build_server(cache, journal_of(cache))) as client:
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
         return await client.call_tool(tool, arguments)
 
 
@@ -290,7 +297,7 @@ async def test_an_unwritable_cache_is_a_tool_error_for_the_operator(
 @pytest.mark.anyio
 async def test_the_tools_are_listed(tmp_path: Path) -> None:
     cache = cache_for(provider([]), tmp_path)
-    async with Client(build_server(cache, journal_of(cache))) as client:
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
         tools = (await client.list_tools()).tools
 
     assert sorted(tool.name for tool in tools) == [
@@ -300,6 +307,7 @@ async def test_the_tools_are_listed(tmp_path: Path) -> None:
         "get_indicators",
         "get_performance",
         "get_quote",
+        "get_risk_config",
         "get_support_resistance",
         "get_trend",
         "record_decision",
@@ -503,7 +511,7 @@ async def test_get_quote_of_a_listed_ticker_without_history(tmp_path: Path) -> N
 @pytest.mark.anyio
 async def test_the_volume_ratio_says_it_is_not_normalised(tmp_path: Path) -> None:
     cache = cache_for(provider([]), tmp_path)
-    async with Client(build_server(cache, journal_of(cache))) as client:
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
         tools = {tool.name: tool for tool in (await client.list_tools()).tools}
 
     schema = tools["get_quote"].output_schema
@@ -880,9 +888,12 @@ async def test_get_support_resistance_of_an_unsupported_exchange_is_a_tool_error
 
 
 class FakeServer:
-    def __init__(self, cache: StockCache, journal: Journal) -> None:
+    def __init__(
+        self, cache: StockCache, journal: Journal, risk_config: RiskConfig
+    ) -> None:
         self.cache = cache
         self.journal = journal
+        self.risk_config = risk_config
         self.ran = False
         self.provider_kwargs: dict[str, Any] = {}
 
@@ -891,15 +902,27 @@ class FakeServer:
 
 
 def run_main(
-    monkeypatch: pytest.MonkeyPatch, env_file: Path | None = None
+    monkeypatch: pytest.MonkeyPatch,
+    env_file: Path | None = None,
+    *,
+    read_risk_config: bool = False,
 ) -> FakeServer:
+    """
+    Run `main()` on a fake server and provider. Without `read_risk_config`
+    the checked-in risk config stands in for the assets folder's, so these
+    tests can point the folder anywhere.
+    """
     built: list[FakeServer] = []
 
-    def fake_build_server(cache: StockCache, journal: Journal) -> FakeServer:
-        built.append(FakeServer(cache, journal))
+    def fake_build_server(
+        cache: StockCache, journal: Journal, risk_config: RiskConfig
+    ) -> FakeServer:
+        built.append(FakeServer(cache, journal, risk_config))
         return built[-1]
 
     monkeypatch.setattr(server_module, "build_server", fake_build_server)
+    if not read_risk_config:
+        monkeypatch.setattr(server_module, "load_risk_config", lambda _: RISK_CONFIG)
     providers: list[Any] = []
 
     def fake_provider(**kwargs: Any) -> Any:
@@ -915,6 +938,67 @@ def run_main(
     assert built[0].ran
     built[0].provider_kwargs = providers[0]
     return built[0]
+
+
+def test_main_reads_the_risk_config_from_the_assets_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    text = (ROOT / "assets" / RISK_FILE).read_text()
+    (tmp_path / RISK_FILE).write_text(
+        text.replace("max_risk_per_position = 0.02", "max_risk_per_position = 0.01")
+    )
+    monkeypatch.setenv(server_module.ASSETS_DIR_ENV, str(tmp_path))
+
+    server = run_main(monkeypatch, read_risk_config=True)
+
+    assert server.risk_config.limits.max_risk_per_position == 0.01
+    assert server.risk_config.source == (tmp_path / RISK_FILE).resolve()
+
+
+def test_main_reads_the_checked_in_risk_config_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(server_module.ASSETS_DIR_ENV, raising=False)
+
+    server = run_main(monkeypatch, read_risk_config=True)
+
+    assert server.risk_config == RISK_CONFIG
+
+
+def test_main_stops_on_a_missing_risk_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(server_module.ASSETS_DIR_ENV, str(tmp_path))
+
+    with pytest.raises(SystemExit) as raised:
+        run_main(monkeypatch, read_risk_config=True)
+
+    message = str(raised.value.code)
+    assert str(tmp_path / RISK_FILE) in message
+    assert "copy the repository's assets/risk.toml" in message
+    assert capsys.readouterr().out == ""
+
+
+def test_main_stops_on_a_risk_config_it_cant_accept(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    text = (ROOT / "assets" / RISK_FILE).read_text()
+    (tmp_path / RISK_FILE).write_text(
+        text.replace("min_reward_to_risk = 2.0", "min_reward_to_risk = 0.5")
+    )
+    monkeypatch.setenv(server_module.ASSETS_DIR_ENV, str(tmp_path))
+
+    with pytest.raises(SystemExit) as raised:
+        run_main(monkeypatch, read_risk_config=True)
+
+    message = str(raised.value.code)
+    assert str(tmp_path / RISK_FILE) in message
+    assert "limits.min_reward_to_risk = 0.5" in message
+    assert capsys.readouterr().out == ""
 
 
 def test_main_uses_the_repository_assets_by_default(
@@ -1246,7 +1330,7 @@ async def test_an_invalid_value_error_says_what_is_allowed(
 @pytest.mark.anyio
 async def test_the_valid_names_are_in_the_input_schema(tmp_path: Path) -> None:
     cache = cache_for(provider([]), tmp_path)
-    async with Client(build_server(cache, journal_of(cache))) as client:
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
         tools = (await client.list_tools()).tools
 
     schema = json.dumps(
@@ -1807,7 +1891,7 @@ async def test_a_ticker_without_history_or_first_trade_date(
 @pytest.mark.anyio
 async def test_the_analyze_ticker_prompt_is_listed(tmp_path: Path) -> None:
     cache = cache_for(provider([]), tmp_path)
-    async with Client(build_server(cache, journal_of(cache))) as client:
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
         prompts = (await client.list_prompts()).prompts
 
     assert [prompt.name for prompt in prompts] == ["analyze_ticker"]
@@ -1825,7 +1909,7 @@ async def test_analyze_ticker_returns_the_procedure_for_the_normalised_ticker(
     fake = provider([])
     fake.reachable = False
     cache = cache_for(fake, tmp_path)
-    async with Client(build_server(cache, journal_of(cache))) as client:
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
         result = await client.get_prompt("analyze_ticker", {"ticker": " asml.as "})
 
     assert len(result.messages) == 1
@@ -1842,7 +1926,7 @@ async def test_analyze_ticker_refuses_what_isnt_a_stock_in_the_universe(
 ) -> None:
     fake = provider([])
     cache = cache_for(fake, tmp_path)
-    async with Client(build_server(cache, journal_of(cache))) as client:
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
         with pytest.raises(MCPError) as raised:
             await client.get_prompt("analyze_ticker", {"ticker": ticker})
 
@@ -1859,7 +1943,7 @@ async def test_get_analysis_procedure_is_read_only_with_one_ticker_argument(
     tmp_path: Path,
 ) -> None:
     cache = cache_for(provider([]), tmp_path)
-    async with Client(build_server(cache, journal_of(cache))) as client:
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
         tools = (await client.list_tools()).tools
 
     tool = next(t for t in tools if t.name == "get_analysis_procedure")
@@ -1883,7 +1967,7 @@ async def test_get_analysis_procedure_returns_the_prompts_text(
     fake = provider([])
     fake.reachable = False
     cache = cache_for(fake, tmp_path)
-    async with Client(build_server(cache, journal_of(cache))) as client:
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
         result = await client.call_tool("get_analysis_procedure", {"ticker": ticker})
         prompt = await client.get_prompt("analyze_ticker", {"ticker": ticker})
 
@@ -1904,7 +1988,7 @@ async def test_get_analysis_procedure_refuses_as_the_prompt_does(
 ) -> None:
     fake = provider([])
     cache = cache_for(fake, tmp_path)
-    async with Client(build_server(cache, journal_of(cache))) as client:
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
         result = await client.call_tool("get_analysis_procedure", {"ticker": ticker})
         with pytest.raises(MCPError) as raised:
             await client.get_prompt("analyze_ticker", {"ticker": ticker})
@@ -1920,7 +2004,104 @@ async def test_get_analysis_procedure_refuses_as_the_prompt_does(
 @pytest.mark.anyio
 async def test_every_tool_the_procedure_names_is_registered(tmp_path: Path) -> None:
     cache = cache_for(provider([]), tmp_path)
-    async with Client(build_server(cache, journal_of(cache))) as client:
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
         tools = {tool.name for tool in (await client.list_tools()).tools}
 
     assert procedure_tools() <= tools
+
+
+@pytest.mark.anyio
+async def test_get_risk_config_is_read_only_without_arguments(tmp_path: Path) -> None:
+    cache = cache_for(provider([]), tmp_path)
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
+        tools = (await client.list_tools()).tools
+
+    tool = next(t for t in tools if t.name == "get_risk_config")
+    assert tool.description
+    assert tool.input_schema.get("properties", {}) == {}
+    assert tool.input_schema.get("required", []) == []
+    assert tool.annotations is not None
+    assert tool.annotations.read_only_hint is True
+    assert tool.annotations.open_world_hint is False
+
+
+@pytest.mark.anyio
+async def test_get_risk_config_returns_the_file_as_read(tmp_path: Path) -> None:
+    fake = provider([])
+    fake.reachable = False
+    cache = cache_for(fake, tmp_path)
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
+        result = await client.call_tool("get_risk_config", {})
+
+    assert not result.is_error, result.content
+    content = result.structured_content
+    assert content["source"] == str(ROOT / "assets" / RISK_FILE)
+    assert content["limits"] == {
+        "starting_capital": 10000,
+        "max_risk_per_position": 0.02,
+        "max_position_size": 0.2,
+        "max_open_positions": 8,
+        "min_reward_to_risk": 2.0,
+        "kill_switch_drawdown": 0.16,
+    }
+    costs = content["costs"]
+    assert costs["tariff"] == RISK_CONFIG.costs.tariff
+    assert costs["currency_conversion"] == 0.0025
+    assert costs["slippage_per_leg"] == 0.001
+    assert list(costs["exchanges"]) == [
+        "XNYS",
+        "XAMS",
+        "XPAR",
+        "XBRU",
+        "XLIS",
+        "XMIL",
+        "XDUB",
+        "XOSL",
+    ]
+    assert costs["exchanges"]["XNYS"] == {
+        "commission": 0.0008,
+        "commission_min": 1,
+        "commission_max": 150,
+        "commission_currency": "USD",
+        "tax_on_buy": 0,
+        "fee_on_sell": 0.0000229,
+        "fee_per_trade": 0,
+        "suffixes": [""],
+    }
+    assert costs["exchanges"]["XDUB"] == {
+        "commission": 0.0012,
+        "commission_min": 5,
+        "commission_max": None,
+        "commission_currency": "EUR",
+        "tax_on_buy": 0.01,
+        "fee_on_sell": 0,
+        "fee_per_trade": 1.25,
+        "suffixes": [".IR"],
+    }
+    assert costs["exchanges"]["XAMS"]["suffixes"] == [".AS"]
+    assert fake.history_calls == []
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.anyio
+async def test_no_other_tool_takes_a_limit_or_a_cost(tmp_path: Path) -> None:
+    cache = cache_for(provider([]), tmp_path)
+    async with Client(build_server(cache, journal_of(cache), RISK_CONFIG)) as client:
+        tools = (await client.list_tools()).tools
+
+    names = (
+        set(Limits.model_fields)
+        | set(Costs.model_fields)
+        | set(ExchangeCosts.model_fields)
+        | {"limits", "costs"}
+    )
+    for tool in tools:
+        assert not names & set(tool.input_schema.get("properties", {})), tool.name
+
+
+def test_the_instructions_say_the_limits_are_the_operators() -> None:
+    sentence = next(
+        s for s in server_module.INSTRUCTIONS.split(". ") if "get_risk_config" in s
+    )
+    assert "operator" in sentence
+    assert "can't change" in sentence
