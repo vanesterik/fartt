@@ -18,7 +18,7 @@ from fartt.data import YFinanceProvider
 from fartt.stock_cache import StockCache
 
 # Every ticker an integration test reads from a filled cache.
-SNAPSHOT_TICKERS = ("ASML.AS", "AAPL", "GOOG", "ARM", "IWDA.AS", "EURUSD=X")
+SNAPSHOT_TICKERS = ("ASML.AS", "AAPL", "IWDA.AS", "EURUSD=X")
 # Thursday noon UTC: Wednesday 2026-11-04 is the newest closed session on
 # every exchange in the snapshot, Euronext, the US and the 24/5 rates alike.
 SNAPSHOT_NOW = datetime(2026, 11, 5, 12, tzinfo=UTC)

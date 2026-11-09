@@ -1,13 +1,21 @@
 """
-Integration check of the whole MCP server over stdio, the way Claude Code runs it:
-the command and arguments come from the project's `.mcp.json`, unchanged, and
-`FARTT_ASSETS_DIR` points the cache at a temporary folder.
-`test_tools_over_stdio` fills an empty folder from the live data provider, the
-one run of every tool against Yahoo, so it's marked `network` (`task
-test:network`); the stdout check runs offline on the snapshot.
+The smoke set: the whole MCP server over stdio, the way Claude Code runs it.
+The command and arguments come from the project's `.mcp.json`, unchanged, and
+`FARTT_ASSETS_DIR` points the server at a temporary folder.
 
-Each tool story adds its tool to `EXPECTED_TOOLS` and its call to
-`test_tools_over_stdio`; each prompt story its prompt to `EXPECTED_PROMPTS`.
+These tests check only what the unit tests can't, since those drive the same
+tools in process through `build_server` on a fake provider: that the server
+starts from `.mcp.json` and reads its environment, that every tool and prompt
+is listed and answers on real data, that the journal outlives the process,
+that stdout carries only the protocol, and that a bad risk config stops the
+server before it serves. What each tool returns is the unit tests' job.
+
+`test_tools_over_stdio` fills an empty folder from Yahoo, the one run of every
+tool against the live provider, so it's marked `network` (`task
+test:network`); everything else runs offline on the snapshot.
+
+Each tool story adds its tool to `EXPECTED_TOOLS` and its call to `_walk`;
+each prompt story its prompt to `EXPECTED_PROMPTS`.
 """
 
 import json
@@ -16,6 +24,8 @@ import queue
 import signal
 import subprocess
 import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +33,8 @@ import pytest
 from mcp import Client, StdioServerParameters
 from mcp.types import LATEST_PROTOCOL_VERSION
 
-from tests.integration.risk import copy_risk_config
+from fartt.risk_config import RISK_FILE
+from tests.integration.risk import CHECKED_IN, copy_risk_config
 from tests.integration.snapshot import OFFLINE
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -47,6 +58,8 @@ EXPECTED_TOOLS = [
 EXPECTED_PROMPTS = ["analyze_ticker", "daily_checkin"]
 # Per response; also the MCP client's read timeout, which defaults to none.
 RESPONSE_TIMEOUT_S = 120
+# A server that refuses its risk config stops before it serves.
+START_TIMEOUT_S = 60
 
 
 @pytest.fixture
@@ -65,182 +78,233 @@ def _environment(
     return {**os.environ, "FARTT_ASSETS_DIR": str(assets_dir), **(settings or {})}
 
 
-@pytest.mark.network
-@pytest.mark.anyio
-async def test_tools_over_stdio(tmp_path: Path) -> None:
-    risk_file = copy_risk_config(tmp_path)
+@asynccontextmanager
+async def _server(
+    assets_dir: Path, settings: dict[str, str] | None = None
+) -> AsyncIterator[Client]:
     command, *args = _server_command()
     params = StdioServerParameters(
-        command=command, args=args, cwd=str(ROOT), env=_environment(tmp_path)
+        command=command,
+        args=args,
+        cwd=str(ROOT),
+        env=_environment(assets_dir, settings),
     )
-
     async with Client(params, read_timeout_seconds=RESPONSE_TIMEOUT_S) as client:
-        tools = sorted(tool.name for tool in (await client.list_tools()).tools)
-        assert tools == sorted(EXPECTED_TOOLS)
+        yield client
 
-        # @issue-131 @AC10
-        prompts = sorted(p.name for p in (await client.list_prompts()).prompts)
-        assert prompts == sorted(EXPECTED_PROMPTS)
-        analysis = await client.get_prompt("analyze_ticker", {"ticker": "ASML.AS"})
-        assert len(analysis.messages) == 1
-        assert analysis.messages[0].content.type == "text"
-        assert "ASML.AS" in analysis.messages[0].content.text
 
-        # @issue-141 @AC2
-        procedure = await client.call_tool(
-            "get_analysis_procedure", {"ticker": "ASML.AS"}
-        )
-        assert not procedure.is_error, procedure.content
-        assert procedure.structured_content == {
-            "ticker": "ASML.AS",
-            "procedure": analysis.messages[0].content.text,
-        }
+async def _walk(client: Client, risk_file: Path, *, online: bool) -> dict[str, Any]:
+    """
+    List every tool and prompt and call each once on ASML.AS, checking only
+    that it answers in its shape; return the call `record_decision` stored.
+    Offline, `get_quote` is the one tool that must refuse.
+    """
+    tools = sorted(tool.name for tool in (await client.list_tools()).tools)
+    assert tools == sorted(EXPECTED_TOOLS)
 
-        # @issue-148 @AC5
-        checkin = await client.get_prompt("daily_checkin", {})
-        assert len(checkin.messages) == 1
-        assert checkin.messages[0].content.type == "text"
-        checkin_procedure = await client.call_tool("get_checkin_procedure", {})
-        assert not checkin_procedure.is_error, checkin_procedure.content
-        assert checkin_procedure.structured_content == {
-            "procedure": checkin.messages[0].content.text
-        }
+    # @issue-131 @AC10
+    prompts = sorted(p.name for p in (await client.list_prompts()).prompts)
+    assert prompts == sorted(EXPECTED_PROMPTS)
+    analysis = await client.get_prompt("analyze_ticker", {"ticker": "ASML.AS"})
+    assert len(analysis.messages) == 1
+    assert analysis.messages[0].content.type == "text"
+    assert "ASML.AS" in analysis.messages[0].content.text
 
-        candles = await client.call_tool(
-            "get_candles", {"ticker": "ASML.AS", "count": 5}
-        )
-        assert not candles.is_error, candles.content
-        content = candles.structured_content
-        assert content["ticker"] == "ASML.AS"
-        assert content["exchange"] == "XAMS"
-        assert content["columns"] == ["date", "open", "high", "low", "close", "volume"]
-        assert len(content["rows"]) == 5
+    # @issue-141 @AC2
+    procedure = await client.call_tool("get_analysis_procedure", {"ticker": "ASML.AS"})
+    assert not procedure.is_error, procedure.content
+    assert procedure.structured_content == {
+        "ticker": "ASML.AS",
+        "procedure": analysis.messages[0].content.text,
+    }
 
-        quote = await client.call_tool("get_quote", {"ticker": "ASML.AS"})
+    # @issue-148 @AC5
+    checkin = await client.get_prompt("daily_checkin", {})
+    assert len(checkin.messages) == 1
+    assert checkin.messages[0].content.type == "text"
+    checkin_procedure = await client.call_tool("get_checkin_procedure", {})
+    assert not checkin_procedure.is_error, checkin_procedure.content
+    assert checkin_procedure.structured_content == {
+        "procedure": checkin.messages[0].content.text
+    }
+
+    candles = await client.call_tool("get_candles", {"ticker": "ASML.AS", "count": 5})
+    assert not candles.is_error, candles.content
+    content = candles.structured_content
+    assert content["ticker"] == "ASML.AS"
+    assert content["exchange"] == "XAMS"
+    assert content["columns"] == ["date", "open", "high", "low", "close", "volume"]
+    assert len(content["rows"]) == 5
+
+    quote = await client.call_tool("get_quote", {"ticker": "ASML.AS"})
+    if online:
         assert not quote.is_error, quote.content
         prices = quote.structured_content
         assert prices["ticker"] == "ASML.AS"
         assert prices["last"] > 0
         assert isinstance(prices["market_open"], bool)
+    else:
+        # A quote is never served from the cache: offline, it says so.
+        assert quote.is_error
 
-        indicators = await client.call_tool("get_indicators", {"ticker": "ASML.AS"})
-        assert not indicators.is_error, indicators.content
-        values = indicators.structured_content
-        assert values["ticker"] == "ASML.AS"
-        assert values["sma_200"] is not None
-        assert len(json.dumps(values)) < 2000
+    indicators = await client.call_tool("get_indicators", {"ticker": "ASML.AS"})
+    assert not indicators.is_error, indicators.content
+    values = indicators.structured_content
+    assert values["ticker"] == "ASML.AS"
+    assert values["sma_200"] is not None
+    assert len(json.dumps(values)) < 2000
 
-        # @issue-108 @AC9
-        trend = await client.call_tool("get_trend", {"ticker": "ASML.AS"})
-        assert not trend.is_error, trend.content
-        timeframes = trend.structured_content
-        assert timeframes["ticker"] == "ASML.AS"
-        assert timeframes["weekly"]["sma_200"] is not None
-        assert len(json.dumps(timeframes)) < 2000
+    # @issue-108 @AC9
+    trend = await client.call_tool("get_trend", {"ticker": "ASML.AS"})
+    assert not trend.is_error, trend.content
+    timeframes = trend.structured_content
+    assert timeframes["ticker"] == "ASML.AS"
+    assert timeframes["weekly"]["sma_200"] is not None
+    assert len(json.dumps(timeframes)) < 2000
 
-        # @issue-109 @AC11
-        levels = await client.call_tool("get_support_resistance", {"ticker": "ASML.AS"})
-        assert not levels.is_error, levels.content
-        zones = levels.structured_content
-        assert zones["ticker"] == "ASML.AS"
-        assert zones["support"] or zones["resistance"]
-        assert len(json.dumps(zones)) < 3500
+    # @issue-109 @AC11
+    levels = await client.call_tool("get_support_resistance", {"ticker": "ASML.AS"})
+    assert not levels.is_error, levels.content
+    zones = levels.structured_content
+    assert zones["ticker"] == "ASML.AS"
+    assert zones["support"] or zones["resistance"]
+    assert len(json.dumps(zones)) < 3500
 
-        # @issue-119 @AC9 (a pass: a buy needs a plan since #148)
-        decision = await client.call_tool(
-            "record_decision",
-            {
-                "ticker": "ASML.AS",
-                "direction": "pass",
-                "horizon": 20,
-                "reasoning": "Integration check over stdio.",
-                "signals": [{"name": "trend", "stance": "against"}],
-            },
-        )
-        assert not decision.is_error, decision.content
-        entry = decision.structured_content
-        assert entry["id"] == 1
-        assert entry["ticker"] == "ASML.AS"
-        assert entry["benchmark"]["ticker"] == "IWDA.AS"
+    # @issue-119 @AC9 (a pass: a buy needs a plan since #148)
+    decision = await client.call_tool(
+        "record_decision",
+        {
+            "ticker": "ASML.AS",
+            "direction": "pass",
+            "horizon": 20,
+            "reasoning": "Integration check over stdio.",
+            "signals": [{"name": "trend", "stance": "against"}],
+        },
+    )
+    assert not decision.is_error, decision.content
+    entry = decision.structured_content
+    assert entry["id"] == 1
+    assert entry["ticker"] == "ASML.AS"
+    assert entry["benchmark"]["ticker"] == "IWDA.AS"
 
-        # @issue-120 @AC10
-        journal = await client.call_tool("get_decisions", {})
-        assert not journal.is_error, journal.content
-        calls = journal.structured_content
-        assert calls["total"] == 1
-        read_back = calls["decisions"][0]
-        assert read_back["status"] == "open"
-        assert read_back["score"] is None
-        assert {
-            k: v
-            for k, v in read_back.items()
-            if k not in ("status", "horizon_passed", "score", "position")
-        } == entry
-        # @issue-144 @AC13
-        assert read_back["position"] is None
+    # @issue-120 @AC10
+    journal = await client.call_tool("get_decisions", {})
+    assert not journal.is_error, journal.content
+    calls = journal.structured_content
+    assert calls["total"] == 1
+    read_back = calls["decisions"][0]
+    assert read_back["status"] == "open"
+    assert read_back["score"] is None
+    assert {
+        k: v
+        for k, v in read_back.items()
+        if k not in ("status", "horizon_passed", "score", "position")
+    } == entry
+    # @issue-144 @AC13
+    assert read_back["position"] is None
 
-        # @issue-121 @AC12
-        scoring = await client.call_tool("score_decisions", {})
-        assert not scoring.is_error, scoring.content
-        run = scoring.structured_content
-        assert run["scored"] == []
-        assert run["not_scored"] == []
-        assert run["running"] == 1
-        assert run["already_scored"] == 0
+    # @issue-121 @AC12
+    scoring = await client.call_tool("score_decisions", {})
+    assert not scoring.is_error, scoring.content
+    run = scoring.structured_content
+    assert run["scored"] == []
+    assert run["not_scored"] == []
+    assert run["running"] == 1
+    assert run["already_scored"] == 0
 
-        # @issue-122 @AC10
-        performance = await client.call_tool("get_performance", {})
-        assert not performance.is_error, performance.content
-        figures = performance.structured_content
-        assert figures["scored"] == 0
-        assert figures["open"] == 1
-        assert figures["overall"]["calls"] == 0
-        assert figures["tickers"] == []
+    # @issue-122 @AC10
+    performance = await client.call_tool("get_performance", {})
+    assert not performance.is_error, performance.content
+    figures = performance.structured_content
+    assert figures["scored"] == 0
+    assert figures["open"] == 1
+    assert figures["overall"]["calls"] == 0
+    assert figures["tickers"] == []
 
-        # @issue-144 @AC13
-        settling = await client.call_tool("settle_positions", {})
-        assert not settling.is_error, settling.content
-        settled = settling.structured_content
-        assert settled["filled"] == settled["closed"] == settled["not_settled"] == []
-        assert settled["note"]
+    # @issue-144 @AC13
+    settling = await client.call_tool("settle_positions", {})
+    assert not settling.is_error, settling.content
+    settled = settling.structured_content
+    assert settled["filled"] == settled["closed"] == settled["not_settled"] == []
+    assert settled["note"]
 
-        # @issue-149 @AC1
-        risk = await client.call_tool("get_risk_config", {})
-        assert not risk.is_error, risk.content
-        config = risk.structured_content
-        assert Path(config["source"]).resolve() == risk_file.resolve()
-        assert config["limits"]["max_risk_per_position"] == 0.02
-        assert sorted(config["costs"]["exchanges"]) == sorted(
-            ["XNYS", "XAMS", "XPAR", "XBRU", "XLIS", "XMIL", "XDUB", "XOSL"]
-        )
+    # @issue-149 @AC1
+    risk = await client.call_tool("get_risk_config", {})
+    assert not risk.is_error, risk.content
+    config = risk.structured_content
+    assert Path(config["source"]).resolve() == risk_file.resolve()
+    assert config["limits"]["max_risk_per_position"] == 0.02
+    assert sorted(config["costs"]["exchanges"]) == sorted(
+        ["XNYS", "XAMS", "XPAR", "XBRU", "XLIS", "XMIL", "XDUB", "XOSL"]
+    )
 
-        # @issue-143 @AC1
-        last = zones["last"]
-        plan = await client.call_tool(
-            "plan_trade",
-            {
-                "ticker": "ASML.AS",
-                "entry": round(last * 0.98, 2),
-                "stop": round(last * 0.98 * 0.95, 2),
-                "target": round(last * 0.98 * 1.3, 2),
-            },
-        )
-        assert not plan.is_error, plan.content
-        sized = plan.structured_content
-        assert sized["ticker"] == "ASML.AS"
-        assert sized["shares"] >= 1
-        assert sized["risk"] <= 0.02 * config["limits"]["starting_capital"]
+    # @issue-143 @AC1
+    last = zones["last"]
+    plan = await client.call_tool(
+        "plan_trade",
+        {
+            "ticker": "ASML.AS",
+            "entry": round(last * 0.98, 2),
+            "stop": round(last * 0.98 * 0.95, 2),
+            "target": round(last * 0.98 * 1.3, 2),
+        },
+    )
+    assert not plan.is_error, plan.content
+    sized = plan.structured_content
+    assert sized["ticker"] == "ASML.AS"
+    assert sized["shares"] >= 1
+    assert sized["risk"] <= 0.02 * config["limits"]["starting_capital"]
 
-        # @issue-145 @AC1
-        portfolio = await client.call_tool("get_portfolio", {})
-        assert not portfolio.is_error, portfolio.content
-        held = portfolio.structured_content
-        capital = config["limits"]["starting_capital"]
-        assert held["totals"]["total_value"] == held["totals"]["cash"] == capital
-        assert held["open"] == held["waiting"] == []
+    # @issue-145 @AC1
+    portfolio = await client.call_tool("get_portfolio", {})
+    assert not portfolio.is_error, portfolio.content
+    held = portfolio.structured_content
+    capital = config["limits"]["starting_capital"]
+    assert held["totals"]["total_value"] == held["totals"]["cash"] == capital
+    assert held["open"] == held["waiting"] == []
+
+    return entry
+
+
+@pytest.mark.network
+@pytest.mark.anyio
+async def test_tools_over_stdio(tmp_path: Path) -> None:
+    risk_file = copy_risk_config(tmp_path)
+
+    async with _server(tmp_path) as client:
+        await _walk(client, risk_file, online=True)
 
     assert (tmp_path / "stocks" / "ASML.AS" / "candles.csv").exists()
     assert (tmp_path / "journal" / "decisions.jsonl").exists()
+
+
+@pytest.mark.anyio
+async def test_tools_on_the_snapshot_and_the_journal_after_a_restart(
+    seeded_assets: Path,
+) -> None:
+    async with _server(seeded_assets, OFFLINE) as client:
+        entry = await _walk(client, seeded_assets / RISK_FILE, online=False)
+
+    # A new process reads the journal the last one wrote, and appends to it.
+    async with _server(seeded_assets, OFFLINE) as client:
+        journal = await client.call_tool("get_decisions", {"id": entry["id"]})
+        assert not journal.is_error, journal.content
+        (read_back,) = journal.structured_content["decisions"]
+        assert read_back["recorded_at"] == entry["recorded_at"]
+        assert read_back["reasoning"] == entry["reasoning"]
+
+        another = await client.call_tool(
+            "record_decision",
+            {
+                "ticker": "AAPL",
+                "direction": "pass",
+                "horizon": 20,
+                "reasoning": "After a restart.",
+                "signals": [{"name": "trend", "stance": "against"}],
+            },
+        )
+        assert not another.is_error, another.content
+        assert another.structured_content["id"] == entry["id"] + 1
 
 
 def test_stdout_carries_only_the_protocol(seeded_assets: Path) -> None:
@@ -362,3 +426,65 @@ def _check_stdout(
     assert [p["name"] for p in responses[4]["result"]["prompts"]] == EXPECTED_PROMPTS
     assert "error" not in responses[5]
     assert len(responses[5]["result"]["messages"]) == 1
+
+
+def _start_refused(assets_dir: Path) -> subprocess.CompletedProcess[str]:
+    """Start the server, send it `initialize`, and wait for it to stop."""
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": LATEST_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "fartt-integration", "version": "0"},
+        },
+    }
+    return subprocess.run(
+        _server_command(),
+        cwd=ROOT,
+        check=False,
+        env=_environment(assets_dir, OFFLINE),
+        input=json.dumps(initialize) + "\n",
+        capture_output=True,
+        text=True,
+        timeout=START_TIMEOUT_S,
+    )
+
+
+def _assert_refused(
+    run: subprocess.CompletedProcess[str], path: Path, *fragments: str
+) -> None:
+    """
+    The server stopped without serving: a non-zero exit, nothing on stdout
+    (not even an answer to `initialize`), and stderr naming the file and
+    each fragment.
+    """
+    assert run.returncode != 0, run.stderr
+    assert run.stdout == ""
+    assert str(path) in run.stderr, run.stderr
+    for fragment in fragments:
+        assert fragment in run.stderr, (fragment, run.stderr)
+
+
+def test_should_not_start_without_a_risk_config(tmp_path: Path) -> None:
+    """@issue-149 @AC5"""
+    run = _start_refused(tmp_path)
+
+    _assert_refused(run, tmp_path / RISK_FILE, "doesn't exist", "assets/risk.toml")
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_should_not_start_on_a_risk_config_it_cannot_accept(
+    empty_assets: Path,
+) -> None:
+    """@issue-149 @AC6"""
+    path = empty_assets / RISK_FILE
+    text = CHECKED_IN.read_text()
+    changed = text.replace("min_reward_to_risk = 2.0", "min_reward_to_risk = 0.5")
+    assert changed != text
+    path.write_text(changed)
+
+    run = _start_refused(empty_assets)
+
+    _assert_refused(run, path, "limits.min_reward_to_risk", "0.5")
