@@ -2,9 +2,8 @@
 The integration tests start the server over stdio, as Claude Code does. Most
 run it on the checked-in snapshot (`snapshot.py`) with its clock pinned and
 Yahoo out of reach: offline, so they're fast and don't fail when Yahoo does.
-Every test here is marked `integration`; the few that are about Yahoo itself
-(a first download, a quote, a ticker Yahoo doesn't list) are also marked
-`network` and run with `task test:network` instead.
+Every test here is marked `integration`; the one that fills an empty folder
+from Yahoo is also marked `network` and runs with `task test:network` instead.
 """
 
 import shutil
