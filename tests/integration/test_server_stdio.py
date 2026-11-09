@@ -11,8 +11,8 @@ that stdout carries only the protocol, and that a bad risk config stops the
 server before it serves. What each tool returns is the unit tests' job.
 
 `test_tools_over_stdio` fills an empty folder from Yahoo, the one run of every
-tool against the live provider, so it's marked `network` (`task
-test:network`); everything else runs offline on the snapshot.
+tool against the live provider, so it's marked `network` (it runs with `task
+test:integration`); everything else runs offline on the snapshot.
 
 Each tool story adds its tool to `EXPECTED_TOOLS` and its call to `_walk`;
 each prompt story its prompt to `EXPECTED_PROMPTS`.

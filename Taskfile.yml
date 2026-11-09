@@ -52,28 +52,20 @@ tasks:
       # pytest exits 5 when it collects nothing, which is not a failure here.
       - uv run pytest; code=$?; [ "$code" = "5" ] && exit 0 || exit "$code"
 
-  # The integration tests (tests/integration): the server started over stdio
-  # the way Claude Code starts it, on the checked-in snapshot with its clock
-  # pinned and Yahoo out of reach, so they're offline and deterministic. They
-  # run in parallel (pytest-xdist): nearly all of their time is starting a
-  # server per test, under a second each. The unit tests stay serial; they
-  # take about four seconds, less than starting the workers costs.
+  # Everything `check` leaves out: the integration smoke set
+  # (tests/integration), the server started over stdio the way Claude Code
+  # starts it, mostly offline on the checked-in snapshot; and the tests marked
+  # `network`, which call Yahoo Finance (the provider's live tests and one walk
+  # of every tool from an empty folder). A gate must not fail because Yahoo is
+  # down, so `check` leaves them out; run this after a runtime dependency
+  # update. They run in parallel (pytest-xdist): nearly all of their time is
+  # starting a server per test. The unit tests stay serial; they take about
+  # ten seconds, too little to pay for starting the workers.
   test:integration:
-    desc: Run the integration tests over stdio, offline on the data snapshot
+    desc: Run the integration smoke set and the tests that call Yahoo Finance
     prefix: test:integration
     cmds:
-      - uv run pytest -m "integration and not network" -n auto
-
-  # The tests marked `network`, which call Yahoo Finance: the provider's live
-  # tests, the one integration run of every tool from an empty folder, and the
-  # integration checks of what Yahoo answers (a first download, a quote, a
-  # ticker it doesn't list). A gate must not fail because Yahoo is down, so
-  # `check` leaves them out; run them after a runtime dependency update.
-  test:network:
-    desc: Run the tests that call Yahoo Finance
-    prefix: test:network
-    cmds:
-      - uv run pytest -m network -n auto
+      - uv run pytest -m "integration or network" -n auto
 
   # The integration tests' market data (tests/integration/snapshot/): the
   # tickers they read, downloaded as they stood at SNAPSHOT_NOW in
