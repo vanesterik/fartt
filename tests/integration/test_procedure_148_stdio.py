@@ -406,3 +406,37 @@ class TestNoRoomAdvice:
         # ... so the refusal must not advise it, nor a pass for a no-room buy.
         assert "without a plan" not in message, message
         assert not re.search(r"record the call as a pass", message), message
+
+    async def test_should_refuse_a_buy_at_the_open_position_limit_and_record_nothing(
+        self, seeded_assets: Path
+    ) -> None:
+        """
+        @issue-148 @AC3 Should, with the open-position limit reached, refuse
+        the plan and the buy with it, record no call, and not advise recording
+        the call as a pass: a buy without room is not recorded.
+        """
+        # Eight one-share positions, all filled on 11-02 and still open.
+        open_ = Plan("ASML.AS", "2026-10-30", 20, 5, 1405, 1200, 1700, 1)
+        await _seed(seeded_assets, [open_] * 8)
+        async with _server(seeded_assets) as client:
+            portfolio = await _call(client, "get_portfolio")
+            refused = await client.call_tool(
+                "plan_trade", {"ticker": "ASML.AS", **NEW_PLAN}
+            )
+            with_plan = await client.call_tool(
+                "record_decision", {**CALL, "direction": "buy", "plan": NEW_PLAN}
+            )
+
+        assert portfolio["limits"]["room"] == 0
+        for result in (refused, with_plan):
+            assert result.is_error
+            message = _text(result)
+            assert "open-position limit" in message, message
+            assert "Nothing was recorded" in message, message
+            assert "without a plan" not in message, message
+            assert not re.search(r"record the call as a pass", message), message
+        kinds = [
+            json.loads(line)["kind"]
+            for line in _journal(seeded_assets).read_text().splitlines()
+        ]
+        assert kinds.count("decision") == 8
