@@ -27,5 +27,8 @@
   "integration": {
     "dir": "tests/integration",
     "runCommand": "uv run pytest tests/integration -m \"integration and not network\" -n auto"
+  },
+  "autopilot": {
+    "maxReworks": 2
   }
 }
