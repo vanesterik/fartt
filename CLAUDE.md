@@ -41,8 +41,7 @@ task lint                        # ruff format --check + ruff check, without wri
 task format                      # ruff format + ruff check --fix
 task typecheck                   # pyright (strict mode, src/ only — tests/ excluded)
 task test                        # pytest, offline
-task test:integration            # the stdio smoke set, offline on the data snapshot, in parallel (deselected by default)
-task test:network                # the tests that call Yahoo, in parallel (deselected by default)
+task test:integration            # the stdio smoke set and the tests that call Yahoo, in parallel (deselected by default)
 task test:snapshot               # rebuild the integration tests' data snapshot from Yahoo
 task pre-commit                  # the pre-commit hook's checks over staged files
 task outdated                    # direct dependencies with a newer release
@@ -50,7 +49,7 @@ task analyse                     # Claude Code limited to the fartt server's too
 task reset-kill-switch           # reset a tripped kill switch, on the cached data (-- --note "why"); the operator's only
 ```
 
-Tool versions are upgraded on purpose, never because a run nags: ruff's rule set is pinned in `pyproject.toml`, and pyright's new-release warning is silenced. Instead, Dependabot (`.github/dependabot.yml`) opens weekly pull requests for newer releases: minor and patch updates grouped into one for dev tools and one for runtime dependencies, each major update on its own. There's no CI, so check a Dependabot pull request out and run `task check` (or push to it) before merging. A runtime update also needs `task test:integration` and `task test:network`: the unit tests run on a fake provider, so an MCP SDK or exchange_calendars release that breaks the stdio server passes `task check` unnoticed, and a yfinance release that breaks the live fetch passes everything but `test:network`. `task outdated` is the on-demand version.
+Tool versions are upgraded on purpose, never because a run nags: ruff's rule set is pinned in `pyproject.toml`, and pyright's new-release warning is silenced. Instead, Dependabot (`.github/dependabot.yml`) opens weekly pull requests for newer releases: minor and patch updates grouped into one for dev tools and one for runtime dependencies, each major update on its own. There's no CI, so check a Dependabot pull request out and run `task check` (or push to it) before merging. A runtime update also needs `task test:integration`: the unit tests run on a fake provider, so an MCP SDK or exchange_calendars release that breaks the stdio server, or a yfinance release that breaks the live fetch, passes `task check` unnoticed. `task outdated` is the on-demand version.
 
 Everything below remains the direct route, and is what the Taskfile calls. Dependency management is via `uv` (see `uv.lock`), run from the repository root. The Python version is pinned in `.python-version` (3.14) and matched by `requires-python` in `pyproject.toml`; Dependabot doesn't track it, so moving to a new Python release is a deliberate change to both.
 
@@ -59,8 +58,8 @@ uv sync                          # install dependencies
 uv run fartt                     # run the MCP server over stdio (Claude Code does this from .mcp.json)
 uv run pytest                    # run test suite
 uv run pytest tests/test_server.py::test_count_beyond_the_history_returns_what_is_cached  # single test
-uv run pytest -m "integration and not network" -n auto  # the offline integration tests
-uv run pytest -m network -n auto # run the live tests, in parallel (deselected by default)
+uv run pytest -m "integration or network" -n auto   # the integration smoke set and the live tests
+uv run pytest -m "integration and not network" -n auto  # only the offline integration tests
 uv run ruff format .             # format
 uv run ruff check . --fix        # lint
 uv run pyright                   # type check (strict mode, src/ only — tests/ excluded)
@@ -70,7 +69,7 @@ There is no CLI: the agent calls the server's tools, and a ticker's cache fills 
 
 The integration tests (`tests/integration/`, all marked `integration` by its `conftest.py`) are a smoke set, in `test_server_stdio.py`: they check only what the unit tests can't, since those drive the same tools in process through `build_server` on a fake provider. Each starts the server from `.mcp.json`'s command with `FARTT_ASSETS_DIR` set to a temporary folder. The offline ones run on a copy of the checked-in snapshot (`tests/integration/snapshot/`, the `seeded_assets` fixture) with the server's clock pinned to the snapshot's moment and Yahoo out of reach (`snapshot.OFFLINE`), so they give the same result every run; `snapshot.py` names the tickers and the moment, and `task test:snapshot` rebuilds it. They check that every tool and prompt is listed and answers on real data (`_walk`, where a quote must refuse offline), that the journal outlives the process, that stdout carries only JSON-RPC, including anything written at shutdown, and that a missing or bad risk config stops the server before it serves. `test_tools_over_stdio` runs the same walk on an empty folder filled from Yahoo (`network`, for checking a runtime dependency update). What a tool returns is tested in the unit tests, not here. Each new tool joins the smoke set: the test role adds its name to `EXPECTED_TOOLS` and its call to `_walk` (integration tests are the test role's, not the builder's).
 
-Hooks are managed by `lefthook` (`.lefthook.yml`) and stand in for CI, which this project doesn't have. On every commit, staged Python files get `ruff format` + `ruff check --fix`, then `pyright` and `pytest` run. On every push, `task check` runs the full suite on the whole repository (`ruff format --check .`, `ruff check .`, `pyright`, `pytest`), because pre-commit only sees staged files and a commit touching only `pyproject.toml`, `uv.lock` or `.mcp.json` would otherwise skip tests and type checks. `git push --no-verify` skips the gate for one push; use it deliberately, never by default. Tests marked `integration` or `network` are deselected by default; run them with `task test:integration` (offline) and `task test:network` (Yahoo).
+Hooks are managed by `lefthook` (`.lefthook.yml`) and stand in for CI, which this project doesn't have. On every commit, staged Python files get `ruff format` + `ruff check --fix`, then `pyright` and `pytest` run. On every push, `task check` runs the full suite on the whole repository (`ruff format --check .`, `ruff check .`, `pyright`, `pytest`), because pre-commit only sees staged files and a commit touching only `pyproject.toml`, `uv.lock` or `.mcp.json` would otherwise skip tests and type checks. `git push --no-verify` skips the gate for one push; use it deliberately, never by default. Tests marked `integration` or `network` are deselected by default; run them with `task test:integration`.
 
 ## Running an analysis
 
@@ -180,7 +179,7 @@ The developer's approval of the design is the one human gate. `/unity:design` po
 <!-- Kept by /unity:init when the project has integration tests, removed otherwise; adjust as needed. write-system-test reads this section. -->
 
 - Integration test directory: `tests/integration/` (pytest; `integration.dir` in `.claude/pipeline.json`)
-- Run every integration test: `uv run pytest tests/integration -m "integration and not network" -n auto` (`task test:integration`; `integration.runCommand`). Offline only: the tests also marked `network` call Yahoo and are for checking a runtime dependency update (Dependabot), not part of testing a story. `task test` skips them all.
+- Run every integration test: `uv run pytest tests/integration -m "integration and not network" -n auto` (`integration.runCommand`). Offline only, unlike `task test:integration`, which also runs the tests marked `network`: those call Yahoo and are for checking a runtime dependency update (Dependabot), so a Yahoo outage is never taken for a defect. `task test` skips them all.
 - How the tests start or call the system: each test starts the server from `.mcp.json`'s command (`uv run fartt`) over stdio with `FARTT_ASSETS_DIR` set to a temporary folder, and talks to it through the MCP SDK's `Client`; nothing to start beforehand, everything runs in the PR checkout. The surface under test is the MCP server in `src/fartt/server/` as a process: it starts, lists and answers every tool and prompt, keeps its journal across a restart, writes only JSON-RPC to stdout and refuses a bad risk config. The suite is a smoke set: what each tool returns belongs in the unit tests, which drive the same tools in process; add an integration test only for what a process run catches and they can't.
 - Test data: a copy of the checked-in snapshot `tests/integration/snapshot/` (the `seeded_assets` fixture), with the server on `snapshot.OFFLINE`: its clock pinned to the snapshot's moment and Yahoo out of reach. Each test writes its own journal. A new test uses this unless it's about Yahoo's own answer.
 <!-- unity:workflow:end -->

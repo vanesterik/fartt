@@ -145,9 +145,8 @@ select = [
 
 [tool.pytest.ini_options]
 # The default run is the unit tests. Tests marked `integration` start the
-# server over stdio on the checked-in snapshot, offline (`task
-# test:integration`); tests marked `network` call Yahoo Finance (`task
-# test:network`). Strict markers turn a misspelt marker into an error instead
+# server over stdio, on the checked-in snapshot unless also marked `network`;
+# tests marked `network` call Yahoo Finance. `task test:integration` runs both. Strict markers turn a misspelt marker into an error instead
 # of a test that silently always runs.
 addopts = ["--strict-markers", "-m", "not network and not integration"]
 markers = [
