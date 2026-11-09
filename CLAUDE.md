@@ -132,7 +132,9 @@ gh project item-add 3 --owner vanesterik --url <issue-url>
 <!-- unity:workflow:start -->
 ## Team workflow (unity)
 
-This project is built by one developer and Claude in four roles: design -> build -> test -> review. Design is a conversation with the developer (`/unity:design`). Build, test and review each run as their own agent with a **fresh context** (`unity:builder`, `unity:tester`, `unity:reviewer`), started one after the other by `/unity:ship`, or one at a time by `/unity:build`, `/unity:test` and `/unity:review`. Each role is named after the board column it works in. GitHub is the only handoff between roles.
+This project is built by one developer and Claude in three roles per story: design -> build -> review. Design is a conversation with the developer (`/unity:design`). Build and review each run as their own agent with a **fresh context** (`unity:builder`, `unity:reviewer`), started one after the other by `/unity:ship`, or one at a time by `/unity:build` and `/unity:review`. `/unity:autopilot` does the same for every story in Build, top first, and also merges each one, but only through `pipeline.js merge`, which requires an approval on the pull request's head and green CI. The first story that can't get there ends the run. Each role is named after the board column it works in. GitHub is the only handoff between roles.
+
+Testing the running system is not part of a story. The developer runs `/unity:test` when they choose (for example at the end of an epic): the `unity:tester` agent tests the whole project against the designs of the shipped stories, revisits the integration or E2E suite in its own pull request, and files every defect as a new story in Backlog.
 
 ### Board
 
@@ -141,20 +143,19 @@ GitHub Project columns are the workflow state. IDs live in `.claude/pipeline.jso
 | Column | Meaning | Moved there by |
 | --- | --- | --- |
 | Backlog | Not picked up yet | the developer |
-| Design | Design and plan in progress, with the developer | `/unity:design` at start |
-| Build | Design approved; implementation and unit tests (TDD), also rework | `/unity:design` once the developer approves the design in conversation; the tester and the reviewer on rejection |
-| Test | PR ready, integration testing | the builder when every task is done |
-| Review | Tests passed, final code review | the tester on PASS |
+| Design | Design in progress with the developer, posted on the issue for review | `/unity:design` at start |
+| Build | Design approved; implementation and unit tests (TDD), also rework | `/unity:design` once the developer approves the posted design in conversation; the reviewer on rejection |
+| Review | PR ready, final code review | the builder when every task is done |
 | Done | Merged | the board's "Item closed" workflow, when the merge closes the issue |
 
-The developer's approval of the design is the one human gate: `/unity:design` moves an issue to Build only after it, and the builder works only on issues in Build.
+The developer's approval of the design is the one human gate. `/unity:design` posts the design on the issue while it stays in Design, the developer reads it there and approves the latest version in conversation, and only then does `/unity:design` move the issue to Build. The builder works only on issues in Build.
 
 ### Conventions
 
 - **Branch:** `feature/<issue>-<slug>` (e.g. `feature/42-guest-checkout`).
 - **PR body** contains `Closes #<issue>`.
-- **Design and plan live in the issue, not in the repository.** The latest `role:design` comment holds both. This overrides any convention that commits specs or plans as files (such as `docs/specs/` and `docs/plans/`), and the file-saving steps of planning skills: post the content as the comment instead.
-- **Role comments** start with a hidden marker so the next role can find them: `<!-- role:design v1 -->`, `<!-- role:build -->`, `<!-- role:test -->`, `<!-- role:review -->`. A revised design is a new comment with a higher version; the latest one counts. The design is posted on the issue; build, test and review post on the PR, and each also leaves a one-line pointer on the issue (no marker), so the issue shows the whole flow.
+- **The design lives in the issue, the plan on the PR, neither in the repository.** The latest `role:design` comment is the design. The builder writes the implementation plan when it starts, against the current main, and posts it on the PR as a `role:plan` comment; nobody approves it. This overrides any convention that commits specs or plans as files (such as `docs/specs/` and `docs/plans/`), and the file-saving steps of planning skills: post the content as the comment instead.
+- **Role comments** start with a hidden marker so the next role can find them: `<!-- role:design v1 -->`, `<!-- role:plan -->`, `<!-- role:build -->`, `<!-- role:review -->`. A revised design is a new comment with a higher version; the latest one counts. The design is posted on the issue; build and review post on the PR, and each also leaves a one-line pointer on the issue (no marker), so the issue shows the whole flow.
 - **Acceptance criteria** are part of the design comment, numbered and testable from the outside:
 
   ```markdown
@@ -166,12 +167,13 @@ The developer's approval of the design is the one human gate: `/unity:design` mo
   - AC2: An invalid email address shows an inline error and blocks submission
   ```
 
-  Every role refers to criteria by ID: tests are tagged `@AC2`, the test role reports coverage per criterion, review checks that each one is met.
+  Every role refers to criteria by ID: tests are tagged `@AC2`, review checks that each one is met, and `/unity:test` tests them against the running system.
 
 ### Testing responsibilities
 
 - **Build** owns unit tests, written test-first.
-- **Test** owns the integration tests, and never changes application code or unit tests.
+- **`/unity:test`** owns the integration tests, the E2E tests, or both, as chosen at `/unity:init` (`pipeline.js test-kinds` prints the choice), and never changes application code or unit tests. The builder and the reviewer leave them alone.
+- **A story never waits for integration or E2E tests.** Keep them out of the checks a story's PR must pass; a story that breaks one is dealt with by the next `/unity:test`.
 
 ### Integration testing
 
